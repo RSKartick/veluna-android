@@ -1,41 +1,22 @@
-*.iml
-.gradle
-/local.properties
-/.idea/
-.DS_Store
-/build
-/captures
-.externalNativeBuild
-.cxx
-local.properties
+# Gradle & Android build artifacts
+.gradle/
 .kotlin/
-
-# Mac
-.DS_Store
-
-# build folders
+.build-outputs/
 build/
 app/build/
-androidApp/build/
-composeApp/build/
-cast/build/
-cast-empty/build/
-crashlytics/build/
-crashlytics-empty/build/
-lastfm/build/
-lastfm-empty/build/
-*/build/
+captures/
+dist/
+*.apk
+*.ap_
+*.aab
+*.dex
 
-# Gradle
-.gradle/
+# Local machine configuration
+local.properties
 
-# Kotlin Multiplatform
-/.kotlin
-
-# Logs
-*.log
-
-# Reference source repositories (never commit)
-BitChord-main/
-ArchiveTune-main/
-PixelMusic-main/
+# IDE & OS files
+.idea/
+*.iml
+.DS_Store
+Thumbs.db
+*-debug.log

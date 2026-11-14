@@ -1,78 +1,42 @@
-# Veluna for Android
+# Veluna (Android)
 
-<p align="center">
-  <img src="veluna_icon.png" alt="Veluna Logo" width="100" />
-</p>
+[![Build & Release APK](../../actions/workflows/release-apk.yml/badge.svg)](../../actions/workflows/release-apk.yml)
+[![Download APK](https://img.shields.io/badge/Download-veluna--android.apk-EA580C?style=flat&logo=android&logoColor=white)](../../releases/latest)
 
-<p align="center">
-  A clean, minimalist music player for Android. Built with Jetpack Compose.
-</p>
+Native Android rewrite of Veluna built with Kotlin, Jetpack Compose, Material Design 3, Media3 ExoPlayer, Room, DataStore, and OkHttp.
 
-<p align="center">
-  Zero ads. Zero tracking. No accounts required.
-</p>
+## Download & Install (Android 8.0+)
 
----
+Prebuilt, installable APKs are published automatically on **GitHub Releases**:
 
-## Desktop Version
+- **[Open Latest Release & Download `veluna-android.apk`](../../releases/latest)**
+- Direct APK link (once the first GitHub Actions build completes): [`veluna-android.apk`](../../releases/latest/download/veluna-android.apk)
 
-Looking for the desktop client? Download Veluna for Windows, macOS, and Linux from the desktop repository:
-https://github.com/velunahq/veluna
+### Sideloading Instructions
 
----
+1. On your Android device (Android 8.0 / API 26 or newer), open the **[Latest Release](../../releases/latest)** page and tap **`veluna-android.apk`** under **Assets** to download it.
+2. Open the downloaded `.apk` file from your browser downloads or Files app.
+3. If Android asks for permission, tap **Settings** and enable **Allow from this source** (Install unknown apps).
+4. Tap **Install** and open **Veluna**.
+
+> **Note for Maintainers**: Every push to `main` / `master`, semantic tag (`v*`), or manual run in the **Actions** tab triggers `.github/workflows/release-apk.yml` to compile `:app:assembleDebug` and publish a verified `veluna-android.apk` directly to GitHub Releases.
 
 ## Features
 
-- Background playback with media session and lock screen controls
-- Audio streaming with low latency and gapless transitions
-- Synchronized and static lyrics display
-- Search across songs, albums, artists, and playlists
-- High-quality offline audio caching
-- Modern Material 3 interface with dynamic theming
-- Android Auto integration
-- Local backup and restore for playlists and preferences
-- Sleep timer and audio normalization support
+- **Home & Discovery**: Time-of-day greeting, mood/genre filter chips, pinned Shortcuts, Jump Back In, Familiar Artists, Quick Picks, and YouTube Music InnerTube shelves.
+- **Search & Moods**: Live debounced search suggestions, categorized results (Top, Songs, Videos, Albums, Artists, Playlists), search history, and Moods & Genres discovery tiles.
+- **Library & Local Music**: Local playlists with Photo Picker cover editing, `On Repeat` auto-playlist, `Liked Music`, saved albums, followed artists, offline track downloads, and SAF local audio file/folder playback.
+- **Immersive Player & Audio**: Media3 `MediaSessionService` background playback, dynamic artwork wash, Queue + Autoplay radio continuation, 10-band Equalizer presets, loudness normalization, playback speed, and sleep timer.
+- **Synced Lyrics & Comments**: Multi-provider lyrics waterfall (`Boidu`, `LyricsPlus`, `LRCLIB`, `YouTube Music`, `SimpMusic`) with click-to-seek, timing offset nudge, kana/hangul romanization, and YouTube track comments.
+- **Listening Stats & History**: Range filters, daily bar chart, 7x24 weekday-hour heatmap, streaks, top songs/artists/albums, and chronological listening history.
+- **Themes, Scrobbling & Backup**: 7 theme presets, Light/Dark/System modes, custom/artwork-adaptive accent colors, Last.fm & ListenBrainz scrobbling, M3U8/CSV/YouTube playlist import & export, and JSON backup/restore.
 
----
+## Build Locally
 
-## Download
+Open in Android Studio or build an installable APK locally with Gradle 9.3.1 (JDK 21):
 
-Get the latest release APK from the [Releases](https://github.com/velunahq/veluna-android/releases) page.
+```bash
+gradle :app:assembleDebug
+```
 
----
-
-## Building from Source
-
-### Prerequisites
-
-- Java Development Kit (JDK) 17 or higher
-- Android SDK with Platform 35 or higher installed
-
-### Build Steps
-
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/velunahq/veluna-android.git
-   cd veluna-android
-   ```
-
-2. Build the debug APK:
-   ```bash
-   ./gradlew assembleGithubDebug
-   ```
-
-3. The generated APK will be located at:
-   ```
-   app/build/outputs/apk/github/debug/app-github-debug.apk
-   ```
-
-4. Install to a connected device:
-   ```bash
-   adb install -r app/build/outputs/apk/github/debug/app-github-debug.apk
-   ```
-
----
-
-## License
-
-This project is licensed under the GNU General Public License v3.0 (GPL-3.0). See the [LICENSE](LICENSE) file for details.
+The output APK will be written to `app/build/outputs/apk/debug/app-debug.apk`.
