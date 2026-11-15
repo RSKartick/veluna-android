@@ -37,6 +37,7 @@ import com.example.model.RepeatMode
 import com.example.model.ResolvedStream
 import com.example.model.SongItem
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -58,6 +59,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.Request
 import java.io.File
 import java.io.FileOutputStream
+import java.security.MessageDigest
 
 @Immutable
 data class PlaybackUiState(
@@ -110,6 +112,7 @@ class PlayerController(
     private var mediaController: MediaController? = null
     private val controllerReady = CompletableDeferred<MediaController>()
     private var currentListenId: Long? = null
+    private var recordedListenVideoId: String? = null
     private var currentTrackStartedAtSecs: Long = 0L
     private var scrobbledCurrentTrack = false
     private var heardSecondsThisTrack = 0L
@@ -126,6 +129,7 @@ class PlayerController(
     private var prefetchJob: Job? = null
     private var autoplayJob: Job? = null
     private var radioJob: Job? = null
+    private var artworkAccentJob: Job? = null
     private val imageLoader = ImageLoader(context)
 
     init {
@@ -602,7 +606,10 @@ class PlayerController(
         val song = cur.queue.getOrNull(index) ?: return
         if (cur.nowPlaying != null) {
             finalizeCurrentTrackOutcome()
+            mediaController?.pause()
         }
+        currentListenId = null
+        recordedListenVideoId = null
         resolveJob?.cancel()
         prefetchJob?.cancel()
 
@@ -619,6 +626,7 @@ class PlayerController(
                 it.copy(
                     currentIndex = index,
                     nowPlaying = hydratedSong,
+                    isPlaying = false,
                     isBuffering = true,
                     errorMessage = null
                 )
@@ -629,7 +637,6 @@ class PlayerController(
             )
 
             extractArtworkAccent(hydratedSong.thumbnail)
-            recordListenStart(hydratedSong)
 
             // 1) Local audio file
             if (hydratedSong.isLocal && hydratedSong.localUri != null) {
@@ -647,7 +654,11 @@ class PlayerController(
             }
 
             // 3) Resolve prioritized stream candidates via Hedged InnerTube + Parallel Mirror Race
-            val resolved = innerTube.resolveStreamCandidates(hydratedSong.videoId, currentPrefs.audioQuality)
+            val resolved = innerTube.resolveStreamCandidates(
+                hydratedSong.videoId,
+                currentPrefs.audioQuality,
+                allowMirrorFallbacks = currentPrefs.allowMirrorFallbacks
+            )
             resolved.onSuccess { list ->
                 activeCandidates = list
                 tryCandidateStream(hydratedSong, 0)
@@ -675,7 +686,11 @@ class PlayerController(
         prefetchJob = scope.launch(Dispatchers.IO) {
             delay(900L)
             runCatching {
-                innerTube.resolveStreamCandidates(nextSong.videoId, currentPrefs.audioQuality)
+                innerTube.resolveStreamCandidates(
+                    nextSong.videoId,
+                    currentPrefs.audioQuality,
+                    allowMirrorFallbacks = currentPrefs.allowMirrorFallbacks
+                )
             }
         }
     }
@@ -702,6 +717,7 @@ class PlayerController(
         mimeTypeOverride: String?
     ) {
         val ctrl = mediaController ?: withTimeoutOrNull(5000L) { controllerReady.await() } ?: return
+        recordListenStart(song)
         val metadata = MediaMetadata.Builder()
             .setTitle(song.title)
             .setArtist(song.artists)
@@ -728,17 +744,25 @@ class PlayerController(
         _state.update { it.copy(streamClient = clientName, isBuffering = false, errorMessage = null) }
     }
 
-    private fun recordListenStart(song: SongItem) {
+    private suspend fun recordListenStart(song: SongItem) {
+        if (recordedListenVideoId == song.videoId) return
         heardSecondsThisTrack = 0L
         pendingFlushSecs = 0L
         scrobbledCurrentTrack = false
         val nowMs = System.currentTimeMillis()
         currentTrackStartedAtSecs = nowMs / 1000L
+        recordedListenVideoId = song.videoId
+        currentListenId = try {
+            withContext(Dispatchers.IO) {
+                dao.upsertListenSong(ListenSongEntity(song.videoId, repository.encodeSong(song)))
+                dao.insertListen(ListenEntity(videoId = song.videoId, playedAt = nowMs, secs = 0L))
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            null
+        }
         scope.launch(Dispatchers.IO) {
-            dao.upsertListenSong(ListenSongEntity(song.videoId, repository.encodeSong(song)))
-            currentListenId = dao.insertListen(
-                ListenEntity(videoId = song.videoId, playedAt = nowMs, secs = 0L)
-            )
             scrobbleClient.submitNowPlaying(song, currentPrefs)
             scrobbleClient.flushPendingScrobbles(nowMs)
         }
@@ -769,15 +793,16 @@ class PlayerController(
     }
 
     private fun extractArtworkAccent(url: String?) {
+        artworkAccentJob?.cancel()
         if (url.isNullOrBlank()) {
             _state.update { it.copy(artworkAccentColor = null) }
             return
         }
-        scope.launch(Dispatchers.IO) {
+        artworkAccentJob = scope.launch(Dispatchers.IO) {
             val bmp = loadBitmap(url) ?: return@launch
             val palette = Palette.from(bmp).generate()
             val swatch = palette.vibrantSwatch ?: palette.lightVibrantSwatch ?: palette.dominantSwatch
-            if (swatch != null) {
+            if (swatch != null && _state.value.nowPlaying?.thumbnail == url) {
                 _state.update { it.copy(artworkAccentColor = Color(swatch.rgb)) }
             }
         }
@@ -814,13 +839,20 @@ class PlayerController(
             }
 
             try {
-                val stream = innerTube.resolveStreamUrl(song.videoId, currentPrefs.audioQuality).getOrThrow()
+                val stream = innerTube.resolveStreamUrl(
+                    song.videoId,
+                    currentPrefs.audioQuality,
+                    allowMirrorFallbacks = currentPrefs.allowMirrorFallbacks
+                ).getOrThrow()
                 val ext = when {
                     "webm" in stream.mimeType || "opus" in stream.mimeType -> "opus"
                     else -> "m4a"
                 }
                 val dir = File(context.filesDir, "downloads").apply { mkdirs() }
-                val outFile = File(dir, "${song.videoId}.$ext")
+                val fileId = MessageDigest.getInstance("SHA-256")
+                    .digest(song.videoId.toByteArray(Charsets.UTF_8))
+                    .joinToString("") { byte -> (byte.toInt() and 0xff).toString(16).padStart(2, '0') }
+                val outFile = File(dir, "$fileId.$ext")
 
                 val req = Request.Builder()
                     .url(stream.url)
@@ -832,6 +864,8 @@ class PlayerController(
                     val body = resp.body ?: throw IllegalStateException("Empty body")
                     val total = body.contentLength()
                     var downloaded = 0L
+                    var lastUiProgressAt = System.nanoTime()
+                    var lastUiProgressBytes = 0L
                     val buf = ByteArray(16 * 1024)
                     body.byteStream().use { input ->
                         FileOutputStream(outFile).use { output ->
@@ -840,13 +874,26 @@ class PlayerController(
                                 if (read <= 0) break
                                 output.write(buf, 0, read)
                                 downloaded += read
-                                val pct = if (total > 0) (downloaded.toFloat() / total.toFloat()).coerceIn(0f, 1f) else 0.5f
-                                _downloads.update { map ->
-                                    map + (song.videoId to map.getValue(song.videoId).copy(
-                                        progress = pct,
-                                        bytesDownloaded = downloaded,
-                                        totalBytes = total
-                                    ))
+                                val now = System.nanoTime()
+                                if (downloaded - lastUiProgressBytes >= DOWNLOAD_PROGRESS_BYTE_INTERVAL &&
+                                    now - lastUiProgressAt >= DOWNLOAD_PROGRESS_TIME_INTERVAL_NANOS
+                                ) {
+                                    val pct = if (total > 0) {
+                                        (downloaded.toFloat() / total.toFloat()).coerceIn(0f, 1f)
+                                    } else {
+                                        0.5f
+                                    }
+                                    _downloads.update { map ->
+                                        map[song.videoId]?.let { progress ->
+                                            map + (song.videoId to progress.copy(
+                                                progress = pct,
+                                                bytesDownloaded = downloaded,
+                                                totalBytes = total
+                                            ))
+                                        } ?: map
+                                    }
+                                    lastUiProgressAt = now
+                                    lastUiProgressBytes = downloaded
                                 }
                             }
                         }
@@ -864,18 +911,24 @@ class PlayerController(
                     )
 
                     _downloads.update { map ->
-                        map + (song.videoId to map.getValue(song.videoId).copy(
-                            progress = 1f,
-                            status = DownloadStatus.COMPLETED
-                        ))
+                        map[song.videoId]?.let { progress ->
+                            map + (song.videoId to progress.copy(
+                                progress = 1f,
+                                status = DownloadStatus.COMPLETED
+                            ))
+                        } ?: map
                     }
                 }
-            } catch (t: Throwable) {
+            } catch (e: CancellationException) {
+                throw e
+            } catch (t: Exception) {
                 _downloads.update { map ->
-                    map + (song.videoId to map.getValue(song.videoId).copy(
-                        status = DownloadStatus.FAILED,
-                        error = t.message
-                    ))
+                    map[song.videoId]?.let { progress ->
+                        map + (song.videoId to progress.copy(
+                            status = DownloadStatus.FAILED,
+                            error = t.message
+                        ))
+                    } ?: map
                 }
             }
         }
@@ -887,5 +940,10 @@ class PlayerController(
             dao.deleteDownload(videoId)
             _downloads.update { it - videoId }
         }
+    }
+
+    private companion object {
+        const val DOWNLOAD_PROGRESS_BYTE_INTERVAL = 128L * 1024L
+        const val DOWNLOAD_PROGRESS_TIME_INTERVAL_NANOS = 250_000_000L
     }
 }

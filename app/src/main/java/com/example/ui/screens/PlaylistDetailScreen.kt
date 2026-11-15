@@ -47,6 +47,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -73,6 +74,11 @@ import com.example.ui.theme.velunaOutlinedFieldColors
 import com.example.ui.theme.velunaPrimaryButtonColors
 import com.example.ui.viewmodel.PlaylistDetailState
 import com.example.ui.viewmodel.PlaylistSortMode
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.IOException
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -94,6 +100,7 @@ fun PlaylistDetailScreen(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var showEditDialog by remember { mutableStateOf(false) }
     var showDeleteConfirm by remember { mutableStateOf(false) }
     var menuExpanded by remember { mutableStateOf(false) }
@@ -110,8 +117,16 @@ fun PlaylistDetailScreen(
     ) { uri: Uri? ->
         val content = pendingM3uContent
         if (uri != null && content != null) {
-            writeTextToUri(context, uri, content)
-            onStatusMessage(exportedM3uMsg)
+            scope.launch {
+                try {
+                    writeTextToUri(context, uri, content)
+                    onStatusMessage(exportedM3uMsg)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    onStatusMessage(context.getString(R.string.playlist_export_failed, e.message ?: ""))
+                }
+            }
         }
         pendingM3uContent = null
     }
@@ -121,8 +136,16 @@ fun PlaylistDetailScreen(
     ) { uri: Uri? ->
         val content = pendingCsvContent
         if (uri != null && content != null) {
-            writeTextToUri(context, uri, content)
-            onStatusMessage(exportedCsvMsg)
+            scope.launch {
+                try {
+                    writeTextToUri(context, uri, content)
+                    onStatusMessage(exportedCsvMsg)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    onStatusMessage(context.getString(R.string.playlist_export_failed, e.message ?: ""))
+                }
+            }
         }
         pendingCsvContent = null
     }
@@ -413,8 +436,10 @@ fun PlaylistDetailScreen(
     }
 }
 
-private fun writeTextToUri(context: Context, uri: Uri, content: String) {
-    runCatching {
-        context.contentResolver.openOutputStream(uri)?.bufferedWriter()?.use { it.write(content) }
+private suspend fun writeTextToUri(context: Context, uri: Uri, content: String) {
+    withContext(Dispatchers.IO) {
+        val output = context.contentResolver.openOutputStream(uri)
+            ?: throw IOException("Could not open the selected file")
+        output.bufferedWriter().use { it.write(content) }
     }
 }

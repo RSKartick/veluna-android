@@ -110,6 +110,32 @@ class BackupAndCsvTest {
     }
 
     @Test
+    fun m3uExport_keepsMetadataOnSingleLines() {
+        val m3u = repo.exportPlaylistAsM3u(
+            "List\n#EXTINF:999,Injected",
+            listOf(SongItem(videoId = "abc123", title = "Song\r\nhttps://evil.example", artists = "Artist\n#EXTM3U"))
+        )
+
+        assertThat(m3u.lines()).containsExactly(
+            "#EXTM3U",
+            "#PLAYLIST:List #EXTINF:999,Injected",
+            "#EXTINF:-1,Artist #EXTM3U - Song https://evil.example",
+            "https://music.youtube.com/watch?v=abc123",
+            ""
+        ).inOrder()
+    }
+
+    @Test
+    fun csvExport_makesFormulaLikeMetadataInert() {
+        val csv = VelunaRepository.formatPlaylistAsCsv(
+            listOf(SongItem(videoId = "abc123", title = "=HYPERLINK(\"https://example.com\")", artists = "  +SUM(1,1)"))
+        )
+
+        assertThat(csv).contains("'=HYPERLINK")
+        assertThat(csv).contains("'  +SUM")
+    }
+
+    @Test
     fun backupExportRedactsSecrets_andImportClampsDeduplicatesAndSupportsV1() = runBlocking {
         prefsRepo.setScrobblingConfig(
             enabled = true,

@@ -39,7 +39,12 @@ import com.example.ui.screens.settings.HiddenArtistsSection
 import com.example.ui.screens.settings.LyricsProvidersSection
 import com.example.ui.screens.settings.PlaybackSection
 import com.example.ui.screens.settings.ScrobblingSection
+import com.example.util.readContentUriText
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.IOException
 
 @Composable
 fun SettingsScreen(
@@ -93,12 +98,18 @@ fun SettingsScreen(
     ) { uri: Uri? ->
         if (uri != null) {
             scope.launch {
-                val payload = onBuildBackupJson()
-                runCatching {
-                    context.contentResolver.openOutputStream(uri)?.bufferedWriter()?.use { it.write(payload) }
+                try {
+                    val payload = onBuildBackupJson()
+                    withContext(Dispatchers.IO) {
+                        val output = context.contentResolver.openOutputStream(uri)
+                            ?: throw IOException("Could not open the selected file")
+                        output.bufferedWriter().use { it.write(payload) }
+                    }
                     onStatusMessage(exportedMsg)
-                }.onFailure {
-                    onStatusMessage(context.getString(R.string.settings_backup_export_failed, it.message ?: ""))
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    onStatusMessage(context.getString(R.string.settings_backup_export_failed, e.message ?: ""))
                 }
             }
         }
@@ -109,11 +120,14 @@ fun SettingsScreen(
     ) { uri: Uri? ->
         if (uri != null) {
             scope.launch {
-                val text = runCatching {
-                    context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
-                }.getOrNull()
-                if (!text.isNullOrBlank()) {
+                try {
+                    val text = readContentUriText(context, uri, MAX_BACKUP_BYTES)
+                    if (text.isBlank()) throw IllegalArgumentException("The selected file is empty")
                     onRestoreBackupJson(text)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    onStatusMessage(context.getString(R.string.settings_backup_restore_failed, e.message ?: ""))
                 }
             }
         }
@@ -218,3 +232,5 @@ fun SettingsScreen(
         }
     }
 }
+
+private const val MAX_BACKUP_BYTES = 16 * 1024 * 1024

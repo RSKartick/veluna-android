@@ -10,6 +10,7 @@ import com.example.model.TasteProfile
 import com.example.model.TasteSeed
 import com.google.common.truth.Truth.assertThat
 import com.google.firebase.firestore.FirebaseFirestoreException
+import com.google.firebase.firestore.FieldValue
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -124,6 +125,58 @@ class CloudSyncRepositoryRuleTest : FirestoreEmulatorTestBase() {
         assertThat(afterDelete.profile).isNull()
         assertThat(afterDelete.likedSongs).isEmpty()
         assertThat(afterDelete.playlists).isEmpty()
+    }
+
+    @Test
+    fun purgeExpiredCloudTombstones_deletesAllTracksBeforePlaylistParent() = runBlocking {
+        val uid = signInTestUser(ALICE_EMAIL)
+        val repo = CloudSyncRepository(firestore, auth)
+        val now = System.currentTimeMillis()
+        val expiredAt = now - 40L * 24L * 60L * 60L * 1000L
+        val playlist = firestore.collection("users").document(uid)
+            .collection("playlists").document("pl_expired")
+        val tracks = playlist.collection("tracks")
+
+        withTimeout(30_000L) {
+            playlist.set(
+                mapOf(
+                    "deleted" to true,
+                    "clientUpdatedAt" to expiredAt,
+                    "createdAt" to FieldValue.serverTimestamp(),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            repeat(2) { batchIndex ->
+                val batch = firestore.batch()
+                val start = batchIndex * 400
+                val end = minOf(start + 400, 450)
+                for (index in start until end) {
+                    val trackId = "trk_$index"
+                    batch.set(
+                        tracks.document(trackId),
+                        mapOf(
+                            "videoId" to trackId,
+                            "title" to "Track $index",
+                            "artists" to "Artist",
+                            "durationSecs" to 180,
+                            "explicit" to false,
+                            "position" to index,
+                            "addedAt" to expiredAt,
+                            "deleted" to false,
+                            "clientUpdatedAt" to expiredAt,
+                            "createdAt" to FieldValue.serverTimestamp(),
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    )
+                }
+                batch.commit().await()
+            }
+
+            repo.purgeExpiredCloudTombstones(uid, now - 30L * 24L * 60L * 60L * 1000L)
+        }
+
+        assertThat(tracks.get().await().documents).isEmpty()
+        assertThat(playlist.get().await().exists()).isFalse()
     }
 
     @Test

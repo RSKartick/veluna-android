@@ -9,6 +9,7 @@ import com.example.data.local.UserPrefsRepository
 import com.example.data.local.VelunaDao
 import com.example.data.local.VelunaUserPrefs
 import com.example.model.SongItem
+import com.example.util.readUtf8AtMost
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -259,7 +260,10 @@ class ScrobbleClient(
                 .header("Authorization", "Token $token")
                 .build()
             httpClient.newCall(req).execute().use { resp ->
-                parseListenBrainzResponse(resp.code, resp.body?.string().orEmpty())
+                parseListenBrainzResponse(
+                    resp.code,
+                    resp.body?.readUtf8AtMost(MAX_SCROBBLE_RESPONSE_BYTES).orEmpty()
+                )
             }
         } catch (e: IOException) {
             ScrobbleSubmitResult.Failure(retryable = true, reason = e.localizedMessage ?: "Network error")
@@ -301,7 +305,10 @@ class ScrobbleClient(
                 .post(form)
                 .build()
             httpClient.newCall(req).execute().use { resp ->
-                parseLastFmResponse(resp.code, resp.body?.string().orEmpty())
+                parseLastFmResponse(
+                    resp.code,
+                    resp.body?.readUtf8AtMost(MAX_SCROBBLE_RESPONSE_BYTES).orEmpty()
+                )
             }
         } catch (e: IOException) {
             ScrobbleSubmitResult.Failure(retryable = true, reason = e.localizedMessage ?: "Network error")
@@ -397,3 +404,5 @@ class ScrobbleClient(
         }
     }
 }
+
+private const val MAX_SCROBBLE_RESPONSE_BYTES = 1024L * 1024L

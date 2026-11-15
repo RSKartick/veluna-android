@@ -11,6 +11,7 @@ import com.example.model.ResolvedStream
 import com.example.model.SearchResults
 import com.example.model.SearchSuggestions
 import com.example.model.SongItem
+import com.example.util.readUtf8AtMost
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -171,7 +172,7 @@ class InnerTubeClient(
                         .build()
                     fastHttpClient.newCall(req).execute().use { resp ->
                         if (!resp.isSuccessful) return@use null
-                        val raw = resp.body?.string()?.removePrefix(")]}'") ?: return@use null
+                        val raw = resp.body?.readUtf8AtMost(MAX_VISITOR_RESPONSE_BYTES)?.removePrefix(")]}'") ?: return@use null
                         val match = Regex("""Cgt[A-Za-z0-9_\-]{10,}""").find(raw)?.value
                         if (match != null) cachedVisitorData = match
                         match
@@ -224,7 +225,7 @@ class InnerTubeClient(
 
         val activeClient = if (useFastClient) fastHttpClient else httpClient
         activeClient.newCall(req).execute().use { resp ->
-            val raw = resp.body?.string().orEmpty()
+            val raw = resp.body?.readUtf8AtMost(MAX_INNERTUBE_RESPONSE_BYTES).orEmpty()
             if (!resp.isSuccessful) {
                 throw IllegalStateException("InnerTube $endpoint HTTP ${resp.code}")
             }
@@ -382,17 +383,28 @@ class InnerTubeClient(
         InnerTubeParsers.parseCommentsPage(pageRoot)
     }
 
-    suspend fun resolveStreamUrl(videoId: String, quality: AudioQuality): Result<ResolvedStream> = runCatching {
-        val candidates = resolveStreamCandidates(videoId, quality).getOrElse { emptyList() }
-        candidates.firstOrNull { !it.isHls }
-            ?: candidates.firstOrNull()
-            ?: resolveMirrorStreamCandidates(videoId, quality).firstOrNull()
-            ?: throw IllegalStateException("No playable stream found for $videoId")
+    suspend fun resolveStreamUrl(
+        videoId: String,
+        quality: AudioQuality,
+        allowMirrorFallbacks: Boolean = false
+    ): Result<ResolvedStream> = runCatching {
+        val candidates = resolveStreamCandidates(videoId, quality, allowMirrorFallbacks).getOrElse { emptyList() }
+        val chosen = candidates.firstOrNull { !it.isHls } ?: candidates.firstOrNull()
+        chosen ?: if (allowMirrorFallbacks) {
+            resolveMirrorStreamCandidates(videoId, quality).firstOrNull()
+                ?: throw IllegalStateException("No playable stream found for $videoId")
+        } else {
+            throw IllegalStateException("No playable stream found for $videoId")
+        }
     }
 
-    suspend fun resolveStreamCandidates(videoId: String, quality: AudioQuality): Result<List<ResolvedStream>> =
+    suspend fun resolveStreamCandidates(
+        videoId: String,
+        quality: AudioQuality,
+        allowMirrorFallbacks: Boolean = false
+    ): Result<List<ResolvedStream>> =
         withContext(Dispatchers.IO) {
-            val cacheKey = "$videoId|${quality.name}"
+            val cacheKey = streamCacheKey(videoId, quality, allowMirrorFallbacks)
             val now = System.currentTimeMillis()
             synchronized(cacheLock) {
                 streamCache[cacheKey]?.takeIf { now - it.cachedAtMs < STREAM_CACHE_TTL_MS }?.let { cached ->
@@ -423,13 +435,15 @@ class InnerTubeClient(
 
                     // Hedged mirror fallback: triggers immediately if all InnerTube clients fail fast,
                     // or after 650ms if InnerTube is stalling on the user's network.
-                    val mirrorJob = async {
+                    val mirrorJob = if (allowMirrorFallbacks) async {
                         withTimeoutOrNull(650L) { innerExhausted.await() }
                         val mirrors = runCatching { resolveMirrorStreamCandidates(videoId, quality) }
                         channel.trySend(true to mirrors)
+                    } else {
+                        null
                     }
 
-                    var remaining = jobs.size + 1
+                    var remaining = jobs.size + (if (mirrorJob != null) 1 else 0)
                     var gotFirstSuccess = false
                     while (remaining > 0) {
                         val next = if (!gotFirstSuccess) {
@@ -451,7 +465,7 @@ class InnerTubeClient(
                         }
                         if (gotFirstSuccess && out.size >= 4) break
                     }
-                    mirrorJob.cancel()
+                    mirrorJob?.cancel()
                     jobs.forEach { it.cancel() }
                     channel.close()
                 }
@@ -621,7 +635,7 @@ class InnerTubeClient(
             }
 
             if (collected.isNotEmpty()) {
-                val cacheKey = "$videoId|${quality.name}"
+                val cacheKey = streamCacheKey(videoId, quality, allowMirrorFallbacks = true)
                 synchronized(cacheLock) {
                     streamCache[cacheKey] = CachedStreams(collected, System.currentTimeMillis())
                 }
@@ -643,7 +657,9 @@ class InnerTubeClient(
                 .build()
             fastHttpClient.newCall(req).execute().use { resp ->
                 if (!resp.isSuccessful) return@use
-                val root = json.parseToJsonElement(resp.body?.string().orEmpty()).jsonObject
+                val root = json.parseToJsonElement(
+                    resp.body?.readUtf8AtMost(MAX_MIRROR_RESPONSE_BYTES).orEmpty()
+                ).jsonObject
                 val streams = root["audioStreams"]?.jsonArray.orEmpty()
                 val parsed = streams.mapNotNull { el ->
                     val o = el.jsonObject
@@ -699,7 +715,9 @@ class InnerTubeClient(
                 .build()
             fastHttpClient.newCall(req).execute().use { resp ->
                 if (!resp.isSuccessful) return@use
-                val root = json.parseToJsonElement(resp.body?.string().orEmpty()).jsonObject
+                val root = json.parseToJsonElement(
+                    resp.body?.readUtf8AtMost(MAX_MIRROR_RESPONSE_BYTES).orEmpty()
+                ).jsonObject
                 val adaptive = root["adaptiveFormats"]?.jsonArray.orEmpty()
                 val parsed = adaptive.mapNotNull { el ->
                     val o = el.jsonObject
@@ -742,7 +760,14 @@ class InnerTubeClient(
         }
     }
 
+    private fun streamCacheKey(videoId: String, quality: AudioQuality, allowMirrorFallbacks: Boolean) =
+        "$videoId|${quality.name}|${if (allowMirrorFallbacks) "mirrors" else "primary"}"
+
     companion object {
+        private const val MAX_VISITOR_RESPONSE_BYTES = 1024L * 1024L
+        private const val MAX_INNERTUBE_RESPONSE_BYTES = 24L * 1024L * 1024L
+        private const val MAX_MIRROR_RESPONSE_BYTES = 8L * 1024L * 1024L
+
         private const val STREAM_CACHE_TTL_MS = 20L * 60L * 1000L
 
         fun fallbackDiscoveryHome(): HomePage = HomePage(

@@ -39,6 +39,7 @@ import com.example.model.TasteProfile
 import com.example.model.TopAlbumStat
 import com.example.model.TopArtistStat
 import com.example.model.TopSongStat
+import com.example.util.readContentUriText
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
@@ -506,7 +507,7 @@ class VelunaRepository(
                         coverUri = coverUri
                     )
                 )
-            } catch (_: Throwable) {
+            } catch (_: Exception) {
                 // Skip unreadable URI
             } finally {
                 runCatching { retriever.release() }
@@ -573,8 +574,13 @@ class VelunaRepository(
         defaultTitle: String,
         onProgress: (done: Int, total: Int, status: String) -> Unit
     ): Result<Long> = withContext(Dispatchers.IO) {
-        val text = context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
-            ?: return@withContext Result.failure(IllegalStateException("Could not read file"))
+        val text = try {
+            readContentUriText(context, uri, MAX_PLAYLIST_IMPORT_BYTES)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            return@withContext Result.failure(e)
+        }
 
         val queries = parseCsvOrM3uQueries(text)
         if (queries.isEmpty()) {
@@ -593,14 +599,14 @@ class VelunaRepository(
     }
 
     fun exportPlaylistAsM3u(title: String, tracks: List<SongItem>): String {
-        val sb = StringBuilder("#EXTM3U\n#PLAYLIST:$title\n")
+        val sb = StringBuilder("#EXTM3U\n#PLAYLIST:${m3uSingleLine(title)}\n")
         tracks.forEach { s ->
             val secs = s.durationSeconds.takeIf { it > 0 } ?: -1
-            sb.append("#EXTINF:$secs,${s.artists} - ${s.title}\n")
+            sb.append("#EXTINF:$secs,${m3uSingleLine(s.artists)} - ${m3uSingleLine(s.title)}\n")
             if (s.isLocal && s.localUri != null) {
-                sb.append("${s.localUri}\n")
+                sb.append("${m3uSingleLine(s.localUri)}\n")
             } else {
-                sb.append("https://music.youtube.com/watch?v=${s.videoId}\n")
+                sb.append("https://music.youtube.com/watch?v=${m3uSingleLine(s.videoId)}\n")
             }
         }
         return sb.toString()
@@ -917,6 +923,10 @@ class VelunaRepository(
     }
 
     companion object {
+        private const val MAX_PLAYLIST_IMPORT_BYTES = 5 * 1024 * 1024
+
+        private fun m3uSingleLine(value: String): String = value.replace(Regex("[\\r\\n\\u0000]+"), " ")
+
         fun redactPrefsForExport(prefs: VelunaUserPrefs): VelunaUserPrefs = prefs.copy(
             lastFmApiKey = "",
             lastFmApiSecret = "",
@@ -941,10 +951,13 @@ class VelunaRepository(
         }
 
         fun csvEscape(s: String): String {
-            return if (s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r')) {
-                "\"" + s.replace("\"", "\"\"") + "\""
+            val firstContent = s.firstOrNull { !it.isWhitespace() }
+            val formulaLike = firstContent == '=' || firstContent == '+' || firstContent == '-' || firstContent == '@'
+            val safe = if (formulaLike) "'$s" else s
+            return if (safe.contains(',') || safe.contains('"') || safe.contains('\n') || safe.contains('\r')) {
+                "\"" + safe.replace("\"", "\"\"") + "\""
             } else {
-                s
+                safe
             }
         }
 

@@ -7,6 +7,7 @@ import com.example.model.LyricLine
 import com.example.model.LyricWord
 import com.example.model.LyricsData
 import com.example.model.SongItem
+import com.example.util.readUtf8AtMost
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
@@ -301,7 +302,8 @@ class LyricsRepository(
         return runCatching {
             http.newCall(req).execute().use { resp ->
                 if (!resp.isSuccessful) return@use null
-                val body = resp.body?.string()?.takeIf { it.isNotBlank() } ?: return@use null
+                val body = resp.body?.readUtf8AtMost(MAX_LYRICS_RESPONSE_BYTES)
+                    ?.takeIf { it.isNotBlank() } ?: return@use null
                 json.parseToJsonElement(body)
             }
         }.getOrNull()
@@ -431,3 +433,5 @@ class LyricsRepository(
         return sb.toString()
     }
 }
+
+private const val MAX_LYRICS_RESPONSE_BYTES = 2L * 1024L * 1024L

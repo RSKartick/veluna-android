@@ -653,23 +653,25 @@ class CloudSyncRepository(
     suspend fun purgeExpiredCloudTombstones(userId: String, olderThanEpochMs: Long) {
         val userDoc = db.collection("users").document(userId)
         for (sub in listOf("liked_songs", "playlists", "taste_seeds", "hidden_artists")) {
-            runCatching {
+            while (true) {
                 val expired = userDoc.collection(sub)
                     .whereEqualTo("deleted", true)
                     .whereLessThan("clientUpdatedAt", olderThanEpochMs)
                     .limit(200)
                     .get()
                     .await()
-                if (!expired.isEmpty) {
-                    val batch = db.batch()
+                if (expired.isEmpty) break
+
+                if (sub == "playlists") {
+                    // Firestore does not cascade deletes; remove every nested track before its parent.
                     expired.documents.forEach { doc ->
-                        if (sub == "playlists") {
-                            // Best-effort subcollection tracks wipe before doc delete
-                            val tracks = doc.reference.collection("tracks").limit(200).get().await()
-                            tracks.documents.forEach { tDoc -> batch.delete(tDoc.reference) }
-                        }
-                        batch.delete(doc.reference)
+                        deleteCollectionInBatches(doc.reference.collection("tracks"))
                     }
+                }
+
+                expired.documents.chunked(400).forEach { docs ->
+                    val batch = db.batch()
+                    docs.forEach { doc -> batch.delete(doc.reference) }
                     batch.commit().await()
                 }
             }

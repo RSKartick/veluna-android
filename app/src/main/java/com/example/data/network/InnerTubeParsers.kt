@@ -32,17 +32,21 @@ object InnerTubeParsers {
 
     fun findAll(root: JsonElement?, key: String): List<JsonElement> {
         val out = mutableListOf<JsonElement>()
-        fun walk(node: JsonElement?) {
-            when (node) {
+        val pending = java.util.ArrayDeque<JsonElement>()
+        root?.let(pending::addLast)
+        while (pending.isNotEmpty()) {
+            when (val node = pending.removeLast()) {
                 is JsonObject -> {
                     node[key]?.let { out.add(it) }
-                    node.values.forEach { walk(it) }
+                    val children = node.values.toList()
+                    for (index in children.indices.reversed()) pending.addLast(children[index])
                 }
-                is JsonArray -> node.forEach { walk(it) }
+                is JsonArray -> {
+                    for (index in node.indices.reversed()) pending.addLast(node[index])
+                }
                 else -> {}
             }
         }
-        walk(root)
         return out
     }
 

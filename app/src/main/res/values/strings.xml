@@ -143,6 +143,7 @@
     <string name="playlist_export_csv">Export CSV</string>
     <string name="playlist_exported_m3u8">Exported M3U8 playlist</string>
     <string name="playlist_exported_csv">Exported CSV playlist</string>
+    <string name="playlist_export_failed">Export failed: %1$s</string>
     <string name="playlist_edit_details">Edit details &amp; cover</string>
     <string name="playlist_remove_dupes">Remove duplicates</string>
     <string name="playlist_delete">Delete playlist</string>
@@ -242,6 +243,7 @@
     <string name="settings_backup_restore">Restore</string>
     <string name="settings_backup_exported">Backup exported</string>
     <string name="settings_backup_export_failed">Export failed: %1$s</string>
+    <string name="settings_backup_restore_failed">Restore failed: %1$s</string>
     <string name="settings_legacy_backup_warning_title">Legacy v1 Backup Restored</string>
     <string name="settings_legacy_backup_warning_body">Older v1 backup files may contain plaintext scrobbling credentials. Delete old v1 backup files after creating a fresh v2 backup.</string>
 
