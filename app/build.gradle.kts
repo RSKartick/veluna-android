@@ -88,6 +88,12 @@ ksp {
     arg("room.schemaLocation", "$projectDir/schemas")
 }
 
+// Room's exported schema is consumed by MigrationTestHelper from debug assets.
+// Generate it before Gradle snapshots those assets for the unit-test variant.
+tasks.matching { it.name == "mergeDebugAssets" }.configureEach {
+    dependsOn("kspDebugKotlin")
+}
+
 dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
