@@ -40,7 +40,7 @@
         },
         "cornerRadiusDp": {
           "type": "integer",
-          "description": "UI corner radius in dp."
+          "description": "UI corner radius in dp (4..24)."
         },
         "audioQuality": {
           "type": "string",
@@ -97,195 +97,123 @@
     },
     "TasteSeedDoc": {
       "title": "TasteSeedDoc",
-      "description": "Cloud-synced favorite artist or song taste seed.",
+      "description": "Cloud-synced favorite artist or song taste seed with soft-delete tombstone support.",
       "type": "object",
       "properties": {
         "kind": {
           "type": "string",
-          "enum": ["ARTIST", "SONG"],
-          "description": "Seed category."
+          "enum": ["ARTIST", "SONG"]
         },
-        "name": {
-          "type": "string",
-          "description": "Artist or song name."
-        },
-        "subtitle": {
-          "type": "string",
-          "description": "Optional secondary descriptor."
-        },
-        "thumbnail": {
-          "type": "string",
-          "description": "Optional thumbnail URL."
-        },
-        "createdAt": {
-          "type": "string",
-          "format": "date-time",
-          "description": "Server creation timestamp written via FieldValue.serverTimestamp()."
-        },
-        "updatedAt": {
-          "type": "string",
-          "format": "date-time",
-          "description": "Server update timestamp written via FieldValue.serverTimestamp()."
-        }
+        "name": { "type": "string" },
+        "subtitle": { "type": "string" },
+        "thumbnail": { "type": "string" },
+        "deleted": { "type": "boolean" },
+        "clientUpdatedAt": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["kind", "name", "createdAt", "updatedAt"]
+      "required": ["deleted", "clientUpdatedAt", "updatedAt"]
     },
     "LikedSongDoc": {
       "title": "LikedSongDoc",
-      "description": "Cloud-synced liked song track metadata.",
+      "description": "Cloud-synced liked song track metadata with soft-delete tombstone support.",
       "type": "object",
       "properties": {
-        "title": {
-          "type": "string",
-          "description": "Track title."
-        },
-        "artists": {
-          "type": "string",
-          "description": "Comma-separated artist names."
-        },
-        "album": {
-          "type": "string",
-          "description": "Album title."
-        },
-        "albumId": {
-          "type": "string",
-          "description": "Album browse identifier."
-        },
-        "artistId": {
-          "type": "string",
-          "description": "Primary artist channel identifier."
-        },
-        "duration": {
-          "type": "string",
-          "description": "Formatted duration label."
-        },
-        "durationSecs": {
-          "type": "integer",
-          "description": "Duration in seconds."
-        },
-        "thumbnail": {
-          "type": "string",
-          "description": "Artwork URL."
-        },
-        "explicit": {
-          "type": "boolean",
-          "description": "Explicit content flag."
-        },
-        "likedAt": {
-          "type": "integer",
-          "description": "Client epoch millis when track was liked."
-        },
-        "createdAt": {
-          "type": "string",
-          "format": "date-time",
-          "description": "Server creation timestamp written via FieldValue.serverTimestamp()."
-        },
-        "updatedAt": {
-          "type": "string",
-          "format": "date-time",
-          "description": "Server update timestamp written via FieldValue.serverTimestamp()."
-        }
+        "title": { "type": "string" },
+        "artists": { "type": "string" },
+        "album": { "type": "string" },
+        "albumId": { "type": "string" },
+        "artistId": { "type": "string" },
+        "duration": { "type": "string" },
+        "durationSecs": { "type": "integer" },
+        "thumbnail": { "type": "string" },
+        "explicit": { "type": "boolean" },
+        "likedAt": { "type": "integer" },
+        "deleted": { "type": "boolean" },
+        "clientUpdatedAt": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["title", "artists", "durationSecs", "explicit", "likedAt", "createdAt", "updatedAt"]
+      "required": ["deleted", "clientUpdatedAt", "updatedAt"]
     },
     "SyncedPlaylistDoc": {
       "title": "SyncedPlaylistDoc",
-      "description": "Cloud-synced custom user playlist and its bounded ordered tracks.",
+      "description": "Cloud-synced custom user playlist metadata (tracks stored in tracks subcollection).",
       "type": "object",
       "properties": {
-        "title": {
-          "type": "string",
-          "description": "Playlist title."
-        },
-        "description": {
-          "type": "string",
-          "description": "Playlist description."
-        },
-        "coverUri": {
-          "type": "string",
-          "description": "Optional cover artwork URL."
-        },
-        "tracks": {
-          "type": "array",
-          "description": "Ordered list of up to 250 playlist track maps."
-        },
-        "clientUpdatedAt": {
-          "type": "integer",
-          "description": "Epoch millis of last playlist edit."
-        },
-        "createdAt": {
-          "type": "string",
-          "format": "date-time",
-          "description": "Server creation timestamp written via FieldValue.serverTimestamp()."
-        },
-        "updatedAt": {
-          "type": "string",
-          "format": "date-time",
-          "description": "Server update timestamp written via FieldValue.serverTimestamp()."
-        }
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "coverUri": { "type": "string" },
+        "deleted": { "type": "boolean" },
+        "clientUpdatedAt": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["title", "description", "tracks", "clientUpdatedAt", "createdAt", "updatedAt"]
+      "required": ["deleted", "clientUpdatedAt", "updatedAt"]
+    },
+    "SyncedPlaylistTrackDoc": {
+      "title": "SyncedPlaylistTrackDoc",
+      "description": "Ordered track document under /users/{uid}/playlists/{playlistKey}/tracks/{videoId}.",
+      "type": "object",
+      "properties": {
+        "videoId": { "type": "string" },
+        "title": { "type": "string" },
+        "artists": { "type": "string" },
+        "album": { "type": "string" },
+        "albumId": { "type": "string" },
+        "artistId": { "type": "string" },
+        "duration": { "type": "string" },
+        "durationSecs": { "type": "integer" },
+        "thumbnail": { "type": "string" },
+        "explicit": { "type": "boolean" },
+        "position": { "type": "integer" },
+        "addedAt": { "type": "integer" },
+        "deleted": { "type": "boolean" },
+        "clientUpdatedAt": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["deleted", "clientUpdatedAt", "updatedAt"]
     },
     "HiddenArtistDoc": {
       "title": "HiddenArtistDoc",
-      "description": "Cloud-synced hidden/blocked artist record.",
+      "description": "Cloud-synced hidden/blocked artist record with soft-delete tombstone support.",
       "type": "object",
       "properties": {
-        "name": {
-          "type": "string",
-          "description": "Artist name."
-        },
-        "channelId": {
-          "type": "string",
-          "description": "Optional artist channel identifier."
-        },
-        "blockedAt": {
-          "type": "integer",
-          "description": "Epoch millis when hidden."
-        },
-        "createdAt": {
-          "type": "string",
-          "format": "date-time",
-          "description": "Server creation timestamp written via FieldValue.serverTimestamp()."
-        },
-        "updatedAt": {
-          "type": "string",
-          "format": "date-time",
-          "description": "Server update timestamp written via FieldValue.serverTimestamp()."
-        }
+        "name": { "type": "string" },
+        "channelId": { "type": "string" },
+        "blockedAt": { "type": "integer" },
+        "deleted": { "type": "boolean" },
+        "clientUpdatedAt": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["name", "blockedAt", "createdAt", "updatedAt"]
+      "required": ["deleted", "clientUpdatedAt", "updatedAt"]
     }
   },
   "firestore": {
     "/users/{userId}": {
-      "schema": {
-        "$ref": "#/entities/UserProfile"
-      },
+      "schema": { "$ref": "#/entities/UserProfile" },
       "description": "Authenticated user profile, preferences, and onboarding state."
     },
     "/users/{userId}/taste_seeds/{seedId}": {
-      "schema": {
-        "$ref": "#/entities/TasteSeedDoc"
-      },
+      "schema": { "$ref": "#/entities/TasteSeedDoc" },
       "description": "User-selected favorite artist and song taste seeds."
     },
     "/users/{userId}/liked_songs/{videoId}": {
-      "schema": {
-        "$ref": "#/entities/LikedSongDoc"
-      },
+      "schema": { "$ref": "#/entities/LikedSongDoc" },
       "description": "Tracks liked by the authenticated user."
     },
     "/users/{userId}/playlists/{playlistKey}": {
-      "schema": {
-        "$ref": "#/entities/SyncedPlaylistDoc"
-      },
+      "schema": { "$ref": "#/entities/SyncedPlaylistDoc" },
       "description": "Custom playlists synced by the authenticated user."
     },
+    "/users/{userId}/playlists/{playlistKey}/tracks/{videoId}": {
+      "schema": { "$ref": "#/entities/SyncedPlaylistTrackDoc" },
+      "description": "Ordered tracks belonging to a synced playlist."
+    },
     "/users/{userId}/hidden_artists/{artistKey}": {
-      "schema": {
-        "$ref": "#/entities/HiddenArtistDoc"
-      },
+      "schema": { "$ref": "#/entities/HiddenArtistDoc" },
       "description": "Artists hidden from recommendations and autoplay."
     }
   }

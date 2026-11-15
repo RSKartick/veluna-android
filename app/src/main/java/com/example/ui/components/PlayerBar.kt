@@ -38,9 +38,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.R
 import com.example.model.Rating
 import com.example.playback.PlaybackPositionState
 import com.example.playback.PlaybackUiState
@@ -106,7 +108,7 @@ fun MiniPlayerBar(
                         modifier = Modifier.basicMarquee()
                     )
                     Text(
-                        text = song.artists.ifBlank { "Unknown Artist" },
+                        text = song.artists.ifBlank { stringResource(R.string.player_unknown_artist) },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
@@ -114,18 +116,20 @@ fun MiniPlayerBar(
                     )
                 }
 
-                IconButton(
-                    onClick = onToggleLike,
-                    modifier = Modifier
-                        .size(48.dp)
-                        .testTag("mini_player_like")
-                ) {
-                    Icon(
-                        imageVector = if (isLiked) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
-                        contentDescription = "Like track",
-                        tint = likeTint,
-                        modifier = Modifier.scale(likeScale)
-                    )
+                if (!song.isLocal) {
+                    IconButton(
+                        onClick = onToggleLike,
+                        modifier = Modifier
+                            .size(48.dp)
+                            .testTag("mini_player_like")
+                    ) {
+                        Icon(
+                            imageVector = if (isLiked) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
+                            contentDescription = stringResource(if (isLiked) R.string.player_unlike else R.string.player_like),
+                            tint = likeTint,
+                            modifier = Modifier.scale(likeScale)
+                        )
+                    }
                 }
 
                 IconButton(
@@ -150,7 +154,7 @@ fun MiniPlayerBar(
                         ) { playing ->
                             Icon(
                                 imageVector = if (playing) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                                contentDescription = if (playing) "Pause" else "Play",
+                                contentDescription = stringResource(if (playing) R.string.action_pause else R.string.action_play),
                                 tint = MaterialTheme.colorScheme.onSurface
                             )
                         }
@@ -165,7 +169,7 @@ fun MiniPlayerBar(
                 ) {
                     Icon(
                         imageVector = Icons.Rounded.SkipNext,
-                        contentDescription = "Next track",
+                        contentDescription = stringResource(R.string.player_next_track),
                         tint = MaterialTheme.colorScheme.onSurface
                     )
                 }

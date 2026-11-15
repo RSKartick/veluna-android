@@ -11,8 +11,15 @@ dist/
 *.aab
 *.dex
 
-# Local machine configuration
+# Local machine configuration & credentials
 local.properties
+app/google-services.json
+debug.keystore
+*.jks
+*.keystore
+
+# Node test tooling
+node_modules/
 
 # IDE & OS files
 .idea/
@@ -20,3 +27,7 @@ local.properties
 .DS_Store
 Thumbs.db
 *-debug.log
+
+# Keep Room exported schema snapshots tracked for MigrationTestHelper
+!app/schemas/
+!app/schemas/**

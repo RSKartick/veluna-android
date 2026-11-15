@@ -5,6 +5,7 @@ import android.content.Intent
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.provider.DocumentsContract
+import androidx.room.withTransaction
 import com.example.data.local.BlockedArtistEntity
 import com.example.data.local.DownloadedTrackEntity
 import com.example.data.local.FollowedArtistEntity
@@ -19,6 +20,7 @@ import com.example.data.local.SearchHistoryEntity
 import com.example.data.local.ShortcutEntity
 import com.example.data.local.UserPrefsRepository
 import com.example.data.local.VelunaDao
+import com.example.data.local.VelunaDatabase
 import com.example.data.local.VelunaUserPrefs
 import com.example.data.network.InnerTubeClient
 import com.example.model.BrowseItem
@@ -33,6 +35,7 @@ import com.example.model.PlaylistPage
 import com.example.model.SongItem
 import com.example.model.StatsRange
 import com.example.model.StatsSummary
+import com.example.model.TasteProfile
 import com.example.model.TopAlbumStat
 import com.example.model.TopArtistStat
 import com.example.model.TopSongStat
@@ -40,13 +43,17 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.EncodeDefault
+import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.File
+import java.security.MessageDigest
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
@@ -54,13 +61,63 @@ import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 @Serializable
+data class BackupSavedAlbum(
+    val albumId: String,
+    val title: String,
+    val subtitle: String? = null,
+    val thumbnail: String? = null,
+    val savedAt: Long = 0L
+)
+
+@Serializable
+data class BackupFollowedArtist(
+    val channelId: String,
+    val name: String,
+    val thumbnail: String? = null,
+    val subscribers: String? = null,
+    val followedAt: Long = 0L
+)
+
+@Serializable
+data class BackupShortcut(
+    val id: String,
+    val kind: String,
+    val title: String,
+    val subtitle: String? = null,
+    val thumbnail: String? = null,
+    val position: Int = 0
+)
+
+@Serializable
+data class BackupSearchHistoryItem(
+    val query: String,
+    val searchedAt: Long = 0L
+)
+
+@Serializable
+data class BackupListenEntry(
+    val videoId: String,
+    val playedAt: Long,
+    val secs: Long,
+    val song: SongItem? = null
+)
+
+@OptIn(ExperimentalSerializationApi::class)
+@Serializable
 data class VelunaBackupPayload(
-    val version: Int = 1,
+    @EncodeDefault(EncodeDefault.Mode.ALWAYS)
+    val version: Int = 2,
     val exportedAt: Long = System.currentTimeMillis(),
     val prefs: VelunaUserPrefs,
     val playlists: List<BackupPlaylist> = emptyList(),
     val likedSongs: List<SongItem> = emptyList(),
-    val blockedArtists: List<String> = emptyList()
+    val blockedArtists: List<String> = emptyList(),
+    val tasteProfile: TasteProfile? = null,
+    val savedAlbums: List<BackupSavedAlbum> = emptyList(),
+    val followedArtists: List<BackupFollowedArtist> = emptyList(),
+    val shortcuts: List<BackupShortcut> = emptyList(),
+    val searchHistory: List<BackupSearchHistoryItem> = emptyList(),
+    val listens: List<BackupListenEntry> = emptyList()
 )
 
 @Serializable
@@ -70,11 +127,17 @@ data class BackupPlaylist(
     val tracks: List<SongItem>
 )
 
+data class BackupRestoreResult(
+    val restoredPlaylists: Int,
+    val sourceVersion: Int
+)
+
 class VelunaRepository(
     private val context: Context,
     private val dao: VelunaDao,
     private val prefsRepo: UserPrefsRepository,
-    val innerTube: InnerTubeClient
+    val innerTube: InnerTubeClient,
+    private val database: VelunaDatabase? = null
 ) {
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -195,6 +258,7 @@ class VelunaRepository(
     fun observeIsArtistFollowed(channelId: String): Flow<Boolean> = dao.observeIsArtistFollowed(channelId)
 
     suspend fun toggleLike(song: SongItem): Boolean {
+        if (song.isLocal || song.videoId.startsWith(LOCAL_SONG_PREFIX)) return false
         val liked = dao.isSongLiked(song.videoId)
         if (liked) {
             dao.deleteLikedSong(song.videoId)
@@ -205,7 +269,10 @@ class VelunaRepository(
         }
     }
 
-    suspend fun isLiked(videoId: String): Boolean = dao.isSongLiked(videoId)
+    suspend fun isLiked(videoId: String): Boolean {
+        if (videoId.startsWith(LOCAL_SONG_PREFIX)) return false
+        return dao.isSongLiked(videoId)
+    }
 
     suspend fun toggleSaveAlbum(album: com.example.model.AlbumPage) {
         val saved = dao.isAlbumSaved(album.id)
@@ -265,6 +332,7 @@ class VelunaRepository(
     }
 
     suspend fun addTrackToPlaylist(playlistId: Long, song: SongItem, skipDuplicates: Boolean = true): Boolean {
+        if (song.isLocal || song.videoId.startsWith(LOCAL_SONG_PREFIX)) return false
         val existing = dao.getPlaylistTracks(playlistId)
         if (skipDuplicates && existing.any { it.videoId == song.videoId }) return false
         val pos = dao.nextPlaylistPosition(playlistId)
@@ -300,15 +368,14 @@ class VelunaRepository(
         when {
             id == ON_REPEAT_ID -> {
                 val thirtyDaysAgo = System.currentTimeMillis() - 30L * 24 * 3600 * 1000
-                val listens = dao.getListensSince(thirtyDaysAgo)
-                val songsMap = dao.getAllListenSongs().associateBy { it.videoId }
-                val counts = listens.groupBy { it.videoId }
-                    .mapValues { (_, list) -> list.size to list.sumOf { it.secs } }
-                    .entries
-                    .sortedWith(compareByDescending<Map.Entry<String, Pair<Int, Long>>> { it.value.first }.thenByDescending { it.value.second })
-                    .take(25)
-                val tracks = counts.mapNotNull { (vid, _) ->
-                    songsMap[vid]?.let { decodeSong(it.songJson) }
+                val topRows = dao.topSongsSince(thirtyDaysAgo, 25)
+                val songsMap = if (topRows.isNotEmpty()) {
+                    dao.getListenSongsByIds(topRows.map { it.videoId }).associateBy { it.videoId }
+                } else {
+                    emptyMap()
+                }
+                val tracks = topRows.mapNotNull { row ->
+                    songsMap[row.videoId]?.let { decodeSong(it.songJson) }
                 }
                 Result.success(
                     PlaylistPage(
@@ -323,9 +390,9 @@ class VelunaRepository(
                 )
             }
             id == LIKED_MUSIC_ID -> {
-                val tracks = dao.getLikedSongsOnce().mapNotNull {
-                    decodeSong(it.songJson)?.copy(rating = com.example.model.Rating.LIKE)
-                }
+                val tracks = dao.getLikedSongsOnce()
+                    .filter { !it.videoId.startsWith(LOCAL_SONG_PREFIX) }
+                    .mapNotNull { decodeSong(it.songJson)?.copy(rating = com.example.model.Rating.LIKE) }
                 Result.success(
                     PlaylistPage(
                         id = LIKED_MUSIC_ID,
@@ -539,11 +606,43 @@ class VelunaRepository(
         return sb.toString()
     }
 
-    // --- Backup & Restore ---
-    suspend fun safeExportBackupJson(prefs: VelunaUserPrefs): String = withContext(Dispatchers.IO) {
+    fun exportPlaylistAsCsv(tracks: List<SongItem>): String = formatPlaylistAsCsv(tracks)
+
+    // --- Backup & Restore (v2 with v1 compatibility) ---
+    suspend fun exportBackupJson(prefs: VelunaUserPrefs): String = withContext(Dispatchers.IO) {
+        val sanitizedPrefs = redactPrefsForExport(prefs)
         val playlistRows = dao.getPlaylistsOnce()
-        val likedRows = dao.getLikedSongsOnce().mapNotNull { decodeSong(it.songJson) }
+        val likedRows = dao.getLikedSongsOnce()
+            .filter { !it.videoId.startsWith(LOCAL_SONG_PREFIX) }
+            .mapNotNull { decodeSong(it.songJson) }
         val blockedRows = dao.getBlockedArtistsOnce().map { it.name }
+        val tasteProfile = prefsRepo.tasteProfileFlow.first()
+        val savedAlbums = dao.getSavedAlbumsOnce().map {
+            BackupSavedAlbum(it.albumId, it.title, it.subtitle, it.thumbnail, it.savedAt)
+        }
+        val followedArtists = dao.getFollowedArtistsOnce().map {
+            BackupFollowedArtist(it.channelId, it.name, it.thumbnail, it.subscribers, it.followedAt)
+        }
+        val shortcuts = dao.getShortcutsOnce().map {
+            BackupShortcut(it.id, it.kind, it.title, it.subtitle, it.thumbnail, it.position)
+        }
+        val searchHistory = dao.getSearchHistoryOnce(100).map {
+            BackupSearchHistoryItem(it.query, it.searchedAt)
+        }
+        val ninetyDaysAgo = System.currentTimeMillis() - 90L * 24L * 3600L * 1000L
+        val recentListens = dao.getListensSince(ninetyDaysAgo)
+        val listenSongsMap = if (recentListens.isNotEmpty()) {
+            dao.getListenSongsByIds(recentListens.map { it.videoId }.distinct())
+                .associate { it.videoId to decodeSong(it.songJson) }
+        } else emptyMap()
+        val listenEntries = recentListens.map {
+            BackupListenEntry(
+                videoId = it.videoId,
+                playedAt = it.playedAt,
+                secs = it.secs,
+                song = listenSongsMap[it.videoId]
+            )
+        }
 
         val playlists = playlistRows.map { pl ->
             val tracks = dao.getPlaylistTracks(pl.id).mapNotNull { decodeSong(it.songJson) }
@@ -552,31 +651,101 @@ class VelunaRepository(
 
         json.encodeToString(
             VelunaBackupPayload(
-                prefs = prefs,
+                version = 2,
+                exportedAt = System.currentTimeMillis(),
+                prefs = sanitizedPrefs,
                 playlists = playlists,
                 likedSongs = likedRows,
-                blockedArtists = blockedRows
+                blockedArtists = blockedRows,
+                tasteProfile = tasteProfile,
+                savedAlbums = savedAlbums,
+                followedArtists = followedArtists,
+                shortcuts = shortcuts,
+                searchHistory = searchHistory,
+                listens = listenEntries
             )
         )
     }
 
-    suspend fun importBackupJson(rawJson: String): Result<Int> = withContext(Dispatchers.IO) {
+    suspend fun importBackupJson(rawJson: String): Result<BackupRestoreResult> = withContext(Dispatchers.IO) {
         runCatching {
             val payload = json.decodeFromString<VelunaBackupPayload>(rawJson)
-            prefsRepo.applyBackup(payload.prefs)
-            payload.likedSongs.forEach { song ->
-                dao.insertLikedSong(LikedSongEntity(song.videoId, encodeSong(song)))
+            val blockWrite: suspend () -> Int = {
+                prefsRepo.applyBackup(clampBackupPrefs(payload.prefs))
+                payload.tasteProfile?.let { prefsRepo.saveTasteProfile(it) }
+
+                payload.likedSongs
+                    .filter { !it.isLocal && !it.videoId.startsWith(LOCAL_SONG_PREFIX) }
+                    .forEach { song ->
+                        dao.insertLikedSong(LikedSongEntity(song.videoId, encodeSong(song)))
+                    }
+                payload.blockedArtists.forEach { name ->
+                    if (name.isNotBlank()) {
+                        dao.insertBlockedArtist(BlockedArtistEntity(name.trim()))
+                    }
+                }
+                payload.savedAlbums.forEach { al ->
+                    dao.insertSavedAlbum(SavedAlbumEntity(al.albumId, al.title, al.subtitle, al.thumbnail, al.savedAt))
+                }
+                payload.followedArtists.forEach { ar ->
+                    dao.insertFollowedArtist(FollowedArtistEntity(ar.channelId, ar.name, ar.thumbnail, ar.subscribers, ar.followedAt))
+                }
+                payload.shortcuts.forEach { sc ->
+                    dao.upsertShortcut(ShortcutEntity(sc.id, sc.kind, sc.title, sc.subtitle, sc.thumbnail, sc.position))
+                }
+                payload.searchHistory.take(100).forEach { sh ->
+                    dao.upsertSearchHistory(SearchHistoryEntity(sh.query, sh.searchedAt))
+                }
+                payload.listens.forEach { l ->
+                    l.song?.let { song ->
+                        dao.upsertListenSong(ListenSongEntity(l.videoId, encodeSong(song)))
+                    }
+                    dao.insertListen(ListenEntity(videoId = l.videoId, playedAt = l.playedAt, secs = l.secs))
+                }
+
+                // Deduplicate playlists against existing ones using (normalizedTitle, trackSignature)
+                val existingSignatures = dao.getPlaylistsOnce().map { existing ->
+                    val existingTracks = dao.getPlaylistTracks(existing.id).map { it.videoId }
+                    normalizePlaylistTitle(existing.title) to playlistTrackSignature(existingTracks)
+                }.toMutableSet()
+
+                var count = 0
+                payload.playlists.forEach { pl ->
+                    val sigKey = normalizePlaylistTitle(pl.title) to playlistTrackSignature(pl.tracks.map { it.videoId })
+                    if (existingSignatures.add(sigKey)) {
+                        val now = System.currentTimeMillis()
+                        val id = dao.insertPlaylist(
+                            LocalPlaylistEntity(
+                                title = pl.title.trim().ifBlank { "Playlist" },
+                                description = pl.description.trim(),
+                                createdAt = now,
+                                updatedAt = now
+                            )
+                        )
+                        pl.tracks.forEachIndexed { idx, song ->
+                            if (!song.isLocal && !song.videoId.startsWith(LOCAL_SONG_PREFIX)) {
+                                dao.insertPlaylistTrack(
+                                    LocalPlaylistTrackEntity(
+                                        playlistId = id,
+                                        videoId = song.videoId,
+                                        songJson = encodeSong(song),
+                                        position = idx
+                                    )
+                                )
+                            }
+                        }
+                        count++
+                    }
+                }
+                count
             }
-            payload.blockedArtists.forEach { name ->
-                dao.insertBlockedArtist(BlockedArtistEntity(name))
+
+            val restoredCount = if (database != null) {
+                database.withTransaction { blockWrite() }
+            } else {
+                blockWrite()
             }
-            var count = 0
-            payload.playlists.forEach { pl ->
-                val id = createPlaylist(pl.title, pl.description)
-                pl.tracks.forEach { addTrackToPlaylist(id, it, skipDuplicates = false) }
-                count++
-            }
-            count
+            BackupRestoreResult(restoredPlaylists = restoredCount, sourceVersion = payload.version)
         }
     }
 
@@ -585,15 +754,12 @@ class VelunaRepository(
         val nowMs = System.currentTimeMillis()
         val daysCount = range.days
         val sinceMs = if (daysCount != null) nowMs - daysCount.toLong() * 86_400_000L else 0L
-        val allListens = dao.getAllListensAsc()
-        val songMap = dao.getAllListenSongs().mapNotNull { row ->
-            decodeSong(row.songJson)?.let { row.videoId to it }
-        }.toMap()
 
-        val inWindow = allListens.filter { it.playedAt >= sinceMs }
+        val inWindow = dao.getListensSince(sinceMs)
+        val totals = dao.getListenTotalsSince(sinceMs)
         val prevSecs = if (daysCount != null) {
             val prevStart = sinceMs - daysCount.toLong() * 86_400_000L
-            allListens.filter { it.playedAt in prevStart until sinceMs }.sumOf { it.secs }
+            dao.sumListenSecsInRange(prevStart, sinceMs)
         } else null
 
         val zone = ZoneId.systemDefault()
@@ -609,19 +775,14 @@ class VelunaRepository(
         }
 
         val heatmap = LongArray(7 * 24)
-        val songAgg = mutableMapOf<String, Pair<Int, Long>>()
-
         inWindow.forEach { l ->
             val zdt = Instant.ofEpochMilli(l.playedAt).atZone(zone)
             val key = zdt.toLocalDate().format(dayFmt)
             if (key in dailyMap || daysCount == null) {
                 dailyMap[key] = (dailyMap[key] ?: 0L) + l.secs
             }
-            val dow = zdt.dayOfWeek.value % 7 // 0=Sunday..6=Saturday
+            val dow = zdt.dayOfWeek.value % 7
             heatmap[dow * 24 + zdt.hour] += l.secs
-
-            val prev = songAgg[l.videoId] ?: (0 to 0L)
-            songAgg[l.videoId] = (prev.first + 1) to (prev.second + l.secs)
         }
 
         val dailySeries = dailyMap.entries.toList().takeLast(if (targetDays > 90) 90 else targetDays).map { (key, secs) ->
@@ -629,10 +790,17 @@ class VelunaRepository(
             DailyListening(dateKey = key, label = d?.format(labelFmt) ?: key, secs = secs)
         }
 
-        val topSongs = songAgg.entries.mapNotNull { (vid, agg) ->
-            val song = songMap[vid] ?: return@mapNotNull null
-            TopSongStat(song = song, plays = agg.first, secs = agg.second)
-        }.sortedWith(compareByDescending<TopSongStat> { it.plays }.thenByDescending { it.secs })
+        val topAggRows = dao.topSongsSince(sinceMs, 100)
+        val songMap = if (topAggRows.isNotEmpty()) {
+            dao.getListenSongsByIds(topAggRows.map { it.videoId })
+                .mapNotNull { row -> decodeSong(row.songJson)?.let { row.videoId to it } }
+                .toMap()
+        } else emptyMap()
+
+        val topSongs = topAggRows.mapNotNull { agg ->
+            val song = songMap[agg.videoId] ?: return@mapNotNull null
+            TopSongStat(song = song, plays = agg.plays, secs = agg.secs)
+        }
 
         val artistAgg = mutableMapOf<String, TopArtistStat>()
         val albumAgg = mutableMapOf<String, TopAlbumStat>()
@@ -657,14 +825,15 @@ class VelunaRepository(
             }
         }
 
-        val (curStreak, bestStreak) = computeStreaks(allListens, zone)
+        val allTimestamps = dao.getAllListenTimestampsAsc()
+        val (curStreak, bestStreak) = computeStreaksFromTimestamps(allTimestamps, zone)
 
         StatsSummary(
             range = range,
-            totalSecs = inWindow.sumOf { it.secs },
+            totalSecs = totals.totalSecs,
             prevSecs = prevSecs,
-            totalPlays = inWindow.size,
-            uniqueSongs = topSongs.size,
+            totalPlays = totals.totalPlays,
+            uniqueSongs = dao.countUniqueSongsSince(sinceMs),
             uniqueArtists = artistAgg.size,
             currentStreak = curStreak,
             bestStreak = bestStreak,
@@ -708,9 +877,9 @@ class VelunaRepository(
         grouped.entries.map { HistoryGroup(it.key, it.value) }
     }.flowOn(Dispatchers.Default)
 
-    private fun computeStreaks(listens: List<ListenEntity>, zone: ZoneId): Pair<Int, Int> {
-        if (listens.isEmpty()) return 0 to 0
-        val days = listens.map { Instant.ofEpochMilli(it.playedAt).atZone(zone).toLocalDate() }
+    private fun computeStreaksFromTimestamps(timestamps: List<Long>, zone: ZoneId): Pair<Int, Int> {
+        if (timestamps.isEmpty()) return 0 to 0
+        val days = timestamps.map { Instant.ofEpochMilli(it).atZone(zone).toLocalDate() }
             .distinct().sorted()
         var best = 1
         var run = 1
@@ -740,52 +909,107 @@ class VelunaRepository(
         return match?.groupValues?.getOrNull(1)
     }
 
-    private fun parseCsvOrM3uQueries(text: String): List<String> {
-        val lines = text.lines().map { it.trim() }.filter { it.isNotEmpty() }
-        if (lines.isEmpty()) return emptyList()
-
-        // M3U
-        if (lines.first().startsWith("#EXTM3U")) {
-            return lines.filter { it.startsWith("#EXTINF:") }
-                .mapNotNull { it.substringAfter(',', "").trim().takeIf(String::isNotBlank) }
-                .take(150)
-        }
-
-        // Exportify / generic CSV
-        val headerCols = splitCsvLine(lines.first()).map { it.lowercase() }
-        val trackIdx = headerCols.indexOfFirst { "track" in it || "title" in it || "song" in it }.takeIf { it >= 0 } ?: 0
-        val artistIdx = headerCols.indexOfFirst { "artist" in it }.takeIf { it >= 0 } ?: 1
-
-        return lines.drop(1).mapNotNull { line ->
-            val cols = splitCsvLine(line)
-            val title = cols.getOrNull(trackIdx)?.trim().orEmpty()
-            val artist = cols.getOrNull(artistIdx)?.trim().orEmpty()
-            if (title.isBlank()) null else "$title $artist".trim()
-        }.take(150)
-    }
-
-    private fun splitCsvLine(line: String): List<String> {
-        val out = mutableListOf<String>()
-        val cur = StringBuilder()
-        var inQuotes = false
-        for (ch in line) {
-            when {
-                ch == '"' -> inQuotes = !inQuotes
-                ch == ',' && !inQuotes -> {
-                    out.add(cur.toString())
-                    cur.clear()
-                }
-                else -> cur.append(ch)
-            }
-        }
-        out.add(cur.toString())
-        return out
-    }
-
     private fun formatSecs(secs: Long): String {
         if (secs <= 0) return "0:00"
         val m = secs / 60
         val s = secs % 60
         return "%d:%02d".format(m, s)
+    }
+
+    companion object {
+        fun redactPrefsForExport(prefs: VelunaUserPrefs): VelunaUserPrefs = prefs.copy(
+            lastFmApiKey = "",
+            lastFmApiSecret = "",
+            lastFmSessionKey = "",
+            listenBrainzToken = ""
+        )
+
+        fun clampBackupPrefs(prefs: VelunaUserPrefs): VelunaUserPrefs = redactPrefsForExport(
+            prefs.copy(
+                cornerRadiusDp = prefs.cornerRadiusDp.coerceIn(4, 24),
+                playbackSpeed = prefs.playbackSpeed.coerceIn(0.5f, 2.0f)
+            )
+        )
+
+        fun normalizePlaylistTitle(title: String): String =
+            title.trim().lowercase().replace(Regex("\\s+"), " ")
+
+        fun playlistTrackSignature(videoIds: List<String>): String {
+            val sorted = videoIds.sorted().joinToString(",")
+            val bytes = MessageDigest.getInstance("SHA-256").digest(sorted.toByteArray(Charsets.UTF_8))
+            return bytes.joinToString("") { "%02x".format(it) }
+        }
+
+        fun csvEscape(s: String): String {
+            return if (s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r')) {
+                "\"" + s.replace("\"", "\"\"") + "\""
+            } else {
+                s
+            }
+        }
+
+        fun formatPlaylistAsCsv(tracks: List<SongItem>): String {
+            val header = "title,artists,album,duration_secs,video_id"
+            val rows = tracks.map { s ->
+                listOf(
+                    csvEscape(s.title),
+                    csvEscape(s.artists),
+                    csvEscape(s.album.orEmpty()),
+                    s.durationSeconds.coerceAtLeast(0L).toString(),
+                    csvEscape(s.videoId)
+                ).joinToString(",")
+            }
+            return if (rows.isEmpty()) header else header + "\n" + rows.joinToString("\n")
+        }
+
+        fun parseCsvOrM3uQueries(text: String): List<String> {
+            val lines = text.lines().map { it.trim() }.filter { it.isNotEmpty() }
+            if (lines.isEmpty()) return emptyList()
+
+            if (lines.first().startsWith("#EXTM3U")) {
+                return lines.filter { it.startsWith("#EXTINF:") }
+                    .mapNotNull { it.substringAfter(',', "").trim().takeIf(String::isNotBlank) }
+                    .take(150)
+            }
+
+            val headerCols = splitCsvLine(lines.first()).map { it.lowercase() }
+            val trackIdx = headerCols.indexOfFirst { "track" in it || "title" in it || "song" in it }.takeIf { it >= 0 } ?: 0
+            val artistIdx = headerCols.indexOfFirst { "artist" in it }.takeIf { it >= 0 } ?: 1
+
+            return lines.drop(1).mapNotNull { line ->
+                val cols = splitCsvLine(line)
+                val title = cols.getOrNull(trackIdx)?.trim().orEmpty()
+                val artist = cols.getOrNull(artistIdx)?.trim().orEmpty()
+                if (title.isBlank()) null else "$title $artist".trim()
+            }.take(150)
+        }
+
+        fun splitCsvLine(line: String): List<String> {
+            val out = mutableListOf<String>()
+            val cur = StringBuilder()
+            var inQuotes = false
+            var i = 0
+            while (i < line.length) {
+                val ch = line[i]
+                when {
+                    ch == '"' -> {
+                        if (inQuotes && i + 1 < line.length && line[i + 1] == '"') {
+                            cur.append('"')
+                            i++
+                        } else {
+                            inQuotes = !inQuotes
+                        }
+                    }
+                    ch == ',' && !inQuotes -> {
+                        out.add(cur.toString())
+                        cur.clear()
+                    }
+                    else -> cur.append(ch)
+                }
+                i++
+            }
+            out.add(cur.toString())
+            return out
+        }
     }
 }

@@ -1,8 +1,6 @@
 package com.example.ui.screens
 
 import android.net.Uri
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -28,22 +26,14 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
-import androidx.compose.material.icons.rounded.AudioFile
-import androidx.compose.material.icons.rounded.CreateNewFolder
-import androidx.compose.material.icons.rounded.Delete
-import androidx.compose.material.icons.rounded.Download
-import androidx.compose.material.icons.rounded.PlayArrow
-import androidx.compose.material.icons.rounded.Shuffle
 import androidx.compose.material.icons.rounded.UploadFile
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ListItem
+import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -52,19 +42,18 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.example.R
 import com.example.model.BrowseItem
 import com.example.model.DownloadProgress
-import com.example.model.DownloadStatus
 import com.example.model.SongItem
 import com.example.ui.components.TrackRow
 import com.example.ui.components.VelunaArtwork
-import androidx.compose.material3.ListItemDefaults
-import androidx.compose.ui.graphics.Color
 import com.example.ui.theme.VelunaMotion
 import com.example.ui.theme.velunaFilterChipBorder
 import com.example.ui.theme.velunaFilterChipColors
@@ -95,19 +84,14 @@ fun LibraryScreen(
     modifier: Modifier = Modifier
 ) {
     var selectedTab by remember { mutableIntStateOf(0) }
-    val tabs = listOf("Playlists", "Liked Songs", "Albums", "Artists", "Downloads", "Local Music")
-
-    val pickFilesLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenMultipleDocuments()
-    ) { uris ->
-        if (uris.isNotEmpty()) onImportLocalFiles(uris)
-    }
-
-    val pickFolderLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocumentTree()
-    ) { treeUri ->
-        if (treeUri != null) onImportLocalFolder(treeUri)
-    }
+    val tabs = listOf(
+        "playlists" to stringResource(R.string.library_tab_playlists),
+        "liked_songs" to stringResource(R.string.library_tab_liked_songs),
+        "albums" to stringResource(R.string.library_tab_albums),
+        "artists" to stringResource(R.string.library_tab_artists),
+        "downloads" to stringResource(R.string.library_tab_downloads),
+        "local_music" to stringResource(R.string.library_tab_local_music)
+    )
 
     Box(
         modifier = modifier.fillMaxSize(),
@@ -118,7 +102,6 @@ fun LibraryScreen(
                 .widthIn(max = 840.dp)
                 .fillMaxSize()
         ) {
-            // Header
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -127,7 +110,7 @@ fun LibraryScreen(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "Your Library",
+                    text = stringResource(R.string.library_title),
                     style = MaterialTheme.typography.headlineMedium.copy(fontWeight = FontWeight.Bold),
                     color = MaterialTheme.colorScheme.onBackground,
                     maxLines = 1,
@@ -145,7 +128,7 @@ fun LibraryScreen(
                 ) {
                     Icon(Icons.Rounded.UploadFile, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text("Import", maxLines = 1, softWrap = false)
+                    Text(stringResource(R.string.library_import), maxLines = 1, softWrap = false)
                 }
                 Button(
                     onClick = onOpenCreatePlaylist,
@@ -157,11 +140,10 @@ fun LibraryScreen(
                 ) {
                     Icon(Icons.Rounded.Add, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(modifier = Modifier.width(4.dp))
-                    Text("New", maxLines = 1, softWrap = false)
+                    Text(stringResource(R.string.library_new), maxLines = 1, softWrap = false)
                 }
             }
 
-            // Category Filter Chips
             val chipColors = velunaFilterChipColors()
             Row(
                 modifier = Modifier
@@ -169,7 +151,7 @@ fun LibraryScreen(
                     .padding(horizontal = 16.dp, vertical = 4.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                tabs.forEachIndexed { idx, label ->
+                tabs.forEachIndexed { idx, (key, label) ->
                     val selected = selectedTab == idx
                     FilterChip(
                         selected = selected,
@@ -177,7 +159,7 @@ fun LibraryScreen(
                         colors = chipColors,
                         border = velunaFilterChipBorder(selected),
                         label = { Text(label, maxLines = 1, softWrap = false) },
-                        modifier = Modifier.testTag("library_tab_${label.lowercase().replace(' ', '_')}")
+                        modifier = Modifier.testTag("library_tab_$key")
                     )
                 }
             }
@@ -227,20 +209,21 @@ fun LibraryScreen(
 
                     1 -> {
                         if (likedSongs.isEmpty()) {
-                            EmptyLibraryNotice("No liked songs yet", "Tap the heart icon on any track to save it here.")
+                            EmptyLibraryNotice(
+                                title = stringResource(R.string.library_empty_liked_title),
+                                body = stringResource(R.string.library_empty_liked_body)
+                            )
                         } else {
+                            val likedTitle = stringResource(R.string.library_tab_liked_songs)
                             LazyColumn(
                                 contentPadding = PaddingValues(bottom = 28.dp),
                                 modifier = Modifier.fillMaxSize()
                             ) {
                                 item {
                                     PlayShuffleHeader(
-                                        countLabel = "${likedSongs.size} liked tracks",
-                                        onPlayAll = { onPlaySongs(likedSongs, 0, "Liked Music") },
-                                        onShuffleAll = {
-                                            val shuffled = likedSongs.shuffled()
-                                            onPlaySongs(shuffled, 0, "Liked Music")
-                                        }
+                                        countLabel = stringResource(R.string.library_liked_count, likedSongs.size),
+                                        onPlayAll = { onPlaySongs(likedSongs, 0, likedTitle) },
+                                        onShuffleAll = { onPlaySongs(likedSongs.shuffled(), 0, likedTitle) }
                                     )
                                 }
                                 items(likedSongs, key = { "liked_${it.videoId}" }) { song ->
@@ -249,7 +232,7 @@ fun LibraryScreen(
                                         isPlaying = nowPlayingId == song.videoId,
                                         onClick = {
                                             val idx = likedSongs.indexOfFirst { it.videoId == song.videoId }.coerceAtLeast(0)
-                                            onPlaySongs(likedSongs, idx, "Liked Music")
+                                            onPlaySongs(likedSongs, idx, likedTitle)
                                         },
                                         onMoreClick = { onTrackMore(song) },
                                         onLikeClick = { onToggleLike(song) },
@@ -265,7 +248,10 @@ fun LibraryScreen(
 
                     2 -> {
                         if (savedAlbums.isEmpty()) {
-                            EmptyLibraryNotice("No saved albums", "Open any album and tap Save to build your collection.")
+                            EmptyLibraryNotice(
+                                title = stringResource(R.string.library_empty_albums_title),
+                                body = stringResource(R.string.library_empty_albums_body)
+                            )
                         } else {
                             LazyColumn(
                                 contentPadding = PaddingValues(bottom = 28.dp),
@@ -298,7 +284,10 @@ fun LibraryScreen(
 
                     3 -> {
                         if (followedArtists.isEmpty()) {
-                            EmptyLibraryNotice("No followed artists", "Follow artists from their page to keep them close.")
+                            EmptyLibraryNotice(
+                                title = stringResource(R.string.library_empty_artists_title),
+                                body = stringResource(R.string.library_empty_artists_body)
+                            )
                         } else {
                             LazyColumn(
                                 contentPadding = PaddingValues(bottom = 28.dp),
@@ -330,225 +319,26 @@ fun LibraryScreen(
                         }
                     }
 
-                    4 -> {
-                        val activeList = activeDownloads.values.filter {
-                            it.status == DownloadStatus.DOWNLOADING ||
-                                it.status == DownloadStatus.QUEUED ||
-                                it.status == DownloadStatus.FAILED
-                        }
-                        if (activeList.isEmpty() && downloads.isEmpty()) {
-                            EmptyLibraryNotice("No offline downloads", "Use the download action in a track menu or player to save tracks offline.")
-                        } else {
-                            LazyColumn(
-                                contentPadding = PaddingValues(bottom = 28.dp),
-                                modifier = Modifier.fillMaxSize()
-                            ) {
-                                items(activeList, key = { "dl_active_${it.videoId}" }) { prog ->
-                                    Surface(
-                                        color = MaterialTheme.colorScheme.surfaceContainer,
-                                        contentColor = MaterialTheme.colorScheme.onSurface,
-                                        shape = MaterialTheme.shapes.medium,
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(horizontal = 16.dp, vertical = 6.dp)
-                                    ) {
-                                        Column(modifier = Modifier.padding(12.dp)) {
-                                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                                Icon(Icons.Rounded.Download, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                                                Spacer(modifier = Modifier.width(8.dp))
-                                                Column(modifier = Modifier.weight(1f)) {
-                                                    Text(prog.title, style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurface, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                                    Text(prog.error ?: prog.status.name, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                                }
-                                            }
-                                            Spacer(modifier = Modifier.height(6.dp))
-                                            LinearProgressIndicator(progress = { prog.progress }, modifier = Modifier.fillMaxWidth())
-                                        }
-                                    }
-                                }
+                    4 -> LibraryDownloadsTab(
+                        downloads = downloads,
+                        activeDownloads = activeDownloads,
+                        nowPlayingId = nowPlayingId,
+                        onPlaySongs = onPlaySongs,
+                        onTrackMore = onTrackMore,
+                        onDeleteDownload = onDeleteDownload
+                    )
 
-                                if (downloads.isNotEmpty()) {
-                                    item {
-                                        PlayShuffleHeader(
-                                            countLabel = "${downloads.size} offline track(s)",
-                                            onPlayAll = { onPlaySongs(downloads, 0, "Downloads") },
-                                            onShuffleAll = { onPlaySongs(downloads.shuffled(), 0, "Downloads") }
-                                        )
-                                    }
-                                }
-
-                                items(downloads, key = { "dl_done_${it.videoId}" }) { song ->
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Box(modifier = Modifier.weight(1f)) {
-                                            TrackRow(
-                                                song = song,
-                                                isPlaying = nowPlayingId == song.videoId,
-                                                isDownloaded = true,
-                                                onClick = {
-                                                    val idx = downloads.indexOfFirst { it.videoId == song.videoId }.coerceAtLeast(0)
-                                                    onPlaySongs(downloads, idx, "Downloads")
-                                                },
-                                                onMoreClick = { onTrackMore(song) }
-                                            )
-                                        }
-                                        IconButton(
-                                            onClick = { onDeleteDownload(song.videoId) },
-                                            modifier = Modifier.size(48.dp)
-                                        ) {
-                                            Icon(Icons.Rounded.Delete, contentDescription = "Delete download", tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    else -> {
-                        LazyColumn(
-                            contentPadding = PaddingValues(bottom = 28.dp),
-                            modifier = Modifier.fillMaxSize()
-                        ) {
-                            item {
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(horizontal = 16.dp, vertical = 8.dp),
-                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                                ) {
-                                    OutlinedButton(
-                                        onClick = { pickFilesLauncher.launch(arrayOf("audio/*")) },
-                                        colors = velunaOutlinedButtonColors(),
-                                        border = velunaOutlinedButtonBorder(),
-                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .heightIn(min = 48.dp)
-                                            .testTag("local_pick_files_btn")
-                                    ) {
-                                        Icon(Icons.Rounded.AudioFile, contentDescription = null, modifier = Modifier.size(18.dp))
-                                        Spacer(modifier = Modifier.width(6.dp))
-                                        Text("Add Files", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
-                                    }
-                                    Button(
-                                        onClick = { pickFolderLauncher.launch(null) },
-                                        colors = velunaPrimaryButtonColors(),
-                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .heightIn(min = 48.dp)
-                                            .testTag("local_pick_folder_btn")
-                                    ) {
-                                        Icon(Icons.Rounded.CreateNewFolder, contentDescription = null, modifier = Modifier.size(18.dp))
-                                        Spacer(modifier = Modifier.width(6.dp))
-                                        Text("Scan Folder", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
-                                    }
-                                }
-                            }
-
-                            if (localTracks.isEmpty()) {
-                                item {
-                                    EmptyLibraryNotice(
-                                        "No local audio files added",
-                                        "Pick MP3, FLAC, M4A, or Opus files or scan a folder using Android's secure file picker."
-                                    )
-                                }
-                            } else {
-                                item {
-                                    PlayShuffleHeader(
-                                        countLabel = "${localTracks.size} local track(s)",
-                                        onPlayAll = { onPlaySongs(localTracks, 0, "Local Music") },
-                                        onShuffleAll = { onPlaySongs(localTracks.shuffled(), 0, "Local Music") }
-                                    )
-                                }
-                                items(localTracks, key = { it.videoId }) { song ->
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Box(modifier = Modifier.weight(1f)) {
-                                            TrackRow(
-                                                song = song,
-                                                isPlaying = nowPlayingId == song.videoId,
-                                                onClick = {
-                                                    val idx = localTracks.indexOfFirst { it.videoId == song.videoId }.coerceAtLeast(0)
-                                                    onPlaySongs(localTracks, idx, "Local Music")
-                                                },
-                                                onMoreClick = { onTrackMore(song) }
-                                            )
-                                        }
-                                        IconButton(
-                                            onClick = { song.localUri?.let(onRemoveLocalTrack) },
-                                            modifier = Modifier.size(48.dp)
-                                        ) {
-                                            Icon(Icons.Rounded.Delete, contentDescription = "Remove local track", tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    else -> LibraryLocalMusicTab(
+                        localTracks = localTracks,
+                        nowPlayingId = nowPlayingId,
+                        onPlaySongs = onPlaySongs,
+                        onTrackMore = onTrackMore,
+                        onImportLocalFiles = onImportLocalFiles,
+                        onImportLocalFolder = onImportLocalFolder,
+                        onRemoveLocalTrack = onRemoveLocalTrack
+                    )
                 }
             }
-        }
-    }
-}
-
-@Composable
-private fun PlayShuffleHeader(
-    countLabel: String,
-    onPlayAll: () -> Unit,
-    onShuffleAll: () -> Unit
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Text(
-            text = countLabel,
-            style = MaterialTheme.typography.labelLarge,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f)
-        )
-        OutlinedButton(
-            onClick = onShuffleAll,
-            colors = velunaOutlinedButtonColors(),
-            border = velunaOutlinedButtonBorder(),
-            modifier = Modifier.heightIn(min = 48.dp)
-        ) {
-            Icon(Icons.Rounded.Shuffle, contentDescription = null, modifier = Modifier.size(18.dp))
-            Spacer(modifier = Modifier.width(6.dp))
-            Text("Shuffle", maxLines = 1, softWrap = false)
-        }
-        Button(
-            onClick = onPlayAll,
-            colors = velunaPrimaryButtonColors(),
-            modifier = Modifier.heightIn(min = 48.dp)
-        ) {
-            Icon(Icons.Rounded.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
-            Spacer(modifier = Modifier.width(4.dp))
-            Text("Play", maxLines = 1, softWrap = false)
-        }
-    }
-}
-
-@Composable
-private fun EmptyLibraryNotice(title: String, body: String) {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(32.dp),
-        contentAlignment = Alignment.Center
-    ) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text(
-                text = title,
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.onBackground,
-                textAlign = TextAlign.Center
-            )
-            Text(body, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
         }
     }
 }

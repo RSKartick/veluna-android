@@ -35,6 +35,8 @@ data class CloudTasteSeed(
     val name: String = "",
     val subtitle: String? = null,
     val thumbnail: String? = null,
+    val deleted: Boolean = false,
+    val clientUpdatedAt: Long = 0L,
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
 )
@@ -48,9 +50,12 @@ data class CloudLikedSong(
     val albumId: String? = null,
     val artistId: String? = null,
     val duration: String? = null,
+    val durationSecs: Long = 0L,
     val thumbnail: String? = null,
     val explicit: Boolean = false,
     val likedAt: Long = 0L,
+    val deleted: Boolean = false,
+    val clientUpdatedAt: Long = 0L,
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
 ) {
@@ -69,12 +74,52 @@ data class CloudLikedSong(
 }
 
 @IgnoreExtraProperties
+data class CloudPlaylistTrack(
+    @DocumentId val docId: String = "",
+    val videoId: String = "",
+    val title: String = "",
+    val artists: String = "",
+    val album: String? = null,
+    val albumId: String? = null,
+    val artistId: String? = null,
+    val duration: String? = null,
+    val durationSecs: Long = 0L,
+    val thumbnail: String? = null,
+    val explicit: Boolean = false,
+    val position: Int = 0,
+    val addedAt: Long = 0L,
+    val deleted: Boolean = false,
+    val clientUpdatedAt: Long = 0L,
+    @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null
+) {
+    fun toSongItem(): SongItem? {
+        val vid = videoId.ifBlank { docId }.takeIf { it.isNotBlank() } ?: return null
+        if (title.isBlank()) return null
+        return SongItem(
+            videoId = vid,
+            title = title,
+            artists = artists,
+            album = album,
+            albumId = albumId,
+            artistId = artistId,
+            duration = duration,
+            thumbnail = thumbnail,
+            explicit = explicit,
+            addedAt = addedAt.takeIf { it > 0L }
+        )
+    }
+}
+
+@IgnoreExtraProperties
 data class CloudPlaylist(
     @DocumentId val playlistKey: String = "",
     val title: String = "",
     val description: String = "",
     val coverUri: String? = null,
+    // Legacy array kept readable for one-time migration to subcollection tracks
     val tracks: List<Map<String, Any?>> = emptyList(),
+    val deleted: Boolean = false,
     val clientUpdatedAt: Long = 0L,
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
@@ -86,14 +131,26 @@ data class CloudHiddenArtist(
     val name: String = "",
     val channelId: String? = null,
     val blockedAt: Long = 0L,
+    val deleted: Boolean = false,
+    val clientUpdatedAt: Long = 0L,
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
+)
+
+data class CloudPlaylistWithTracks(
+    val playlist: CloudPlaylist,
+    val subcollectionTracks: List<CloudPlaylistTrack> = emptyList(),
+    val hasLegacyArrayTracks: Boolean = false
 )
 
 data class CloudAccountSnapshot(
     val profile: CloudUserProfile? = null,
     val tasteSeeds: List<CloudTasteSeed> = emptyList(),
     val likedSongs: List<CloudLikedSong> = emptyList(),
-    val playlists: List<CloudPlaylist> = emptyList(),
-    val hiddenArtists: List<CloudHiddenArtist> = emptyList()
+    val playlists: List<CloudPlaylistWithTracks> = emptyList(),
+    val hiddenArtists: List<CloudHiddenArtist> = emptyList(),
+    val maxLikedUpdatedAtMs: Long = 0L,
+    val maxSeedsUpdatedAtMs: Long = 0L,
+    val maxPlaylistsUpdatedAtMs: Long = 0L,
+    val maxHiddenUpdatedAtMs: Long = 0L
 )

@@ -39,10 +39,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.example.R
 import com.example.model.BrowseItem
 import com.example.model.BrowseKind
 import com.example.model.Rating
@@ -124,7 +126,7 @@ fun MediaSquareCard(
                 ) {
                     Icon(
                         imageVector = Icons.Rounded.PlayArrow,
-                        contentDescription = "Play",
+                        contentDescription = stringResource(R.string.action_play),
                         tint = MaterialTheme.colorScheme.onPrimary,
                         modifier = Modifier.padding(6.dp)
                     )
@@ -322,7 +324,7 @@ fun TrackRow(
                     Spacer(modifier = Modifier.width(4.dp))
                     Icon(
                         imageVector = Icons.Rounded.Explicit,
-                        contentDescription = "Explicit",
+                        contentDescription = stringResource(R.string.track_explicit),
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.size(15.dp)
                     )
@@ -331,7 +333,7 @@ fun TrackRow(
                     Spacer(modifier = Modifier.width(4.dp))
                     Icon(
                         imageVector = Icons.Rounded.DownloadDone,
-                        contentDescription = "Downloaded",
+                        contentDescription = stringResource(R.string.player_downloaded),
                         tint = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.size(15.dp)
                     )
@@ -342,7 +344,7 @@ fun TrackRow(
                 text = listOfNotNull(
                     song.artists.takeIf { it.isNotBlank() },
                     song.album?.takeIf { it.isNotBlank() }
-                ).joinToString(" • ").ifBlank { "Track" },
+                ).joinToString(" • ").ifBlank { stringResource(R.string.track_fallback_label) },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
@@ -360,7 +362,7 @@ fun TrackRow(
             )
         }
 
-        if (onLikeClick != null) {
+        if (onLikeClick != null && !song.isLocal) {
             IconButton(
                 onClick = onLikeClick,
                 modifier = Modifier
@@ -369,7 +371,7 @@ fun TrackRow(
             ) {
                 Icon(
                     imageVector = if (isLiked) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
-                    contentDescription = if (isLiked) "Unlike" else "Like",
+                    contentDescription = stringResource(if (isLiked) R.string.track_unlike else R.string.track_like),
                     tint = if (isLiked) Color(0xFFEF4444) else MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.scale(likeScale)
                 )
@@ -384,7 +386,7 @@ fun TrackRow(
         ) {
             Icon(
                 imageVector = Icons.Rounded.MoreVert,
-                contentDescription = "Track options",
+                contentDescription = stringResource(R.string.history_track_options),
                 tint = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }

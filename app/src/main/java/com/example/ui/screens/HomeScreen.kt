@@ -42,6 +42,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -87,14 +88,13 @@ fun HomeScreen(
     onOpenEditHome: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val greeting = remember(prefs.userDisplayName) {
-        val hour = LocalTime.now().hour
-        val prefix = when (hour) {
-            in 5..11 -> "Good morning"
-            in 12..16 -> "Good afternoon"
-            in 17..21 -> "Good evening"
-            else -> "Good night"
-        }
+    val prefix = when (LocalTime.now().hour) {
+        in 5..11 -> stringResource(R.string.home_good_morning)
+        in 12..16 -> stringResource(R.string.home_good_afternoon)
+        in 17..21 -> stringResource(R.string.home_good_evening)
+        else -> stringResource(R.string.home_good_night)
+    }
+    val greeting = remember(prefs.userDisplayName, prefix) {
         val name = prefs.userDisplayName.takeIf { it.isNotBlank() && it != "Listener" }
         if (name != null) "$prefix, $name" else prefix
     }
@@ -132,7 +132,7 @@ fun HomeScreen(
                     ) {
                         Image(
                             painter = painterResource(id = R.drawable.ic_veluna_mark_art),
-                            contentDescription = "Veluna",
+                            contentDescription = stringResource(R.string.app_name),
                             contentScale = ContentScale.Crop,
                             modifier = Modifier
                                 .size(38.dp)
@@ -148,7 +148,9 @@ fun HomeScreen(
                                 overflow = TextOverflow.Ellipsis
                             )
                             Text(
-                                text = if (homeState.moodsTitle != null) "Mood & Genre Mix" else "Veluna Music",
+                                text = stringResource(
+                                    if (homeState.moodsTitle != null) R.string.home_subtitle_mood else R.string.home_subtitle_default
+                                ),
                                 style = MaterialTheme.typography.labelMedium,
                                 color = MaterialTheme.colorScheme.primary,
                                 maxLines = 1,
@@ -166,7 +168,7 @@ fun HomeScreen(
                         ) {
                             Icon(
                                 imageVector = Icons.Rounded.History,
-                                contentDescription = "Listening history",
+                                contentDescription = stringResource(R.string.home_listening_history),
                                 tint = MaterialTheme.colorScheme.onBackground
                             )
                         }
@@ -178,7 +180,7 @@ fun HomeScreen(
                         ) {
                             Icon(
                                 imageVector = Icons.Rounded.Tune,
-                                contentDescription = "Customize home",
+                                contentDescription = stringResource(R.string.home_customize_home),
                                 tint = MaterialTheme.colorScheme.onBackground
                             )
                         }
@@ -194,7 +196,7 @@ fun HomeScreen(
                             if (cloudAuthState.isSignedIn && !cloudAuthState.photoUrl.isNullOrBlank()) {
                                 VelunaArtwork(
                                     url = cloudAuthState.photoUrl,
-                                    contentDescription = "Google account: ${cloudAuthState.displayName ?: "Signed in"}",
+                                    contentDescription = cloudAuthState.displayName ?: stringResource(R.string.home_account_settings),
                                     isCircle = true,
                                     modifier = Modifier
                                         .size(30.dp)
@@ -203,11 +205,9 @@ fun HomeScreen(
                             } else {
                                 Icon(
                                     imageVector = Icons.Rounded.AccountCircle,
-                                    contentDescription = if (cloudAuthState.isSignedIn) {
-                                        "Account settings"
-                                    } else {
-                                        "Sign in with Google"
-                                    },
+                                    contentDescription = stringResource(
+                                        if (cloudAuthState.isSignedIn) R.string.home_account_settings else R.string.home_google_signin
+                                    ),
                                     tint = if (cloudAuthState.isSignedIn) {
                                         MaterialTheme.colorScheme.primary
                                     } else {
@@ -235,7 +235,7 @@ fun HomeScreen(
                                 onClick = { onSelectChip(null) },
                                 colors = chipColors,
                                 border = velunaFilterChipBorder(allSelected),
-                                label = { Text("All", maxLines = 1, softWrap = false) },
+                                label = { Text(stringResource(R.string.home_chip_all), maxLines = 1, softWrap = false) },
                                 modifier = Modifier.testTag("home_chip_all")
                             )
                         }
@@ -261,7 +261,7 @@ fun HomeScreen(
             if (shortcuts.isNotEmpty()) {
                 item {
                     Column(modifier = Modifier.animateContentSize(VelunaMotion.expressiveSpatialSpring())) {
-                        SectionHeading(title = "Shortcuts")
+                        SectionHeading(title = stringResource(R.string.home_shortcuts))
                         val chunked = shortcuts.take(6).chunked(2)
                         Column(
                             verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -293,7 +293,11 @@ fun HomeScreen(
             if (jumpBack.isNotEmpty() && homeState.moodsTitle == null && homeState.selectedChipParams == null) {
                 item {
                     Column {
-                        SectionHeading(title = "Jump back in", actionLabel = "History", onActionClick = onOpenHistory)
+                        SectionHeading(
+                            title = stringResource(R.string.home_jump_back_in),
+                            actionLabel = stringResource(R.string.home_history_action),
+                            onActionClick = onOpenHistory
+                        )
                         LazyRow(
                             contentPadding = PaddingValues(horizontal = 10.dp),
                             horizontalArrangement = Arrangement.spacedBy(4.dp)
@@ -314,7 +318,7 @@ fun HomeScreen(
             if (familiarArtists.isNotEmpty() && homeState.moodsTitle == null && homeState.selectedChipParams == null) {
                 item {
                     Column {
-                        SectionHeading(title = "Familiar Artists")
+                        SectionHeading(title = stringResource(R.string.home_familiar_artists))
                         LazyRow(
                             contentPadding = PaddingValues(horizontal = 10.dp),
                             horizontalArrangement = Arrangement.spacedBy(4.dp)
@@ -360,7 +364,7 @@ fun HomeScreen(
                             verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
                             Text(
-                                text = "Could not load online feed",
+                                text = stringResource(R.string.home_feed_error_title),
                                 style = MaterialTheme.typography.titleMedium,
                                 color = MaterialTheme.colorScheme.onSurface
                             )
@@ -375,7 +379,7 @@ fun HomeScreen(
                             ) {
                                 Icon(Icons.Rounded.Refresh, contentDescription = null)
                                 Spacer(modifier = Modifier.width(6.dp))
-                                Text("Retry", maxLines = 1, softWrap = false)
+                                Text(stringResource(R.string.action_retry), maxLines = 1, softWrap = false)
                             }
                         }
                     }
@@ -397,9 +401,10 @@ fun HomeScreen(
                         placementSpec = VelunaMotion.expressiveIntOffsetSpring()
                     )
                 ) {
+                    val openLabel = stringResource(R.string.home_open_action)
                     SectionHeading(
                         title = section.title,
-                        actionLabel = if (!section.moreBrowseId.isNullOrBlank()) "Open" else null,
+                        actionLabel = if (!section.moreBrowseId.isNullOrBlank()) openLabel else null,
                         onActionClick = section.moreBrowseId?.let { bid ->
                             {
                                 onOpenBrowseItem(

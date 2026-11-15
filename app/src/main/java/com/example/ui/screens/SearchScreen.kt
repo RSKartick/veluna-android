@@ -36,9 +36,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.example.R
 import com.example.model.BrowseItem
 import com.example.model.BrowseKind
 import com.example.model.MoodTile
@@ -85,7 +87,7 @@ fun SearchScreen(
             OutlinedTextField(
                 value = state.query,
                 onValueChange = onQueryChange,
-                placeholder = { Text("Search songs, albums, artists…", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                placeholder = { Text(stringResource(R.string.search_placeholder), maxLines = 1, overflow = TextOverflow.Ellipsis) },
                 leadingIcon = { Icon(Icons.Rounded.Search, contentDescription = null) },
                 trailingIcon = {
                     if (state.query.isNotEmpty()) {
@@ -93,7 +95,7 @@ fun SearchScreen(
                             onClick = onClearSearch,
                             modifier = Modifier.size(48.dp).testTag("search_clear_btn")
                         ) {
-                            Icon(Icons.Rounded.Close, contentDescription = "Clear search")
+                            Icon(Icons.Rounded.Close, contentDescription = stringResource(R.string.search_clear))
                         }
                     }
                 },
@@ -121,7 +123,14 @@ fun SearchScreen(
                 }
 
                 state.results != null -> {
-                    val tabs = listOf("Top", "Songs", "Videos", "Albums", "Artists", "Playlists")
+                    val tabs = listOf(
+                        "top" to stringResource(R.string.search_tab_top),
+                        "songs" to stringResource(R.string.search_tab_songs),
+                        "videos" to stringResource(R.string.search_tab_videos),
+                        "albums" to stringResource(R.string.search_tab_albums),
+                        "artists" to stringResource(R.string.search_tab_artists),
+                        "playlists" to stringResource(R.string.search_tab_playlists)
+                    )
                     ScrollableTabRow(
                         selectedTabIndex = state.selectedCategoryTab,
                         containerColor = MaterialTheme.colorScheme.surface,
@@ -136,14 +145,14 @@ fun SearchScreen(
                             }
                         }
                     ) {
-                        tabs.forEachIndexed { idx, label ->
+                        tabs.forEachIndexed { idx, (key, label) ->
                             Tab(
                                 selected = state.selectedCategoryTab == idx,
                                 onClick = { onSelectCategory(idx) },
                                 selectedContentColor = MaterialTheme.colorScheme.primary,
                                 unselectedContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
                                 text = { Text(label, maxLines = 1, softWrap = false) },
-                                modifier = Modifier.testTag("search_tab_${label.lowercase()}")
+                                modifier = Modifier.testTag("search_tab_$key")
                             )
                         }
                     }
@@ -159,7 +168,10 @@ fun SearchScreen(
 
                     if (list.isEmpty()) {
                         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            Text("No results in ${tabs[state.selectedCategoryTab]}", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(
+                                text = stringResource(R.string.search_no_results, tabs[state.selectedCategoryTab].second),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
                         }
                     } else {
                         LazyColumn(
@@ -236,7 +248,7 @@ fun SearchScreen(
                                         onClick = { onQueryChange(suggestion) },
                                         modifier = Modifier.size(48.dp)
                                     ) {
-                                        Icon(Icons.Rounded.NorthWest, contentDescription = "Fill query")
+                                        Icon(Icons.Rounded.NorthWest, contentDescription = stringResource(R.string.search_fill_query))
                                     }
                                 },
                                 modifier = Modifier
@@ -297,11 +309,13 @@ fun SearchScreen(
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
                                         Text(
-                                            text = "Recent searches",
+                                            text = stringResource(R.string.search_recent),
                                             style = MaterialTheme.typography.titleMedium,
                                             color = MaterialTheme.colorScheme.onBackground
                                         )
-                                        TextButton(onClick = onClearHistory) { Text("Clear all", maxLines = 1, softWrap = false) }
+                                        TextButton(onClick = onClearHistory) {
+                                            Text(stringResource(R.string.search_clear_all), maxLines = 1, softWrap = false)
+                                        }
                                     }
                                     searchHistory.take(6).forEach { hist ->
                                         ListItem(
@@ -318,7 +332,7 @@ fun SearchScreen(
                                                     onClick = { onRemoveHistory(hist) },
                                                     modifier = Modifier.size(48.dp)
                                                 ) {
-                                                    Icon(Icons.Rounded.Close, contentDescription = "Remove")
+                                                    Icon(Icons.Rounded.Close, contentDescription = stringResource(R.string.search_remove))
                                                 }
                                             },
                                             modifier = Modifier

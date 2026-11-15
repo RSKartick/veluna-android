@@ -33,6 +33,7 @@ sealed interface GoogleSignInOutcome {
 
 object GoogleAuthHelper {
     private const val TAG = "Auth"
+    private const val RECENT_LOGIN_WINDOW_MS = 5L * 60L * 1000L
 
     tailrec fun Context.findActivity(): Activity? = when (this) {
         is Activity -> this
@@ -48,10 +49,6 @@ object GoogleAuthHelper {
         return id
     }
 
-    /**
-     * Silent auto sign-in at app startup for users who already authorized this app on this device.
-     * Uses a single GetGoogleIdOption inside GetCredentialRequest.
-     */
     suspend fun attemptAutoSignIn(context: Context): Result<FirebaseUser?> {
         Firebase.auth.currentUser?.let { existing ->
             return Result.success(existing)
@@ -105,10 +102,6 @@ object GoogleAuthHelper {
         }
     }
 
-    /**
-     * Interactive Google Sign-In triggered by user tap.
-     * Uses a single GetSignInWithGoogleOption inside GetCredentialRequest and an Activity context.
-     */
     suspend fun signInWithGoogle(context: Context): GoogleSignInOutcome {
         val activity = context.findActivity()
             ?: return GoogleSignInOutcome.Error("Unable to open Google Sign-In from this screen.")
@@ -161,6 +154,48 @@ object GoogleAuthHelper {
             Log.e(TAG, "Firebase Google authentication failed", e)
             GoogleSignInOutcome.Error(e.message ?: "Google Sign-In failed.")
         }
+    }
+
+    fun needsRecentSignIn(user: FirebaseUser, nowMs: Long = System.currentTimeMillis()): Boolean {
+        val lastSignIn = user.metadata?.lastSignInTimestamp ?: 0L
+        return lastSignIn <= 0L || (nowMs - lastSignIn) > RECENT_LOGIN_WINDOW_MS
+    }
+
+    suspend fun reauthenticateWithGoogle(context: Context, user: FirebaseUser): GoogleSignInOutcome {
+        val activity = context.findActivity()
+            ?: return GoogleSignInOutcome.Error("Re-authentication requires an active screen.")
+        val clientId = webClientId(context)
+        if (clientId.isBlank()) {
+            return GoogleSignInOutcome.Error("Google Sign-In is not configured for this build.")
+        }
+
+        val signInOption = GetSignInWithGoogleOption.Builder(clientId).build()
+        val request = GetCredentialRequest.Builder().addCredentialOption(signInOption).build()
+
+        return try {
+            val credentialManager = CredentialManager.create(activity)
+            val result = credentialManager.getCredential(activity, request)
+            val credential = result.credential
+            if (credential !is CustomCredential ||
+                credential.type != GoogleIdTokenCredential.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL
+            ) {
+                return GoogleSignInOutcome.Error("Unsupported credential returned by Google.")
+            }
+            val googleCred = GoogleIdTokenCredential.createFrom(credential.data)
+            val firebaseCred = GoogleAuthProvider.getCredential(googleCred.idToken, null)
+            user.reauthenticate(firebaseCred).await()
+            GoogleSignInOutcome.Success(user)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: GetCredentialCancellationException) {
+            GoogleSignInOutcome.Cancelled
+        } catch (e: Exception) {
+            GoogleSignInOutcome.Error(e.localizedMessage ?: "Re-authentication failed.")
+        }
+    }
+
+    suspend fun deleteAuthUser(user: FirebaseUser) {
+        user.delete().await()
     }
 
     suspend fun signOut(context: Context) {

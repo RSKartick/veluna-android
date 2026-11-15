@@ -48,6 +48,9 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -207,7 +210,7 @@ class PlayerController(
                     }
                     return
                 }
-                if (!triedMirrorsForCurrent) {
+                if (!triedMirrorsForCurrent && currentPrefs.allowMirrorFallbacks) {
                     triedMirrorsForCurrent = true
                     scope.launch {
                         val mirrors = innerTube.resolveMirrorStreamCandidates(song.videoId, currentPrefs.audioQuality)
@@ -236,30 +239,39 @@ class PlayerController(
         }
     }
 
+    @Suppress("OPT_IN_USAGE")
     private fun startTicker() {
         tickerJob?.cancel()
         tickerJob = scope.launch {
             var subTick = 0
-            while (true) {
-                val ctrl = mediaController
-                if (ctrl != null && (ctrl.isPlaying || _state.value.nowPlayingOpen || _state.value.isBuffering)) {
-                    val pos = ctrl.currentPosition.coerceAtLeast(0L)
-                    val dur = ctrl.duration.takeIf { it > 0 } ?: _positionState.value.durationMs
-                    val curPosState = _positionState.value
-                    if (curPosState.positionMs != pos || curPosState.durationMs != dur) {
-                        _positionState.value = PlaybackPositionState(positionMs = pos, durationMs = dur)
-                    }
-
-                    if (ctrl.isPlaying) {
-                        subTick++
-                        if (subTick >= 4) {
-                            subTick = 0
-                            recordOneSecondHeard()
+            kotlinx.coroutines.flow.combine(
+                _state.map { it.isPlaying },
+                _state.map { it.nowPlayingOpen },
+                _state.map { it.isBuffering }
+            ) { playing, open, buffering -> playing || open || buffering }
+                .distinctUntilChanged()
+                .collectLatest { active ->
+                    if (!active) return@collectLatest
+                    while (true) {
+                        val ctrl = mediaController
+                        if (ctrl != null) {
+                            val pos = ctrl.currentPosition.coerceAtLeast(0L)
+                            val dur = ctrl.duration.takeIf { it > 0 } ?: _positionState.value.durationMs
+                            val curPosState = _positionState.value
+                            if (curPosState.positionMs != pos || curPosState.durationMs != dur) {
+                                _positionState.value = PlaybackPositionState(positionMs = pos, durationMs = dur)
+                            }
+                            if (ctrl.isPlaying) {
+                                subTick++
+                                if (subTick >= 4) {
+                                    subTick = 0
+                                    recordOneSecondHeard()
+                                }
+                            }
                         }
+                        delay(250L)
                     }
                 }
-                delay(250L)
-            }
         }
     }
 
@@ -270,10 +282,12 @@ class PlayerController(
         if (pendingFlushSecs >= 15L) {
             flushListenSeconds()
         }
-        if (!scrobbledCurrentTrack && heardSecondsThisTrack >= 30L) {
+        val effectiveDurationSecs = (_positionState.value.durationMs / 1000L)
+            .takeIf { it > 0L } ?: song.durationSeconds
+        if (!scrobbledCurrentTrack && ScrobbleClient.shouldScrobbleTrack(effectiveDurationSecs, heardSecondsThisTrack)) {
             scrobbledCurrentTrack = true
             scope.launch(Dispatchers.IO) {
-                scrobbleClient.submitScrobble(song, currentTrackStartedAtSecs, currentPrefs)
+                scrobbleClient.enqueueScrobble(song, currentTrackStartedAtSecs, currentPrefs)
             }
         }
     }
@@ -482,6 +496,7 @@ class PlayerController(
     }
 
     fun toggleLike(song: SongItem) {
+        if (song.isLocal || song.videoId.startsWith(com.example.model.LOCAL_SONG_PREFIX)) return
         scope.launch {
             val liked = repository.toggleLike(song)
             val newRating = if (liked) Rating.LIKE else Rating.INDIFFERENT
@@ -725,6 +740,7 @@ class PlayerController(
                 ListenEntity(videoId = song.videoId, playedAt = nowMs, secs = 0L)
             )
             scrobbleClient.submitNowPlaying(song, currentPrefs)
+            scrobbleClient.flushPendingScrobbles(nowMs)
         }
     }
 

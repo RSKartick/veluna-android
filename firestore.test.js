@@ -53,6 +53,8 @@ function validLikedSongPayload(overrides = {}) {
     thumbnail: "https://lh3.googleusercontent.com/abc=w720-h720-l90-rj",
     explicit: false,
     likedAt: 1700000000000,
+    deleted: false,
+    clientUpdatedAt: 1700000000000,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
     ...overrides,
@@ -63,14 +65,37 @@ function validPlaylistPayload(overrides = {}) {
   return {
     title: "Late Night Drive",
     description: "Synth and ambient picks",
-    tracks: [
-      {
-        videoId: "dQw4w9WgXcQ",
-        title: "Track One",
-        artists: "Artist A",
-      },
-    ],
+    deleted: false,
     clientUpdatedAt: 1700000000000,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+    ...overrides,
+  };
+}
+
+function validPlaylistTrackPayload(overrides = {}) {
+  return {
+    videoId: "dQw4w9WgXcQ",
+    title: "Track One",
+    artists: "Artist A",
+    album: "Album A",
+    duration: "3:33",
+    durationSecs: 213,
+    explicit: false,
+    position: 0,
+    addedAt: 1700000000000,
+    deleted: false,
+    clientUpdatedAt: 1700000000000,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+    ...overrides,
+  };
+}
+
+function validTombstonePayload(overrides = {}) {
+  return {
+    deleted: true,
+    clientUpdatedAt: 1700000005000,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
     ...overrides,
@@ -101,7 +126,7 @@ beforeEach(async () => {
   }
 });
 
-test("Unauthenticated caller cannot read or write any collection", async () => {
+test("Unauthenticated caller cannot read or write any collection or subcollection", async () => {
   const unauthDb = testEnv.unauthenticatedContext().firestore();
   await assertFails(unauthDb.collection("users").doc(ALICE_UID).get());
   await assertFails(
@@ -112,6 +137,15 @@ test("Unauthenticated caller cannot read or write any collection", async () => {
   );
   await assertFails(
     unauthDb.collection("users").doc(ALICE_UID).collection("playlists").get()
+  );
+  await assertFails(
+    unauthDb
+      .collection("users")
+      .doc(ALICE_UID)
+      .collection("playlists")
+      .doc("pl_1")
+      .collection("tracks")
+      .get()
   );
   await assertFails(
     unauthDb.collection("users").doc(ALICE_UID).collection("taste_seeds").get()
@@ -148,36 +182,47 @@ test("Owner can create, read, and update their profile; shadow fields and userId
   );
 });
 
-test("Cross-user reads and writes are strictly rejected", async () => {
+test("Cross-user reads and writes are strictly rejected across collections and subcollections", async () => {
   const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const aliceUser = aliceDb.collection("users").doc(ALICE_UID);
+  await assertSucceeds(aliceUser.set(validProfilePayload(ALICE_UID)));
   await assertSucceeds(
-    aliceDb.collection("users").doc(ALICE_UID).set(validProfilePayload(ALICE_UID))
+    aliceUser.collection("liked_songs").doc("dQw4w9WgXcQ").set(validLikedSongPayload())
   );
   await assertSucceeds(
-    aliceDb
-      .collection("users")
-      .doc(ALICE_UID)
-      .collection("liked_songs")
+    aliceUser.collection("playlists").doc("pl_1").set(validPlaylistPayload())
+  );
+  await assertSucceeds(
+    aliceUser
+      .collection("playlists")
+      .doc("pl_1")
+      .collection("tracks")
       .doc("dQw4w9WgXcQ")
-      .set(validLikedSongPayload())
+      .set(validPlaylistTrackPayload())
   );
 
   const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
-  await assertFails(bobDb.collection("users").doc(ALICE_UID).get());
+  const bobTargetsAlice = bobDb.collection("users").doc(ALICE_UID);
+  await assertFails(bobTargetsAlice.get());
+  await assertFails(bobTargetsAlice.collection("liked_songs").get());
   await assertFails(
-    bobDb.collection("users").doc(ALICE_UID).collection("liked_songs").get()
+    bobTargetsAlice.collection("liked_songs").doc("dQw4w9WgXcQ").delete()
   );
   await assertFails(
-    bobDb
-      .collection("users")
-      .doc(ALICE_UID)
-      .collection("liked_songs")
-      .doc("dQw4w9WgXcQ")
-      .delete()
+    bobTargetsAlice.collection("playlists").doc("pl_1").collection("tracks").get()
   );
+  await assertFails(
+    bobTargetsAlice
+      .collection("playlists")
+      .doc("pl_1")
+      .collection("tracks")
+      .doc("other")
+      .set(validPlaylistTrackPayload())
+  );
+  await assertFails(bobTargetsAlice.delete());
 });
 
-test("Owner can manage liked_songs, playlists, taste_seeds, and hidden_artists", async () => {
+test("Owner can manage liked_songs, playlists + tracks subcollection, taste_seeds, and hidden_artists; rejects LOCAL tracks and legacy arrays", async () => {
   const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
   const userDoc = aliceDb.collection("users").doc(ALICE_UID);
 
@@ -186,16 +231,45 @@ test("Owner can manage liked_songs, playlists, taste_seeds, and hidden_artists",
   );
   await assertSucceeds(userDoc.collection("liked_songs").get());
 
-  await assertSucceeds(
-    userDoc.collection("playlists").doc("pl_night_drive").set(validPlaylistPayload())
+  // LOCAL-prefixed track IDs must be rejected on liked_songs and playlist tracks
+  await assertFails(
+    userDoc.collection("liked_songs").doc("LOCAL_abc").set(validLikedSongPayload())
   );
+
+  // Playlists must NOT carry legacy tracks array on create
+  await assertFails(
+    userDoc.collection("playlists").doc("pl_bad").set(
+      validPlaylistPayload({ tracks: [{ videoId: "abc", title: "X" }] })
+    )
+  );
+
+  const plRef = userDoc.collection("playlists").doc("pl_night_drive");
+  await assertSucceeds(plRef.set(validPlaylistPayload()));
   await assertSucceeds(userDoc.collection("playlists").get());
+
+  // Playlist update adding legacy tracks array must fail
+  await assertFails(
+    plRef.update({ tracks: [{ videoId: "abc" }], updatedAt: serverTimestamp() })
+  );
+
+  // Subcollection track create/update succeeds; LOCAL:* videoId rejected
+  const trkRef = plRef.collection("tracks").doc("dQw4w9WgXcQ");
+  await assertSucceeds(trkRef.set(validPlaylistTrackPayload()));
+  await assertSucceeds(plRef.collection("tracks").get());
+  await assertFails(
+    plRef
+      .collection("tracks")
+      .doc("trk_local_1")
+      .set(validPlaylistTrackPayload({ videoId: "LOCAL:content://audio/1" }))
+  );
 
   await assertSucceeds(
     userDoc.collection("taste_seeds").doc("seed_uc123").set({
       kind: "ARTIST",
       name: "Daft Punk",
       subtitle: "Electronic",
+      deleted: false,
+      clientUpdatedAt: 1700000000000,
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     })
@@ -205,6 +279,8 @@ test("Owner can manage liked_songs, playlists, taste_seeds, and hidden_artists",
     userDoc.collection("hidden_artists").doc("artist_abc").set({
       name: "Some Artist",
       blockedAt: 1700000000000,
+      deleted: false,
+      clientUpdatedAt: 1700000000000,
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     })
@@ -218,8 +294,110 @@ test("Owner can manage liked_songs, playlists, taste_seeds, and hidden_artists",
     userDoc.collection("taste_seeds").doc("bad_kind").set({
       kind: "PODCAST",
       name: "Bad",
+      deleted: false,
+      clientUpdatedAt: 1700000000000,
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     })
   );
+  await assertFails(
+    userDoc.collection("playlists").doc("pl_too_long").set(
+      validPlaylistPayload({ title: "A".repeat(121) })
+    )
+  );
+});
+
+test("Tombstone shapes succeed on create and update; malformed tombstones fail", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const userDoc = aliceDb.collection("users").doc(ALICE_UID);
+
+  // Tombstone create directly on liked_songs & taste_seeds
+  await assertSucceeds(
+    userDoc.collection("liked_songs").doc("removed_1").set(validTombstonePayload())
+  );
+  await assertSucceeds(
+    userDoc.collection("taste_seeds").doc("art_old").set(validTombstonePayload())
+  );
+
+  // Tombstone update on existing playlist & playlist track & hidden artist
+  const plRef = userDoc.collection("playlists").doc("pl_tomb");
+  await assertSucceeds(plRef.set(validPlaylistPayload()));
+  await assertSucceeds(
+    plRef.collection("tracks").doc("trk_1").set(validPlaylistTrackPayload({ videoId: "trk_1" }))
+  );
+  await assertSucceeds(
+    plRef.collection("tracks").doc("trk_1").update({
+      deleted: true,
+      clientUpdatedAt: 1700000009000,
+      updatedAt: serverTimestamp(),
+    })
+  );
+  await assertSucceeds(
+    plRef.update({
+      deleted: true,
+      clientUpdatedAt: 1700000009000,
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  const blkRef = userDoc.collection("hidden_artists").doc("blk_1");
+  await assertSucceeds(
+    blkRef.set({
+      name: "Blocked",
+      blockedAt: 1700000000000,
+      deleted: false,
+      clientUpdatedAt: 1700000000000,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    })
+  );
+  await assertSucceeds(
+    blkRef.update({
+      deleted: true,
+      clientUpdatedAt: 1700000010000,
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  // Invalid tombstones fail (extra field, deleted:false, negative timestamp)
+  await assertFails(
+    userDoc
+      .collection("liked_songs")
+      .doc("bad_tomb")
+      .set(validTombstonePayload({ extraField: "nope" }))
+  );
+  await assertFails(
+    userDoc
+      .collection("liked_songs")
+      .doc("bad_tomb_2")
+      .set(validTombstonePayload({ clientUpdatedAt: -1 }))
+  );
+});
+
+test("Account deletion batch wipe succeeds for owner across subcollections and root profile", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const userDoc = aliceDb.collection("users").doc(ALICE_UID);
+
+  await assertSucceeds(userDoc.set(validProfilePayload(ALICE_UID)));
+  await assertSucceeds(
+    userDoc.collection("liked_songs").doc("trk_del").set(validLikedSongPayload())
+  );
+  await assertSucceeds(
+    userDoc.collection("playlists").doc("pl_del").set(validPlaylistPayload())
+  );
+  await assertSucceeds(
+    userDoc
+      .collection("playlists")
+      .doc("pl_del")
+      .collection("tracks")
+      .doc("trk_del")
+      .set(validPlaylistTrackPayload({ videoId: "trk_del" }))
+  );
+
+  await assertSucceeds(
+    userDoc.collection("playlists").doc("pl_del").collection("tracks").doc("trk_del").delete()
+  );
+  await assertSucceeds(userDoc.collection("playlists").doc("pl_del").delete());
+  await assertSucceeds(userDoc.collection("liked_songs").doc("trk_del").delete());
+  await assertSucceeds(userDoc.delete());
 });

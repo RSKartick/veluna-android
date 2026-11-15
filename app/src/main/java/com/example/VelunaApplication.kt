@@ -11,6 +11,10 @@ import com.example.data.network.ScrobbleClient
 import com.example.data.repository.TasteEngine
 import com.example.data.repository.VelunaRepository
 import com.example.playback.PlayerController
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 class VelunaAppContainer(application: Application) {
     val database: VelunaDatabase = VelunaDatabase.getInstance(application)
@@ -18,7 +22,11 @@ class VelunaAppContainer(application: Application) {
     val prefsRepository: UserPrefsRepository = UserPrefsRepository(application)
     val innerTubeClient: InnerTubeClient = InnerTubeClient()
     val lyricsRepository: LyricsRepository = LyricsRepository(dao, innerTubeClient)
-    val scrobbleClient: ScrobbleClient = ScrobbleClient(innerTubeClient.httpClient)
+    val scrobbleClient: ScrobbleClient = ScrobbleClient(
+        httpClient = innerTubeClient.httpClient,
+        dao = dao,
+        prefsRepo = prefsRepository
+    )
     val tasteEngine: TasteEngine = TasteEngine(
         dao = dao,
         prefsRepo = prefsRepository,
@@ -28,7 +36,8 @@ class VelunaAppContainer(application: Application) {
         context = application,
         dao = dao,
         prefsRepo = prefsRepository,
-        innerTube = innerTubeClient
+        innerTube = innerTubeClient,
+        database = database
     )
     val cloudSyncRepository: CloudSyncRepository = CloudSyncRepository(application)
     val cloudSyncCoordinator: CloudSyncCoordinator = CloudSyncCoordinator(
@@ -53,8 +62,15 @@ class VelunaApplication : Application() {
     lateinit var container: VelunaAppContainer
         private set
 
+    private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
     override fun onCreate() {
         super.onCreate()
         container = VelunaAppContainer(this)
+        container.scrobbleClient.registerConnectivityFlush(this)
+        appScope.launch {
+            container.prefsRepository.migrateSecretsAndPruneLegacyKeys()
+            container.scrobbleClient.flushPendingScrobbles()
+        }
     }
 }

@@ -130,3 +130,40 @@ data class LyricsCacheEntity(
     val offsetMs: Long = 0L,
     val fetchedAt: Long = System.currentTimeMillis()
 )
+
+@Entity(
+    tableName = "sync_tombstones",
+    primaryKeys = ["entityType", "entityKey"]
+)
+data class SyncTombstoneEntity(
+    val entityType: String,
+    val entityKey: String,
+    val clientUpdatedAt: Long,
+    val deletedAt: Long = System.currentTimeMillis()
+)
+
+@Entity(
+    tableName = "pending_scrobbles",
+    indices = [Index(value = ["nextAttemptAt"])]
+)
+data class PendingScrobbleEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val service: String,
+    val payloadJson: String,
+    val startedAtSecs: Long,
+    val attempts: Int = 0,
+    val nextAttemptAt: Long = 0L,
+    val lastError: String? = null
+)
+
+object SyncEntityTypes {
+    const val LIKED = "LIKED"
+    const val PLAYLIST = "PLAYLIST"
+    const val HIDDEN_ARTIST = "HIDDEN_ARTIST"
+    const val SEED = "SEED"
+}
+
+object ScrobbleServices {
+    const val LASTFM = "LASTFM"
+    const val LISTENBRAINZ = "LISTENBRAINZ"
+}

@@ -177,6 +177,13 @@ class DetailViewModel(
         return "$safeName.m3u8" to content
     }
 
+    fun exportCsvText(): Pair<String, String>? {
+        val page = _playlistState.value.page ?: return null
+        val content = repository.exportPlaylistAsCsv(page.items)
+        val safeName = page.title.replace(Regex("[^A-Za-z0-9_\\- ]"), "_").ifBlank { "veluna_playlist" }
+        return "$safeName.csv" to content
+    }
+
     class Factory(
         private val innerTube: InnerTubeClient,
         private val repository: VelunaRepository,

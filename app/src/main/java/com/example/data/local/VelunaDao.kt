@@ -4,12 +4,24 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Transaction
 import kotlinx.coroutines.flow.Flow
 
 data class PlaylistTrackCountRow(
     val playlistId: Long,
     val count: Int,
     val firstSongJson: String?
+)
+
+data class TopSongAggRow(
+    val videoId: String,
+    val plays: Int,
+    val secs: Long
+)
+
+data class ListenTotalsRow(
+    val totalPlays: Int,
+    val totalSecs: Long
 )
 
 @Dao
@@ -30,17 +42,50 @@ interface VelunaDao {
     @Query("SELECT * FROM listens ORDER BY playedAt DESC LIMIT 500")
     fun observeAllListens(): Flow<List<ListenEntity>>
 
-    @Query("SELECT * FROM listens WHERE playedAt >= :sinceMs ORDER BY playedAt DESC")
+    @Query("SELECT * FROM listens WHERE playedAt >= :sinceMs ORDER BY playedAt ASC")
     suspend fun getListensSince(sinceMs: Long): List<ListenEntity>
+
+    @Query("SELECT playedAt FROM listens ORDER BY playedAt ASC")
+    suspend fun getAllListenTimestampsAsc(): List<Long>
 
     @Query("SELECT * FROM listens ORDER BY playedAt ASC")
     suspend fun getAllListensAsc(): List<ListenEntity>
+
+    @Query("SELECT COUNT(*) AS totalPlays, COALESCE(SUM(secs), 0) AS totalSecs FROM listens WHERE playedAt >= :sinceMs")
+    suspend fun getListenTotalsSince(sinceMs: Long): ListenTotalsRow
+
+    @Query("SELECT COALESCE(SUM(secs), 0) FROM listens WHERE playedAt >= :startMs AND playedAt < :endMs")
+    suspend fun sumListenSecsInRange(startMs: Long, endMs: Long): Long
+
+    @Query(
+        """
+        SELECT videoId, COUNT(*) AS plays, COALESCE(SUM(secs), 0) AS secs
+        FROM listens
+        WHERE playedAt >= :sinceMs
+        GROUP BY videoId
+        ORDER BY plays DESC, secs DESC
+        LIMIT :limit
+        """
+    )
+    suspend fun topSongsSince(sinceMs: Long, limit: Int): List<TopSongAggRow>
+
+    @Query("SELECT COUNT(DISTINCT videoId) FROM listens WHERE playedAt >= :sinceMs")
+    suspend fun countUniqueSongsSince(sinceMs: Long): Int
+
+    @Query("SELECT * FROM listen_songs WHERE videoId IN (:videoIds)")
+    suspend fun getListenSongsByIds(videoIds: List<String>): List<ListenSongEntity>
 
     @Query("SELECT * FROM listen_songs")
     fun observeListenSongs(): Flow<List<ListenSongEntity>>
 
     @Query("SELECT * FROM listen_songs")
     suspend fun getAllListenSongs(): List<ListenSongEntity>
+
+    @Query("DELETE FROM listens")
+    suspend fun clearListens()
+
+    @Query("DELETE FROM listen_songs")
+    suspend fun clearListenSongs()
 
     // --- Local Playlists ---
     @Query("SELECT * FROM local_playlists ORDER BY updatedAt DESC")
@@ -61,8 +106,14 @@ interface VelunaDao {
     @Query("DELETE FROM local_playlists WHERE id = :id")
     suspend fun deletePlaylist(id: Long)
 
+    @Query("DELETE FROM local_playlists")
+    suspend fun clearPlaylists()
+
     @Query("DELETE FROM local_playlist_tracks WHERE playlistId = :playlistId")
     suspend fun clearPlaylistTracks(playlistId: Long)
+
+    @Query("DELETE FROM local_playlist_tracks")
+    suspend fun clearAllPlaylistTracks()
 
     @Query("SELECT * FROM local_playlist_tracks WHERE playlistId = :playlistId ORDER BY position ASC, addedAt ASC")
     fun observePlaylistTracks(playlistId: Long): Flow<List<LocalPlaylistTrackEntity>>
@@ -114,9 +165,21 @@ interface VelunaDao {
     @Query("DELETE FROM liked_songs WHERE videoId = :videoId")
     suspend fun deleteLikedSong(videoId: String)
 
+    @Query("SELECT videoId FROM liked_songs WHERE videoId LIKE 'LOCAL:%'")
+    suspend fun getLocalLikedVideoIds(): List<String>
+
+    @Query("DELETE FROM liked_songs WHERE videoId LIKE 'LOCAL:%'")
+    suspend fun deleteLocalLikedSongs(): Int
+
+    @Query("DELETE FROM liked_songs")
+    suspend fun clearLikedSongs()
+
     // --- Saved Albums & Followed Artists ---
     @Query("SELECT * FROM saved_albums ORDER BY savedAt DESC")
     fun observeSavedAlbums(): Flow<List<SavedAlbumEntity>>
+
+    @Query("SELECT * FROM saved_albums ORDER BY savedAt DESC")
+    suspend fun getSavedAlbumsOnce(): List<SavedAlbumEntity>
 
     @Query("SELECT EXISTS(SELECT 1 FROM saved_albums WHERE albumId = :albumId)")
     fun observeIsAlbumSaved(albumId: String): Flow<Boolean>
@@ -130,8 +193,14 @@ interface VelunaDao {
     @Query("DELETE FROM saved_albums WHERE albumId = :albumId")
     suspend fun deleteSavedAlbum(albumId: String)
 
+    @Query("DELETE FROM saved_albums")
+    suspend fun clearSavedAlbums()
+
     @Query("SELECT * FROM followed_artists ORDER BY followedAt DESC")
     fun observeFollowedArtists(): Flow<List<FollowedArtistEntity>>
+
+    @Query("SELECT * FROM followed_artists ORDER BY followedAt DESC")
+    suspend fun getFollowedArtistsOnce(): List<FollowedArtistEntity>
 
     @Query("SELECT EXISTS(SELECT 1 FROM followed_artists WHERE channelId = :channelId)")
     fun observeIsArtistFollowed(channelId: String): Flow<Boolean>
@@ -145,9 +214,15 @@ interface VelunaDao {
     @Query("DELETE FROM followed_artists WHERE channelId = :channelId")
     suspend fun deleteFollowedArtist(channelId: String)
 
+    @Query("DELETE FROM followed_artists")
+    suspend fun clearFollowedArtists()
+
     // --- Shortcuts ---
     @Query("SELECT * FROM shortcuts ORDER BY position ASC")
     fun observeShortcuts(): Flow<List<ShortcutEntity>>
+
+    @Query("SELECT * FROM shortcuts ORDER BY position ASC")
+    suspend fun getShortcutsOnce(): List<ShortcutEntity>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertShortcut(shortcut: ShortcutEntity)
@@ -155,9 +230,15 @@ interface VelunaDao {
     @Query("DELETE FROM shortcuts WHERE id = :id")
     suspend fun deleteShortcut(id: String)
 
+    @Query("DELETE FROM shortcuts")
+    suspend fun clearShortcuts()
+
     // --- Local Audio Files ---
     @Query("SELECT * FROM local_tracks ORDER BY title ASC")
     fun observeLocalTracks(): Flow<List<LocalTrackEntity>>
+
+    @Query("SELECT * FROM local_tracks ORDER BY title ASC")
+    suspend fun getLocalTracksOnce(): List<LocalTrackEntity>
 
     @Query("SELECT * FROM local_tracks WHERE albumKey = :albumKey ORDER BY trackNo ASC, title ASC")
     suspend fun getLocalTracksByAlbum(albumKey: String): List<LocalTrackEntity>
@@ -185,6 +266,9 @@ interface VelunaDao {
     @Query("SELECT * FROM search_history ORDER BY searchedAt DESC LIMIT 20")
     fun observeSearchHistory(): Flow<List<SearchHistoryEntity>>
 
+    @Query("SELECT * FROM search_history ORDER BY searchedAt DESC LIMIT :limit")
+    suspend fun getSearchHistoryOnce(limit: Int = 100): List<SearchHistoryEntity>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertSearchHistory(entry: SearchHistoryEntity)
 
@@ -207,6 +291,9 @@ interface VelunaDao {
     @Query("DELETE FROM blocked_artists WHERE name = :name")
     suspend fun deleteBlockedArtist(name: String)
 
+    @Query("DELETE FROM blocked_artists")
+    suspend fun clearBlockedArtists()
+
     // --- Lyrics Cache ---
     @Query("SELECT * FROM lyrics_cache WHERE videoId = :videoId")
     suspend fun getLyricsCache(videoId: String): LyricsCacheEntity?
@@ -216,4 +303,65 @@ interface VelunaDao {
 
     @Query("DELETE FROM lyrics_cache WHERE pinned = 0")
     suspend fun clearUnpinnedLyricsCache()
+
+    // --- Sync Tombstones ---
+    @Query("SELECT * FROM sync_tombstones WHERE entityType = :entityType")
+    suspend fun getTombstonesByType(entityType: String): List<SyncTombstoneEntity>
+
+    @Query("SELECT * FROM sync_tombstones")
+    suspend fun getAllTombstones(): List<SyncTombstoneEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertTombstone(tombstone: SyncTombstoneEntity)
+
+    @Query("DELETE FROM sync_tombstones WHERE entityType = :entityType AND entityKey = :entityKey")
+    suspend fun deleteTombstone(entityType: String, entityKey: String)
+
+    @Query("DELETE FROM sync_tombstones WHERE deletedAt < :cutoffMs")
+    suspend fun purgeOldTombstones(cutoffMs: Long): Int
+
+    @Query("DELETE FROM sync_tombstones")
+    suspend fun clearTombstones()
+
+    // --- Pending Scrobbles Retry Queue ---
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertPendingScrobble(entity: PendingScrobbleEntity): Long
+
+    @Query("SELECT * FROM pending_scrobbles WHERE nextAttemptAt <= :nowMs ORDER BY id ASC")
+    suspend fun getDuePendingScrobbles(nowMs: Long): List<PendingScrobbleEntity>
+
+    @Query("SELECT COUNT(*) FROM pending_scrobbles")
+    fun observePendingScrobbleCount(): Flow<Int>
+
+    @Query("SELECT COUNT(*) FROM pending_scrobbles")
+    suspend fun countPendingScrobbles(): Int
+
+    @Query("UPDATE pending_scrobbles SET attempts = :attempts, nextAttemptAt = :nextAttemptAt, lastError = :lastError WHERE id = :id")
+    suspend fun updatePendingScrobbleRetry(id: Long, attempts: Int, nextAttemptAt: Long, lastError: String?)
+
+    @Query("DELETE FROM pending_scrobbles WHERE id = :id")
+    suspend fun deletePendingScrobble(id: Long)
+
+    @Query("DELETE FROM pending_scrobbles")
+    suspend fun clearPendingScrobbles()
+
+    /**
+     * Transactionally clears all account-owned tables on sign-out or account deletion.
+     * Deliberately preserves local_tracks, downloaded_tracks, and lyrics_cache.
+     */
+    @Transaction
+    suspend fun clearAccountData() {
+        clearLikedSongs()
+        clearAllPlaylistTracks()
+        clearPlaylists()
+        clearSavedAlbums()
+        clearFollowedArtists()
+        clearShortcuts()
+        clearListens()
+        clearListenSongs()
+        clearSearchHistory()
+        clearBlockedArtists()
+        clearTombstones()
+        clearPendingScrobbles()
+    }
 }

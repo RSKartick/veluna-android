@@ -7,6 +7,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.data.local.BlockedArtistEntity
 import com.example.data.local.UserPrefsRepository
 import com.example.data.local.VelunaUserPrefs
+import com.example.data.network.ScrobbleClient
 import com.example.data.repository.TasteEngine
 import com.example.data.repository.VelunaRepository
 import com.example.model.AudioQuality
@@ -22,6 +23,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -43,7 +45,8 @@ data class ImportDialogState(
 class LibraryStatsViewModel(
     private val repository: VelunaRepository,
     private val prefsRepo: UserPrefsRepository,
-    private val tasteEngine: TasteEngine? = null
+    private val tasteEngine: TasteEngine? = null,
+    private val scrobbleClient: ScrobbleClient? = null
 ) : ViewModel() {
 
     val prefs: StateFlow<VelunaUserPrefs> = prefsRepo.prefsFlow
@@ -84,6 +87,15 @@ class LibraryStatsViewModel(
 
     private val _statusBanner = MutableStateFlow<String?>(null)
     val statusBanner: StateFlow<String?> = _statusBanner.asStateFlow()
+
+    private val _restoredLegacyBackupWarning = MutableStateFlow(false)
+    val restoredLegacyBackupWarning: StateFlow<Boolean> = _restoredLegacyBackupWarning.asStateFlow()
+
+    val scrobblePendingCount: StateFlow<Int> = (scrobbleClient?.observePendingCount() ?: flowOf(0))
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
+
+    val lastScrobbleError: StateFlow<String?> = prefsRepo.lastScrobbleErrorFlow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
 
     init {
         refreshStats(StatsRange.MONTH)
@@ -219,16 +231,21 @@ class LibraryStatsViewModel(
     }
 
     // --- Backup & Restore ---
-    suspend fun buildBackupJson(): String = repository.safeExportBackupJson(prefs.value)
+    suspend fun buildBackupJson(): String = repository.exportBackupJson(prefs.value)
 
     fun restoreBackupJson(raw: String) {
         viewModelScope.launch {
-            repository.importBackupJson(raw).onSuccess { count ->
-                _statusBanner.value = "Restored settings & $count playlist(s)"
+            repository.importBackupJson(raw).onSuccess { result ->
+                _restoredLegacyBackupWarning.value = result.sourceVersion < 2
+                _statusBanner.value = "Restored settings & ${result.restoredPlaylists} playlist(s)"
             }.onFailure { err ->
                 _statusBanner.value = "Restore failed: ${err.message}"
             }
         }
+    }
+
+    fun dismissLegacyBackupWarning() {
+        _restoredLegacyBackupWarning.value = false
     }
 
     // --- Settings ---
@@ -237,10 +254,12 @@ class LibraryStatsViewModel(
     fun setCustomAccent(hex: String?) = viewModelScope.launch { prefsRepo.setCustomAccent(hex) }
     fun setAdaptToArtwork(v: Boolean) = viewModelScope.launch { prefsRepo.setAdaptToArtwork(v) }
     fun setCornerRadius(dp: Int) = viewModelScope.launch { prefsRepo.setCornerRadius(dp) }
+    fun setClassicPlayerLayout(v: Boolean) = viewModelScope.launch { prefsRepo.setClassicPlayerLayout(v) }
     fun setAudioQuality(q: AudioQuality) = viewModelScope.launch { prefsRepo.setAudioQuality(q) }
     fun setAutoplay(v: Boolean) = viewModelScope.launch { prefsRepo.setAutoplay(v) }
     fun setLoudnessNormalization(v: Boolean) = viewModelScope.launch { prefsRepo.setLoudnessNormalization(v) }
     fun setHideMusicVideos(v: Boolean) = viewModelScope.launch { prefsRepo.setHideMusicVideos(v) }
+    fun setAllowMirrorFallbacks(v: Boolean) = viewModelScope.launch { prefsRepo.setAllowMirrorFallbacks(v) }
     fun setShowMoodChips(v: Boolean) = viewModelScope.launch { prefsRepo.setShowMoodChips(v) }
     fun setShowHeroBackdrop(v: Boolean) = viewModelScope.launch { prefsRepo.setShowHeroArtworkBackdrop(v) }
     fun setDisplayName(name: String) = viewModelScope.launch { prefsRepo.setDisplayName(name) }
@@ -268,6 +287,7 @@ class LibraryStatsViewModel(
                 lastFmSession,
                 listenBrainzToken
             )
+            prefsRepo.setLastScrobbleError(null)
             _statusBanner.value = "Scrobbling configuration saved"
         }
     }
@@ -275,10 +295,11 @@ class LibraryStatsViewModel(
     class Factory(
         private val repository: VelunaRepository,
         private val prefsRepo: UserPrefsRepository,
-        private val tasteEngine: TasteEngine? = null
+        private val tasteEngine: TasteEngine? = null,
+        private val scrobbleClient: ScrobbleClient? = null
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T =
-            LibraryStatsViewModel(repository, prefsRepo, tasteEngine) as T
+            LibraryStatsViewModel(repository, prefsRepo, tasteEngine, scrobbleClient) as T
     }
 }

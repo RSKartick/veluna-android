@@ -69,6 +69,7 @@ class VelunaPlaybackService : MediaSessionService() {
             .setMediaSourceFactory(mediaSourceFactory)
             .setAudioAttributes(audioAttributes, true)
             .setHandleAudioBecomingNoisy(true)
+            .setWakeMode(C.WAKE_MODE_NETWORK)
             .build()
 
         player.addListener(object : Player.Listener {
@@ -92,9 +93,9 @@ class VelunaPlaybackService : MediaSessionService() {
             .build()
 
         attachAudioEffects(player.audioSessionId)
-        onServiceReady?.invoke(player)
     }
 
+    @OptIn(UnstableApi::class)
     private fun attachAudioEffects(sessionId: Int) {
         if (sessionId == C.AUDIO_SESSION_ID_UNSET || sessionId == 0) return
         runCatching {
@@ -183,7 +184,6 @@ class VelunaPlaybackService : MediaSessionService() {
     companion object {
         @Volatile
         var instance: VelunaPlaybackService? = null
-        var onServiceReady: ((ExoPlayer) -> Unit)? = null
         var lastEqEnabled: Boolean = false
         var lastEqBands: List<Float> = List(10) { 0f }
         var lastLoudnessDb: Double? = null
