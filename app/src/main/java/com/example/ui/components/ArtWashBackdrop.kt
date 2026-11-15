@@ -62,7 +62,7 @@ fun ArtWashBackdrop(
                 modifier = Modifier
                     .fillMaxSize()
                     .alpha(0.26f)
-                    .blur(36.dpCompat())
+                    .blur(18.dpCompat())
             )
         } else if (useStageFallback) {
             Image(

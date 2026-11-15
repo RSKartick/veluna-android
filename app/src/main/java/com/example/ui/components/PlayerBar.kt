@@ -186,13 +186,8 @@ private fun MiniProgressBar(positionFlow: StateFlow<PlaybackPositionState>) {
         (posState.positionMs.toFloat() / posState.durationMs.toFloat()).coerceIn(0f, 1f)
     } else 0f
 
-    val animatedProgress by animateFloatAsState(
-        targetValue = rawProgress,
-        animationSpec = VelunaMotion.snappySpring(),
-        label = "mini_player_progress"
-    )
     LinearProgressIndicator(
-        progress = { animatedProgress },
+        progress = { rawProgress },
         color = MaterialTheme.colorScheme.primary,
         trackColor = MaterialTheme.colorScheme.surfaceVariant,
         modifier = Modifier
