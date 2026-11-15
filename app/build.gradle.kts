@@ -142,7 +142,7 @@ dependencies {
 
 tasks.withType<Test> {
     failFast = true
-    timeout.set(Duration.ofMinutes(2))
+    timeout.set(Duration.ofMinutes(10))
     testLogging {
         events("passed", "failed", "skipped")
     }

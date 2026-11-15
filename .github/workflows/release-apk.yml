@@ -18,7 +18,7 @@ permissions:
 
 jobs:
   test:
-    name: Test Rules & Unit Suite
+    name: Test Rules, Unit Suite & Debug Build
     runs-on: ubuntu-latest
 
     steps:
@@ -36,16 +36,80 @@ jobs:
           distribution: temurin
           java-version: "21"
 
+      - name: Ensure Android SDK licenses are accepted
+        run: |
+          SDK_ROOT="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          if [ -n "$SDK_ROOT" ] && [ -x "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" ]; then
+            yes | "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+          fi
+
       - name: Set up Gradle 9.3.1
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "9.3.1"
 
       - name: Install Node test dependencies
-        run: npm ci
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install --no-audit --no-fund
+          fi
 
-      - name: Run Firestore security rules & Kotlin unit tests
-        run: npx firebase emulators:exec --only firestore,auth "node --test firestore.test.js && gradle :app:testDebugUnitTest --stacktrace"
+      - name: Materialize synthetic CI google-services.json when absent
+        run: |
+          if [ ! -f app/google-services.json ]; then
+            cat << 'EOF' > app/google-services.json
+          {
+            "project_info": {
+              "project_number": "100000000000",
+              "project_id": "demo-no-project",
+              "storage_bucket": "demo-no-project.appspot.com"
+            },
+            "client": [
+              {
+                "client_info": {
+                  "mobilesdk_app_id": "1:100000000000:android:0000000000000000",
+                  "android_client_info": {
+                    "package_name": "com.aistudio.veluna.mxkrtq"
+                  }
+                },
+                "oauth_client": [
+                  {
+                    "client_id": "100000000000-ci000000000000000000000000000000.apps.googleusercontent.com",
+                    "client_type": 3
+                  }
+                ],
+                "api_key": [
+                  {
+                    "current_key": "AIzaSyCiTestPlaceholderKey0000000000000"
+                  }
+                ],
+                "services": {
+                  "appinvite_service": {
+                    "other_platform_oauth_client": []
+                  }
+                }
+              }
+            ],
+            "configuration_version": "1"
+          }
+          EOF
+          fi
+
+      - name: Run Firestore security rules, unit tests, lint, and debug APK build
+        run: |
+          npx firebase emulators:exec --only firestore,auth --project demo-no-project \
+            "FIRESTORE_EMULATOR_HOST=127.0.0.1:8085 FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:9099 node --test firestore.test.js && gradle :app:testDebugUnitTest :app:lintDebug :app:assembleDebug --no-daemon --stacktrace"
+
+      - name: Upload test and lint reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-test-lint-reports
+          path: app/build/reports/
+          if-no-files-found: ignore
+          retention-days: 7
 
   build-release:
     name: Build Signed Release APK
@@ -89,6 +153,13 @@ jobs:
           distribution: temurin
           java-version: "21"
 
+      - name: Ensure Android SDK licenses are accepted
+        run: |
+          SDK_ROOT="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          if [ -n "$SDK_ROOT" ] && [ -x "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" ]; then
+            yes | "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+          fi
+
       - name: Set up Gradle 9.3.1
         uses: gradle/actions/setup-gradle@v4
         with:
@@ -117,7 +188,10 @@ jobs:
           cp "$APK_PATH" dist/veluna-android.apk
           APKSIGNER=$(find "${ANDROID_SDK_ROOT:-$ANDROID_HOME}/build-tools" -name apksigner | sort -V | tail -n 1)
           [ -n "$APKSIGNER" ] || { echo "apksigner not found"; exit 1; }
-          "$APKSIGNER" verify --print-certs dist/veluna-android.apk | tee /dev/stderr | grep -qi "$EXPECTED_SHA256" \
+          EXPECTED_NORM=$(printf '%s' "$EXPECTED_SHA256" | tr -d ':' | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+          ACTUAL_CERT_INFO=$("$APKSIGNER" verify --print-certs dist/veluna-android.apk | tee /dev/stderr)
+          ACTUAL_NORM=$(printf '%s\n' "$ACTUAL_CERT_INFO" | tr -d ':' | tr '[:upper:]' '[:lower:]')
+          printf '%s\n' "$ACTUAL_NORM" | grep -q "$EXPECTED_NORM" \
             || { echo "APK certificate SHA-256 mismatch"; exit 1; }
 
       - name: Upload release APK artifact
