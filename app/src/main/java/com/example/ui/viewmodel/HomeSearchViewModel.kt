@@ -9,6 +9,7 @@ import com.example.data.repository.TasteEngine
 import com.example.data.repository.VelunaRepository
 import com.example.model.BrowseItem
 import com.example.model.BrowseKind
+import com.example.model.HistoryGroup
 import com.example.model.HomePage
 import com.example.model.MoodSection
 import com.example.model.MoodTile
@@ -80,8 +81,11 @@ class HomeSearchViewModel(
     val searchHistory: StateFlow<List<String>> = repository.searchHistoryFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
+    private val historyGroups: StateFlow<List<HistoryGroup>> = repository.observeHistoryGroups()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
     val recentJumpBack: StateFlow<List<BrowseItem>> = combine(
-        repository.observeHistoryGroups(),
+        historyGroups,
         repository.blockedArtistsFlow
     ) { groups, blocked ->
         val blockedSet = blocked.map { it.name.lowercase() }.toHashSet()
@@ -107,7 +111,7 @@ class HomeSearchViewModel(
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val familiarArtists: StateFlow<List<BrowseItem>> = combine(
-        repository.observeHistoryGroups(),
+        historyGroups,
         repository.followedArtistsFlow,
         repository.blockedArtistsFlow
     ) { groups, followed, blocked ->

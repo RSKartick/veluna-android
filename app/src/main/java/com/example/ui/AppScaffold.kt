@@ -7,6 +7,7 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavHostController
 import com.example.VelunaAppContainer
@@ -33,6 +34,9 @@ import com.example.ui.theme.VelunaMotion
 import com.example.ui.viewmodel.HomeSearchViewModel
 import com.example.ui.viewmodel.LibraryStatsViewModel
 import com.example.ui.viewmodel.NowPlayingViewModel
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 
 @Composable
 fun VelunaGlobalOverlaysAndDialogs(
@@ -42,7 +46,7 @@ fun VelunaGlobalOverlaysAndDialogs(
     nowPlayingVm: NowPlayingViewModel,
     libraryStatsVm: LibraryStatsViewModel,
     prefs: VelunaUserPrefs,
-    playbackState: PlaybackUiState,
+    playbackFlow: StateFlow<PlaybackUiState>,
     playlists: List<BrowseItem>,
     likedIds: Set<String>,
     downloadedIds: Set<String>,
@@ -70,9 +74,12 @@ fun VelunaGlobalOverlaysAndDialogs(
     onDismissTasteEditor: () -> Unit
 ) {
     val onboardingSearch by homeSearchVm.onboardingSearch.collectAsStateWithLifecycle()
+    val nowPlayingVisible by remember(playbackFlow) {
+        playbackFlow.map { it.nowPlayingOpen && it.nowPlaying != null }.distinctUntilChanged()
+    }.collectAsStateWithLifecycle(initialValue = false)
 
     AnimatedVisibility(
-        visible = playbackState.nowPlayingOpen && playbackState.nowPlaying != null,
+        visible = nowPlayingVisible,
         enter = slideInVertically(
             animationSpec = VelunaMotion.expressiveIntOffsetSpring(),
             initialOffsetY = { it }
@@ -82,6 +89,7 @@ fun VelunaGlobalOverlaysAndDialogs(
             targetOffsetY = { it }
         ) + fadeOut(VelunaMotion.fastFade())
     ) {
+        val playbackState by playbackFlow.collectAsStateWithLifecycle()
         val lyricsState by nowPlayingVm.lyricsState.collectAsStateWithLifecycle()
         val commentsState by nowPlayingVm.commentsState.collectAsStateWithLifecycle()
         val curSong = playbackState.nowPlaying
@@ -238,8 +246,11 @@ fun VelunaGlobalOverlaysAndDialogs(
     }
 
     if (showSleepTimer) {
+        val sleepTimerRemainingMs by remember(playbackFlow) {
+            playbackFlow.map { it.sleepTimerRemainingMs }.distinctUntilChanged()
+        }.collectAsStateWithLifecycle(initialValue = null)
         SleepTimerDialog(
-            activeRemainingMs = playbackState.sleepTimerRemainingMs,
+            activeRemainingMs = sleepTimerRemainingMs,
             onDismiss = onDismissSleepTimer,
             onSelectMinutes = { container.playerController.setSleepTimer(it) }
         )

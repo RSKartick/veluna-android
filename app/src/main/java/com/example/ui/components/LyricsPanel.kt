@@ -39,6 +39,8 @@ import androidx.compose.material3.TooltipDefaults
 import androidx.compose.material3.rememberTooltipState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -58,6 +60,8 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
 import com.example.data.local.UserPrefsRepository
+import com.example.model.LyricLine
+import com.example.model.LyricWord
 import com.example.playback.PlaybackPositionState
 import com.example.ui.viewmodel.LyricsUiState
 import kotlinx.coroutines.flow.StateFlow
@@ -211,12 +215,10 @@ fun SyncedLyricsPanel(
                 }
             }
             else -> {
-                val positionState by positionFlow.collectAsStateWithLifecycle()
-                val effectivePos = positionState.positionMs - data.offsetMs
-                val activeIndex = remember(data.lines, effectivePos, data.synced) {
-                    if (!data.synced) -1
-                    else data.lines.indexOfLast { (it.timeMs ?: Long.MAX_VALUE) <= effectivePos }
+                val syncedLines = remember(data.lines, data.synced) {
+                    if (data.synced) data.lines else emptyList()
                 }
+                val activeIndex by rememberActiveLyricIndex(syncedLines, data.offsetMs, positionFlow)
                 val listState = rememberLazyListState()
 
                 LaunchedEffect(activeIndex, data.synced) {
@@ -255,25 +257,10 @@ fun SyncedLyricsPanel(
                                 )
                         ) {
                             if (isActive && line.words.isNotEmpty()) {
-                                val primaryColor = MaterialTheme.colorScheme.primary
-                                val upcomingColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f)
-                                val annotated = buildAnnotatedString {
-                                    line.words.forEachIndexed { wIdx, w ->
-                                        if (wIdx > 0) append(" ")
-                                        val reached = effectivePos >= w.startMs
-                                        withStyle(
-                                            SpanStyle(
-                                                color = if (reached) primaryColor else upcomingColor,
-                                                fontWeight = if (reached) FontWeight.Bold else FontWeight.Medium
-                                            )
-                                        ) {
-                                            append(w.text)
-                                        }
-                                    }
-                                }
-                                Text(
-                                    text = annotated,
-                                    style = MaterialTheme.typography.headlineMedium
+                                ActiveKaraokeLyricLine(
+                                    words = line.words,
+                                    offsetMs = data.offsetMs,
+                                    positionFlow = positionFlow
                                 )
                             } else {
                                 Text(
@@ -300,4 +287,48 @@ fun SyncedLyricsPanel(
             }
         }
     }
+}
+
+@Composable
+private fun rememberActiveLyricIndex(
+    lines: List<LyricLine>,
+    offsetMs: Long,
+    positionFlow: StateFlow<PlaybackPositionState>
+): State<Int> {
+    val pos by positionFlow.collectAsStateWithLifecycle()
+    return remember(lines, offsetMs) {
+        derivedStateOf {
+            lines.indexOfLast { (it.timeMs ?: Long.MAX_VALUE) <= pos.positionMs - offsetMs }
+        }
+    }
+}
+
+@Composable
+private fun ActiveKaraokeLyricLine(
+    words: List<LyricWord>,
+    offsetMs: Long,
+    positionFlow: StateFlow<PlaybackPositionState>
+) {
+    val pos by positionFlow.collectAsStateWithLifecycle()
+    val effectivePos = pos.positionMs - offsetMs
+    val primaryColor = MaterialTheme.colorScheme.primary
+    val upcomingColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f)
+    val annotated = buildAnnotatedString {
+        words.forEachIndexed { wIdx, w ->
+            if (wIdx > 0) append(" ")
+            val reached = effectivePos >= w.startMs
+            withStyle(
+                SpanStyle(
+                    color = if (reached) primaryColor else upcomingColor,
+                    fontWeight = if (reached) FontWeight.Bold else FontWeight.Medium
+                )
+            ) {
+                append(w.text)
+            }
+        }
+    }
+    Text(
+        text = annotated,
+        style = MaterialTheme.typography.headlineMedium
+    )
 }

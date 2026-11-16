@@ -18,7 +18,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -54,7 +53,7 @@ fun ArtWashBackdrop(
             AsyncImage(
                 model = ImageRequest.Builder(context)
                     .data(artworkUrl)
-                    .size(256)
+                    .size(32)
                     .crossfade(true)
                     .build(),
                 contentDescription = null,
@@ -62,7 +61,6 @@ fun ArtWashBackdrop(
                 modifier = Modifier
                     .fillMaxSize()
                     .alpha(0.26f)
-                    .blur(18.dpCompat())
             )
         } else if (useStageFallback) {
             Image(
@@ -89,8 +87,6 @@ fun ArtWashBackdrop(
         )
     }
 }
-
-private fun Int.dpCompat() = androidx.compose.ui.unit.Dp(this.toFloat())
 
 @Composable
 fun VelunaArtwork(

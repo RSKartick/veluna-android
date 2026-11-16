@@ -124,6 +124,7 @@ class PlayerController(
     private var currentCandidateSong: SongItem? = null
 
     private var tickerJob: Job? = null
+    @Volatile private var positionUiActive = false
     private var sleepJob: Job? = null
     private var resolveJob: Job? = null
     private var prefetchJob: Job? = null
@@ -243,6 +244,8 @@ class PlayerController(
         }
     }
 
+    fun setPositionUiActive(active: Boolean) { positionUiActive = active }
+
     @Suppress("OPT_IN_USAGE")
     private fun startTicker() {
         tickerJob?.cancel()
@@ -273,7 +276,7 @@ class PlayerController(
                                 }
                             }
                         }
-                        delay(250L)
+                        delay(if (positionUiActive) 250L else 500L)
                     }
                 }
         }

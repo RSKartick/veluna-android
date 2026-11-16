@@ -59,6 +59,8 @@ import com.example.ui.viewmodel.DetailViewModel
 import com.example.ui.viewmodel.HomeSearchViewModel
 import com.example.ui.viewmodel.LibraryStatsViewModel
 import com.example.ui.viewmodel.NowPlayingViewModel
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 
 @Composable
 fun VelunaApp(
@@ -100,8 +102,14 @@ fun VelunaApp(
     )
 
     val prefs by libraryStatsVm.prefs.collectAsStateWithLifecycle()
-    val playbackState by container.playerController.state.collectAsStateWithLifecycle()
-    val activeDownloads by container.playerController.downloads.collectAsStateWithLifecycle()
+    val playbackFlow = container.playerController.state
+    val downloadsFlow = container.playerController.downloads
+    val artworkAccent by remember(playbackFlow) {
+        playbackFlow.map { it.artworkAccentColor }.distinctUntilChanged()
+    }.collectAsStateWithLifecycle(initialValue = null)
+    val hasNowPlaying by remember(playbackFlow) {
+        playbackFlow.map { it.nowPlaying != null }.distinctUntilChanged()
+    }.collectAsStateWithLifecycle(initialValue = false)
     val downloadedTracks by libraryStatsVm.downloadedTracks.collectAsStateWithLifecycle()
     val playlists by libraryStatsVm.playlists.collectAsStateWithLifecycle()
     val statusBanner by libraryStatsVm.statusBanner.collectAsStateWithLifecycle()
@@ -121,7 +129,7 @@ fun VelunaApp(
 
     VelunaTheme(
         prefs = prefs,
-        artworkAccent = playbackState.artworkAccentColor
+        artworkAccent = artworkAccent
     ) {
         val navController = rememberNavController()
         val backStackEntry by navController.currentBackStackEntryAsState()
@@ -224,14 +232,14 @@ fun VelunaApp(
                         if (!useNavigationRail) {
                             Column(modifier = Modifier.fillMaxWidth()) {
                                 AnimatedVisibility(
-                                    visible = playbackState.nowPlaying != null,
+                                    visible = hasNowPlaying,
                                     enter = slideInVertically(VelunaMotion.expressiveIntOffsetSpring()) { it / 2 } + fadeIn(VelunaMotion.fastFade()),
                                     exit = slideOutVertically(VelunaMotion.snappyIntOffsetSpring()) { it / 2 } + fadeOut(VelunaMotion.fastFade())
                                 ) {
                                     MiniPlayerBar(
-                                        state = playbackState,
+                                        playbackFlow = playbackFlow,
                                         positionFlow = container.playerController.positionState,
-                                        isLiked = playbackState.nowPlaying?.videoId in likedIds,
+                                        likedIds = likedIds,
                                         onOpenNowPlaying = { container.playerController.openNowPlaying(true) },
                                         onTogglePlayPause = { container.playerController.togglePlayPause() },
                                         onSkipNext = { container.playerController.skipNext() },
@@ -242,7 +250,7 @@ fun VelunaApp(
                             }
                         } else {
                             AnimatedVisibility(
-                                visible = playbackState.nowPlaying != null,
+                                visible = hasNowPlaying,
                                 enter = slideInVertically(VelunaMotion.expressiveIntOffsetSpring()) { it } + fadeIn(VelunaMotion.fastFade()),
                                 exit = slideOutVertically(VelunaMotion.snappyIntOffsetSpring()) { it } + fadeOut(VelunaMotion.fastFade())
                             ) {
@@ -253,9 +261,9 @@ fun VelunaApp(
                                         .padding(horizontal = 16.dp, vertical = 6.dp)
                                 ) {
                                     MiniPlayerBar(
-                                        state = playbackState,
+                                        playbackFlow = playbackFlow,
                                         positionFlow = container.playerController.positionState,
-                                        isLiked = playbackState.nowPlaying?.videoId in likedIds,
+                                        likedIds = likedIds,
                                         onOpenNowPlaying = { container.playerController.openNowPlaying(true) },
                                         onTogglePlayPause = { container.playerController.togglePlayPause() },
                                         onSkipNext = { container.playerController.skipNext() },
@@ -288,11 +296,11 @@ fun VelunaApp(
                             detailVm = detailVm,
                             libraryStatsVm = libraryStatsVm,
                             prefs = prefs,
-                            playbackState = playbackState,
+                            playbackFlow = playbackFlow,
                             playlists = playlists,
                             likedIds = likedIds,
                             downloadedTracks = downloadedTracks,
-                            activeDownloads = activeDownloads,
+                            downloadsFlow = downloadsFlow,
                             tasteProfile = tasteProfile,
                             cloudAuthState = cloudAuthState,
                             ensureNotificationPermission = ensureNotificationPermission,
@@ -322,7 +330,7 @@ fun VelunaApp(
                     nowPlayingVm = nowPlayingVm,
                     libraryStatsVm = libraryStatsVm,
                     prefs = prefs,
-                    playbackState = playbackState,
+                    playbackFlow = playbackFlow,
                     playlists = playlists,
                     likedIds = likedIds,
                     downloadedIds = downloadedIds,

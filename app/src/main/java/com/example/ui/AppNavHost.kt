@@ -8,6 +8,7 @@ import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -48,6 +49,9 @@ import com.example.ui.theme.VelunaMotion
 import com.example.ui.viewmodel.DetailViewModel
 import com.example.ui.viewmodel.HomeSearchViewModel
 import com.example.ui.viewmodel.LibraryStatsViewModel
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 
 @Composable
 fun VelunaNavHost(
@@ -57,11 +61,11 @@ fun VelunaNavHost(
     detailVm: DetailViewModel,
     libraryStatsVm: LibraryStatsViewModel,
     prefs: VelunaUserPrefs,
-    playbackState: PlaybackUiState,
+    playbackFlow: StateFlow<PlaybackUiState>,
     playlists: List<BrowseItem>,
     likedIds: Set<String>,
     downloadedTracks: List<SongItem>,
-    activeDownloads: Map<String, DownloadProgress>,
+    downloadsFlow: StateFlow<Map<String, DownloadProgress>>,
     tasteProfile: TasteProfile?,
     cloudAuthState: CloudAuthUiState,
     ensureNotificationPermission: () -> Unit,
@@ -135,6 +139,12 @@ fun VelunaNavHost(
             val shortcuts by homeSearchVm.shortcuts.collectAsStateWithLifecycle()
             val jumpBack by homeSearchVm.recentJumpBack.collectAsStateWithLifecycle()
             val familiarArtists by homeSearchVm.familiarArtists.collectAsStateWithLifecycle()
+            val nowPlayingSong by remember(playbackFlow) {
+                playbackFlow.map { it.nowPlaying }.distinctUntilChanged()
+            }.collectAsStateWithLifecycle(initialValue = null)
+            val artworkAccent by remember(playbackFlow) {
+                playbackFlow.map { it.artworkAccentColor }.distinctUntilChanged()
+            }.collectAsStateWithLifecycle(initialValue = null)
 
             HomeScreen(
                 homeState = homeState,
@@ -142,8 +152,8 @@ fun VelunaNavHost(
                 shortcuts = shortcuts,
                 jumpBack = jumpBack,
                 familiarArtists = familiarArtists,
-                nowPlayingSong = playbackState.nowPlaying,
-                artworkAccent = playbackState.artworkAccentColor,
+                nowPlayingSong = nowPlayingSong,
+                artworkAccent = artworkAccent,
                 likedIds = likedIds,
                 cloudAuthState = cloudAuthState,
                 onSignInWithGoogle = { container.cloudSyncCoordinator.signIn(context) },
@@ -161,11 +171,14 @@ fun VelunaNavHost(
         composable<SearchRoute> {
             val searchState by homeSearchVm.searchState.collectAsStateWithLifecycle()
             val history by homeSearchVm.searchHistory.collectAsStateWithLifecycle()
+            val nowPlayingId by remember(playbackFlow) {
+                playbackFlow.map { it.nowPlaying?.videoId }.distinctUntilChanged()
+            }.collectAsStateWithLifecycle(initialValue = null)
 
             SearchScreen(
                 state = searchState,
                 searchHistory = history,
-                nowPlayingId = playbackState.nowPlaying?.videoId,
+                nowPlayingId = nowPlayingId,
                 onQueryChange = homeSearchVm::onQueryChange,
                 onSubmitSearch = homeSearchVm::submitSearch,
                 onClearSearch = homeSearchVm::clearSearchResults,
@@ -186,6 +199,10 @@ fun VelunaNavHost(
             val savedAlbums by libraryStatsVm.savedAlbums.collectAsStateWithLifecycle()
             val followedArtists by libraryStatsVm.followedArtists.collectAsStateWithLifecycle()
             val localTracks by libraryStatsVm.localTracks.collectAsStateWithLifecycle()
+            val activeDownloads by downloadsFlow.collectAsStateWithLifecycle()
+            val nowPlayingId by remember(playbackFlow) {
+                playbackFlow.map { it.nowPlaying?.videoId }.distinctUntilChanged()
+            }.collectAsStateWithLifecycle(initialValue = null)
 
             LibraryScreen(
                 playlists = playlists,
@@ -195,7 +212,7 @@ fun VelunaNavHost(
                 downloads = downloadedTracks,
                 activeDownloads = activeDownloads,
                 localTracks = localTracks,
-                nowPlayingId = playbackState.nowPlaying?.videoId,
+                nowPlayingId = nowPlayingId,
                 onOpenBrowseItem = onOpenBrowseItem,
                 onPlaySongs = onPlayTracks,
                 onTrackMore = onTrackMore,
@@ -211,9 +228,12 @@ fun VelunaNavHost(
 
         composable<StatsRoute> {
             val statsState by libraryStatsVm.statsState.collectAsStateWithLifecycle()
+            val nowPlayingId by remember(playbackFlow) {
+                playbackFlow.map { it.nowPlaying?.videoId }.distinctUntilChanged()
+            }.collectAsStateWithLifecycle(initialValue = null)
             StatsScreen(
                 state = statsState,
-                nowPlayingId = playbackState.nowPlaying?.videoId,
+                nowPlayingId = nowPlayingId,
                 onSelectRange = libraryStatsVm::refreshStats,
                 onOpenHistory = { navController.navigate(HistoryRoute) },
                 onPlaySong = { song ->
@@ -276,11 +296,14 @@ fun VelunaNavHost(
             LaunchedEffect(route.albumId) { detailVm.loadAlbum(route.albumId) }
             val albumState by detailVm.albumState.collectAsStateWithLifecycle()
             val isSaved by detailVm.observeIsAlbumSaved(route.albumId).collectAsStateWithLifecycle()
+            val nowPlayingId by remember(playbackFlow) {
+                playbackFlow.map { it.nowPlaying?.videoId }.distinctUntilChanged()
+            }.collectAsStateWithLifecycle(initialValue = null)
 
             AlbumDetailScreen(
                 state = albumState,
                 isSaved = isSaved,
-                nowPlayingId = playbackState.nowPlaying?.videoId,
+                nowPlayingId = nowPlayingId,
                 onBack = { navController.popBackStack() },
                 onToggleSave = { detailVm.toggleSaveAlbum(isSaved) },
                 onPinShortcut = detailVm::pinAsShortcut,
@@ -296,11 +319,14 @@ fun VelunaNavHost(
             LaunchedEffect(route.channelId) { detailVm.loadArtist(route.channelId) }
             val artistState by detailVm.artistState.collectAsStateWithLifecycle()
             val isFollowed by detailVm.observeIsArtistFollowed(route.channelId).collectAsStateWithLifecycle()
+            val nowPlayingId by remember(playbackFlow) {
+                playbackFlow.map { it.nowPlaying?.videoId }.distinctUntilChanged()
+            }.collectAsStateWithLifecycle(initialValue = null)
 
             ArtistDetailScreen(
                 state = artistState,
                 isFollowed = isFollowed,
-                nowPlayingId = playbackState.nowPlaying?.videoId,
+                nowPlayingId = nowPlayingId,
                 onBack = { navController.popBackStack() },
                 onToggleFollow = { detailVm.toggleFollowArtist(isFollowed) },
                 onPinShortcut = detailVm::pinAsShortcut,
@@ -314,10 +340,13 @@ fun VelunaNavHost(
             val route = entry.toRoute<PlaylistRoute>()
             LaunchedEffect(route.playlistId) { detailVm.loadPlaylist(route.playlistId, force = true) }
             val playlistState by detailVm.playlistState.collectAsStateWithLifecycle()
+            val nowPlayingId by remember(playbackFlow) {
+                playbackFlow.map { it.nowPlaying?.videoId }.distinctUntilChanged()
+            }.collectAsStateWithLifecycle(initialValue = null)
 
             PlaylistDetailScreen(
                 state = playlistState,
-                nowPlayingId = playbackState.nowPlaying?.videoId,
+                nowPlayingId = nowPlayingId,
                 onBack = { navController.popBackStack() },
                 onFilterChange = detailVm::setPlaylistFilter,
                 onSortChange = detailVm::setPlaylistSort,

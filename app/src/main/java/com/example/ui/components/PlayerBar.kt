@@ -43,7 +43,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
-import com.example.model.Rating
 import com.example.playback.PlaybackPositionState
 import com.example.playback.PlaybackUiState
 import com.example.ui.theme.VelunaMotion
@@ -53,16 +52,18 @@ private val VelunaHeartRed = Color(0xFFEF4444)
 
 @Composable
 fun MiniPlayerBar(
-    state: PlaybackUiState,
+    playbackFlow: StateFlow<PlaybackUiState>,
     positionFlow: StateFlow<PlaybackPositionState>,
-    isLiked: Boolean = state.nowPlaying?.rating == Rating.LIKE,
+    likedIds: Set<String>,
     onOpenNowPlaying: () -> Unit,
     onTogglePlayPause: () -> Unit,
     onSkipNext: () -> Unit,
     onToggleLike: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val state by playbackFlow.collectAsStateWithLifecycle()
     val song = state.nowPlaying ?: return
+    val isLiked = song.videoId in likedIds
     val likeScale by animateFloatAsState(
         targetValue = if (isLiked) 1.15f else 1f,
         animationSpec = VelunaMotion.bouncyScaleSpring(),

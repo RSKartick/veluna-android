@@ -13,6 +13,7 @@ import androidx.compose.material3.Typography
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.remember
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.luminance
@@ -287,21 +288,31 @@ fun VelunaTheme(
         ThemeMode.LIGHT -> false
         ThemeMode.SYSTEM -> systemDark
     }
-    val colorScheme = buildVelunaColorScheme(
-        preset = prefs.themePreset,
-        darkTheme = useDark,
-        customAccentHex = prefs.customAccentHex,
-        artworkAccent = artworkAccent,
-        adaptToArtwork = prefs.adaptToArtwork
-    )
-    val r = prefs.cornerRadiusDp.dp
-    val shapes = Shapes(
-        extraSmall = RoundedCornerShape((r * 0.4f).coerceAtLeast(4.dp)),
-        small = RoundedCornerShape((r * 0.7f).coerceAtLeast(6.dp)),
-        medium = RoundedCornerShape(r),
-        large = RoundedCornerShape((r * 1.4f).coerceAtMost(28.dp)),
-        extraLarge = RoundedCornerShape((r * 1.8f).coerceAtMost(32.dp))
-    )
+    val colorScheme = remember(
+        prefs.themePreset,
+        useDark,
+        prefs.customAccentHex,
+        artworkAccent,
+        prefs.adaptToArtwork
+    ) {
+        buildVelunaColorScheme(
+            preset = prefs.themePreset,
+            darkTheme = useDark,
+            customAccentHex = prefs.customAccentHex,
+            artworkAccent = artworkAccent,
+            adaptToArtwork = prefs.adaptToArtwork
+        )
+    }
+    val shapes = remember(prefs.cornerRadiusDp) {
+        val r = prefs.cornerRadiusDp.dp
+        Shapes(
+            extraSmall = RoundedCornerShape((r * 0.4f).coerceAtLeast(4.dp)),
+            small = RoundedCornerShape((r * 0.7f).coerceAtLeast(6.dp)),
+            medium = RoundedCornerShape(r),
+            large = RoundedCornerShape((r * 1.4f).coerceAtMost(28.dp)),
+            extraLarge = RoundedCornerShape((r * 1.8f).coerceAtMost(32.dp))
+        )
+    }
 
     val view = LocalView.current
     if (!view.isInEditMode) {
