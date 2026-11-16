@@ -1,7 +1,7 @@
 {
   "firestore": [
     {
-      "database": "ai-studio-android-velunaan-1642b652-7638-48ac-8802-43a5020f0026",
+      "database": "ai-studio-android-velunaan-764f20a5-2f85-4f22-8d07-a258e3d52516",
       "rules": "firestore.rules"
     }
   ],

@@ -16,8 +16,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -65,7 +67,8 @@ fun QueuePanel(
     onSelectIndex: (Int) -> Unit,
     onRemoveIndex: (Int) -> Unit,
     onClearQueue: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    listState: LazyListState = rememberLazyListState()
 ) {
     Column(modifier = modifier.fillMaxSize()) {
         Row(
@@ -109,6 +112,7 @@ fun QueuePanel(
             }
         } else {
             LazyColumn(
+                state = listState,
                 contentPadding = PaddingValues(bottom = 24.dp),
                 modifier = Modifier.fillMaxSize()
             ) {
@@ -125,6 +129,7 @@ fun QueuePanel(
                         VelunaArtwork(
                             url = song.thumbnail,
                             contentDescription = song.title,
+                            targetSizePx = 180,
                             modifier = Modifier.size(44.dp)
                         )
                         Spacer(modifier = Modifier.width(12.dp))
@@ -187,7 +192,8 @@ fun QueuePanel(
 @Composable
 fun CommentsPanel(
     state: CommentsUiState,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    listState: LazyListState = rememberLazyListState()
 ) {
     when {
         state.isLoading -> {
@@ -214,6 +220,7 @@ fun CommentsPanel(
         }
         else -> {
             LazyColumn(
+                state = listState,
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
                 modifier = modifier.fillMaxSize()
@@ -244,6 +251,7 @@ fun CommentsPanel(
                                 url = comment.authorAvatar,
                                 contentDescription = comment.author,
                                 isCircle = true,
+                                targetSizePx = 144,
                                 modifier = Modifier.size(36.dp)
                             )
                             Spacer(modifier = Modifier.width(12.dp))

@@ -35,7 +35,6 @@ import com.example.model.HistoryGroup
 import com.example.model.SongItem
 import com.example.ui.components.SectionHeading
 import com.example.ui.components.VelunaArtwork
-import com.example.ui.theme.VelunaMotion
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -105,14 +104,11 @@ fun HistoryScreen(
                                     .fillMaxWidth()
                                     .clickable { onPlaySong(song) }
                                     .padding(start = 16.dp, end = 4.dp, top = 6.dp, bottom = 6.dp)
-                                    .animateItem(
-                                        fadeInSpec = VelunaMotion.fastFade(),
-                                        placementSpec = VelunaMotion.expressiveIntOffsetSpring()
-                                    )
                             ) {
                                 VelunaArtwork(
                                     url = song.thumbnail,
                                     contentDescription = song.title,
+                                    targetSizePx = 180,
                                     modifier = Modifier.size(44.dp)
                                 )
                                 Spacer(modifier = Modifier.width(12.dp))

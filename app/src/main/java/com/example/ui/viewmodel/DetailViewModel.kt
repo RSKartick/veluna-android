@@ -1,5 +1,6 @@
 package com.example.ui.viewmodel
 
+import androidx.compose.runtime.Immutable
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -20,18 +21,21 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
+@Immutable
 data class AlbumDetailState(
     val isLoading: Boolean = true,
     val page: AlbumPage? = null,
     val error: String? = null
 )
 
+@Immutable
 data class ArtistDetailState(
     val isLoading: Boolean = true,
     val page: ArtistPage? = null,
     val error: String? = null
 )
 
+@Immutable
 data class PlaylistDetailState(
     val isLoading: Boolean = true,
     val page: PlaylistPage? = null,

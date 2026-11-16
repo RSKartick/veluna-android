@@ -17,7 +17,7 @@ import androidx.media3.common.Player
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import androidx.palette.graphics.Palette
-import coil.ImageLoader
+import coil.Coil
 import coil.request.ImageRequest
 import coil.request.SuccessResult
 import com.example.data.local.DownloadedTrackEntity
@@ -131,16 +131,20 @@ class PlayerController(
     private var autoplayJob: Job? = null
     private var radioJob: Job? = null
     private var artworkAccentJob: Job? = null
-    private val imageLoader = ImageLoader(context)
 
     init {
         scope.launch {
             prefsRepo.prefsFlow.collect { prefs ->
+                val prev = currentPrefs
                 currentPrefs = prefs
                 VelunaPlaybackService.loudnessNormEnabled = prefs.loudnessNormalization
-                VelunaPlaybackService.instance?.applyEqualizerState(prefs.eqEnabled, prefs.eqBandsDb)
-                mediaController?.playbackParameters = PlaybackParameters(prefs.playbackSpeed)
-                _state.update { it.copy(speed = prefs.playbackSpeed) }
+                if (prev.eqEnabled != prefs.eqEnabled || prev.eqBandsDb != prefs.eqBandsDb) {
+                    VelunaPlaybackService.instance?.applyEqualizerState(prefs.eqEnabled, prefs.eqBandsDb)
+                }
+                if (prev.playbackSpeed != prefs.playbackSpeed) {
+                    mediaController?.playbackParameters = PlaybackParameters(prefs.playbackSpeed)
+                    _state.update { if (it.speed != prefs.playbackSpeed) it.copy(speed = prefs.playbackSpeed) else it }
+                }
             }
         }
         scope.launch {
@@ -250,7 +254,7 @@ class PlayerController(
     private fun startTicker() {
         tickerJob?.cancel()
         tickerJob = scope.launch {
-            var subTick = 0
+            var accumulatedMs = 0L
             kotlinx.coroutines.flow.combine(
                 _state.map { it.isPlaying },
                 _state.map { it.nowPlayingOpen },
@@ -260,6 +264,7 @@ class PlayerController(
                 .collectLatest { active ->
                     if (!active) return@collectLatest
                     while (true) {
+                        val stepMs = if (positionUiActive) 250L else 500L
                         val ctrl = mediaController
                         if (ctrl != null) {
                             val pos = ctrl.currentPosition.coerceAtLeast(0L)
@@ -269,14 +274,14 @@ class PlayerController(
                                 _positionState.value = PlaybackPositionState(positionMs = pos, durationMs = dur)
                             }
                             if (ctrl.isPlaying) {
-                                subTick++
-                                if (subTick >= 4) {
-                                    subTick = 0
+                                accumulatedMs += stepMs
+                                while (accumulatedMs >= 1000L) {
+                                    accumulatedMs -= 1000L
                                     recordOneSecondHeard()
                                 }
                             }
                         }
-                        delay(if (positionUiActive) 250L else 500L)
+                        delay(stepMs)
                     }
                 }
         }
@@ -803,7 +808,7 @@ class PlayerController(
         }
         artworkAccentJob = scope.launch(Dispatchers.IO) {
             val bmp = loadBitmap(url) ?: return@launch
-            val palette = Palette.from(bmp).generate()
+            val palette = Palette.from(bmp).maximumColorCount(12).generate()
             val swatch = palette.vibrantSwatch ?: palette.lightVibrantSwatch ?: palette.dominantSwatch
             if (swatch != null && _state.value.nowPlaying?.thumbnail == url) {
                 _state.update { it.copy(artworkAccentColor = Color(swatch.rgb)) }
@@ -818,7 +823,7 @@ class PlayerController(
                 .allowHardware(false)
                 .size(120)
                 .build()
-            val res = imageLoader.execute(req)
+            val res = Coil.imageLoader(context).execute(req)
             ((res as? SuccessResult)?.drawable as? BitmapDrawable)?.bitmap
         }.getOrNull()
     }

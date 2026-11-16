@@ -1,6 +1,7 @@
 package com.example.ui.viewmodel
 
 import android.net.Uri
+import androidx.compose.runtime.Immutable
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -28,12 +29,14 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
+@Immutable
 data class StatsUiState(
     val range: StatsRange = StatsRange.MONTH,
     val isLoading: Boolean = true,
     val summary: StatsSummary = StatsSummary(StatsRange.MONTH)
 )
 
+@Immutable
 data class ImportDialogState(
     val isImporting: Boolean = false,
     val statusText: String = "",
@@ -110,8 +113,13 @@ class LibraryStatsViewModel(
     }
 
     fun refreshStats(range: StatsRange = _statsState.value.range) {
+        val showSpinner = _statsState.value.isLoading || _statsState.value.summary.range != range
         viewModelScope.launch {
-            _statsState.update { it.copy(range = range, isLoading = true) }
+            if (showSpinner) {
+                _statsState.update { it.copy(range = range, isLoading = true) }
+            } else {
+                _statsState.update { it.copy(range = range) }
+            }
             val summary = repository.computeStats(range)
             _statsState.update { it.copy(range = range, isLoading = false, summary = summary) }
         }

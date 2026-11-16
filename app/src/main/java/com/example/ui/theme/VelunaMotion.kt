@@ -13,43 +13,43 @@ import androidx.compose.ui.unit.IntOffset
 object VelunaMotion {
     fun <T> expressiveSpatialSpring(visibilityThreshold: T? = null): FiniteAnimationSpec<T> =
         spring(
-            dampingRatio = Spring.DampingRatioLowBouncy,
-            stiffness = Spring.StiffnessMediumLow,
+            dampingRatio = 0.90f,
+            stiffness = Spring.StiffnessMedium,
             visibilityThreshold = visibilityThreshold
         )
 
     fun expressiveIntOffsetSpring(): FiniteAnimationSpec<IntOffset> =
         spring(
-            dampingRatio = 0.82f,
-            stiffness = Spring.StiffnessMediumLow,
+            dampingRatio = 0.92f,
+            stiffness = Spring.StiffnessMedium,
             visibilityThreshold = IntOffset(1, 1)
         )
 
     fun <T> snappySpring(visibilityThreshold: T? = null): FiniteAnimationSpec<T> =
         spring(
             dampingRatio = Spring.DampingRatioNoBouncy,
-            stiffness = Spring.StiffnessMedium,
+            stiffness = Spring.StiffnessHigh,
             visibilityThreshold = visibilityThreshold
         )
 
     fun snappyIntOffsetSpring(): FiniteAnimationSpec<IntOffset> =
         spring(
             dampingRatio = Spring.DampingRatioNoBouncy,
-            stiffness = Spring.StiffnessMedium,
+            stiffness = Spring.StiffnessHigh,
             visibilityThreshold = IntOffset(1, 1)
         )
 
     fun bouncyScaleSpring(): FiniteAnimationSpec<Float> =
         spring(
-            dampingRatio = Spring.DampingRatioMediumBouncy,
+            dampingRatio = 0.72f,
             stiffness = Spring.StiffnessMedium
         )
 
     fun smoothFloatSpring(): FiniteAnimationSpec<Float> =
         spring(
             dampingRatio = Spring.DampingRatioNoBouncy,
-            stiffness = Spring.StiffnessLow
+            stiffness = Spring.StiffnessMedium
         )
 
-    fun fastFade(): FiniteAnimationSpec<Float> = tween(durationMillis = 160)
+    fun fastFade(): FiniteAnimationSpec<Float> = tween(durationMillis = 120)
 }

@@ -1,5 +1,6 @@
 package com.example.ui.viewmodel
 
+import androidx.compose.runtime.Immutable
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -29,6 +30,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
+@Immutable
 data class HomeUiState(
     val isLoading: Boolean = true,
     val error: String? = null,
@@ -37,6 +39,7 @@ data class HomeUiState(
     val moodsTitle: String? = null
 )
 
+@Immutable
 data class SearchUiState(
     val query: String = "",
     val isSearching: Boolean = false,
@@ -48,6 +51,7 @@ data class SearchUiState(
     val selectedCategoryTab: Int = 0
 )
 
+@Immutable
 data class OnboardingSearchUiState(
     val query: String = "",
     val isSearching: Boolean = false,

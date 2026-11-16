@@ -1,6 +1,10 @@
 package com.example
 
 import android.app.Application
+import coil.ImageLoader
+import coil.ImageLoaderFactory
+import coil.disk.DiskCache
+import coil.memory.MemoryCache
 import com.example.data.cloud.CloudSyncCoordinator
 import com.example.data.cloud.CloudSyncRepository
 import com.example.data.local.UserPrefsRepository
@@ -58,7 +62,7 @@ class VelunaAppContainer(application: Application) {
     )
 }
 
-class VelunaApplication : Application() {
+class VelunaApplication : Application(), ImageLoaderFactory {
     lateinit var container: VelunaAppContainer
         private set
 
@@ -72,5 +76,23 @@ class VelunaApplication : Application() {
             container.prefsRepository.migrateSecretsAndPruneLegacyKeys()
             container.scrobbleClient.flushPendingScrobbles()
         }
+    }
+
+    override fun newImageLoader(): ImageLoader {
+        return ImageLoader.Builder(this)
+            .memoryCache {
+                MemoryCache.Builder(this)
+                    .maxSizePercent(0.25)
+                    .build()
+            }
+            .diskCache {
+                DiskCache.Builder()
+                    .directory(cacheDir.resolve("veluna_image_cache"))
+                    .maxSizeBytes(64L * 1024L * 1024L)
+                    .build()
+            }
+            .respectCacheHeaders(false)
+            .crossfade(false)
+            .build()
     }
 }

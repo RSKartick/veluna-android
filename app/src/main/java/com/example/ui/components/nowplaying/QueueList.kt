@@ -11,6 +11,8 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -156,7 +158,10 @@ fun NowPlayingWideSidePanel(
     onResetPinnedLyrics: () -> Unit,
     onNudgeLyricsOffset: (Long) -> Unit,
     onSeekTo: (Long) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    queueListState: LazyListState = rememberLazyListState(),
+    lyricsListState: LazyListState = rememberLazyListState(),
+    commentsListState: LazyListState = rememberLazyListState()
 ) {
     val glassBg = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.84f)
     val glassBorderColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)
@@ -213,6 +218,7 @@ fun NowPlayingWideSidePanel(
                         queue = playbackState.queue,
                         currentIndex = playbackState.currentIndex,
                         sourceName = playbackState.sourceName,
+                        listState = queueListState,
                         onSelectIndex = onSelectQueueIndex,
                         onRemoveIndex = onRemoveQueueIndex,
                         onClearQueue = onClearQueue
@@ -221,13 +227,17 @@ fun NowPlayingWideSidePanel(
                         lyricsState = lyricsState,
                         positionFlow = positionFlow,
                         romanizeEnabled = romanizeEnabled,
+                        listState = lyricsListState,
                         onToggleRomanize = onToggleRomanize,
                         onSelectProvider = onSelectLyricsProvider,
                         onResetPinned = onResetPinnedLyrics,
                         onNudgeOffset = onNudgeLyricsOffset,
                         onSeekToLine = onSeekTo
                     )
-                    else -> CommentsPanel(state = commentsState)
+                    else -> CommentsPanel(
+                        state = commentsState,
+                        listState = commentsListState
+                    )
                 }
             }
         }

@@ -6,6 +6,8 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -73,10 +75,16 @@ fun VelunaGlobalOverlaysAndDialogs(
     showTasteEditor: Boolean,
     onDismissTasteEditor: () -> Unit
 ) {
-    val onboardingSearch by homeSearchVm.onboardingSearch.collectAsStateWithLifecycle()
     val nowPlayingVisible by remember(playbackFlow) {
         playbackFlow.map { it.nowPlayingOpen && it.nowPlaying != null }.distinctUntilChanged()
     }.collectAsStateWithLifecycle(initialValue = false)
+
+    LaunchedEffect(nowPlayingVisible) {
+        container.playerController.setPositionUiActive(nowPlayingVisible)
+    }
+    DisposableEffect(container.playerController) {
+        onDispose { container.playerController.setPositionUiActive(false) }
+    }
 
     AnimatedVisibility(
         visible = nowPlayingVisible,
@@ -154,6 +162,7 @@ fun VelunaGlobalOverlaysAndDialogs(
             targetOffsetY = { it / 2 }
         ) + fadeOut(VelunaMotion.fastFade())
     ) {
+        val onboardingSearch by homeSearchVm.onboardingSearch.collectAsStateWithLifecycle()
         TasteOnboardingScreen(
             initialProfile = tasteProfile,
             searchState = onboardingSearch,

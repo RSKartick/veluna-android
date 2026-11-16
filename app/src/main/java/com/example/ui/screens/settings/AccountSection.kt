@@ -102,6 +102,7 @@ internal fun AccountSection(
                                 url = cloudAuthState.photoUrl,
                                 contentDescription = cloudAuthState.displayName ?: stringResource(R.string.home_account_settings),
                                 isCircle = true,
+                                targetSizePx = 180,
                                 modifier = Modifier.size(48.dp)
                             )
                         } else {
@@ -144,7 +145,7 @@ internal fun AccountSection(
                                 cloudAuthState.isSyncing -> stringResource(R.string.settings_sync_syncing)
                                 isSyncError -> cloudAuthState.syncStatus.orEmpty()
                                 cloudAuthState.lastSyncedAtMs != null -> {
-                                    val fmt = SimpleDateFormat("HH:mm", Locale.getDefault())
+                                    val fmt = remember { SimpleDateFormat("HH:mm", Locale.getDefault()) }
                                     stringResource(R.string.settings_sync_up_to_date, fmt.format(Date(cloudAuthState.lastSyncedAtMs)))
                                 }
                                 else -> cloudAuthState.syncStatus ?: stringResource(R.string.settings_sync_connected)

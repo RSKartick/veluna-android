@@ -55,7 +55,6 @@ import com.example.ui.components.MediaSquareCard
 import com.example.ui.components.SectionHeading
 import com.example.ui.components.TrackRow
 import com.example.ui.components.VelunaArtwork
-import com.example.ui.theme.VelunaMotion
 import com.example.ui.theme.velunaOutlinedButtonBorder
 import com.example.ui.theme.velunaOutlinedButtonColors
 import com.example.ui.theme.velunaPrimaryButtonColors
@@ -104,6 +103,7 @@ fun AlbumDetailScreen(
                                 url = album.thumbnail,
                                 contentDescription = album.title,
                                 shape = MaterialTheme.shapes.large,
+                                targetSizePx = 600,
                                 modifier = Modifier.size(204.dp)
                             )
                             Spacer(modifier = Modifier.height(16.dp))
@@ -200,11 +200,7 @@ fun AlbumDetailScreen(
                             isPlaying = nowPlayingId == song.videoId,
                             trackNumber = idx + 1,
                             onClick = { onPlayTracks(album.items, idx, album.title) },
-                            onMoreClick = { onTrackMore(song) },
-                            modifier = Modifier.animateItem(
-                                fadeInSpec = VelunaMotion.fastFade(),
-                                placementSpec = VelunaMotion.expressiveIntOffsetSpring()
-                            )
+                            onMoreClick = { onTrackMore(song) }
                         )
                     }
 
@@ -262,6 +258,7 @@ fun ArtistDetailScreen(
                                 url = artist.avatar ?: artist.thumbnail,
                                 contentDescription = artist.name,
                                 isCircle = true,
+                                targetSizePx = 600,
                                 modifier = Modifier.size(164.dp)
                             )
                             Spacer(modifier = Modifier.height(14.dp))
@@ -358,11 +355,7 @@ fun ArtistDetailScreen(
                                 song = song,
                                 isPlaying = nowPlayingId == song.videoId,
                                 onClick = { onPlayTracks(artist.topSongs, idx, artist.name) },
-                                onMoreClick = { onTrackMore(song) },
-                                modifier = Modifier.animateItem(
-                                    fadeInSpec = VelunaMotion.fastFade(),
-                                    placementSpec = VelunaMotion.expressiveIntOffsetSpring()
-                                )
+                                onMoreClick = { onTrackMore(song) }
                             )
                         }
                     }

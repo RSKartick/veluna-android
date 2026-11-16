@@ -52,8 +52,8 @@ import com.example.ui.components.VelunaArtwork
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.TabRowDefaults
 import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
+import androidx.compose.runtime.remember
 import androidx.compose.ui.graphics.Color
-import com.example.ui.theme.VelunaMotion
 import com.example.ui.theme.velunaOutlinedFieldColors
 import com.example.ui.viewmodel.SearchUiState
 
@@ -157,14 +157,17 @@ fun SearchScreen(
                         }
                     }
 
-                    val list = when (state.selectedCategoryTab) {
-                        0 -> state.results.top + state.results.songs.take(6) + state.results.albums.take(4) + state.results.artists.take(4)
-                        1 -> state.results.songs
-                        2 -> state.results.videos
-                        3 -> state.results.albums
-                        4 -> state.results.artists
-                        else -> state.results.playlists
-                    }.distinctBy { "${it.kind}_${it.id}" }
+                    val results = state.results
+                    val list = remember(results, state.selectedCategoryTab) {
+                        when (state.selectedCategoryTab) {
+                            0 -> results.top + results.songs.take(6) + results.albums.take(4) + results.artists.take(4)
+                            1 -> results.songs
+                            2 -> results.videos
+                            3 -> results.albums
+                            4 -> results.artists
+                            else -> results.playlists
+                        }.distinctBy { "${it.kind}_${it.id}" }
+                    }
 
                     if (list.isEmpty()) {
                         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -178,18 +181,18 @@ fun SearchScreen(
                             contentPadding = PaddingValues(top = 8.dp, bottom = 28.dp),
                             modifier = Modifier.fillMaxSize()
                         ) {
-                            items(list, key = { "${it.kind}_${it.id}_${it.title}" }) { item ->
+                            items(
+                                items = list,
+                                key = { "${it.kind}_${it.id}_${it.title}" },
+                                contentType = { it.kind }
+                            ) { item ->
                                 if (item.kind == BrowseKind.SONG) {
-                                    val song = item.toSongItem()
+                                    val song = remember(item) { item.toSongItem() }
                                     TrackRow(
                                         song = song,
                                         isPlaying = nowPlayingId == song.videoId,
                                         onClick = { onOpenBrowseItem(item) },
-                                        onMoreClick = { onTrackMore(song) },
-                                        modifier = Modifier.animateItem(
-                                            fadeInSpec = VelunaMotion.fastFade(),
-                                            placementSpec = VelunaMotion.expressiveIntOffsetSpring()
-                                        )
+                                        onMoreClick = { onTrackMore(song) }
                                     )
                                 } else {
                                     ListItem(
@@ -211,15 +214,12 @@ fun SearchScreen(
                                                 url = item.thumbnail,
                                                 contentDescription = item.title,
                                                 isCircle = item.kind == BrowseKind.ARTIST,
+                                                targetSizePx = 180,
                                                 modifier = Modifier.size(48.dp)
                                             )
                                         },
                                         modifier = Modifier
                                             .clickable { onOpenBrowseItem(item) }
-                                            .animateItem(
-                                                fadeInSpec = VelunaMotion.fastFade(),
-                                                placementSpec = VelunaMotion.expressiveIntOffsetSpring()
-                                            )
                                             .testTag("search_result_${item.id}")
                                     )
                                 }
@@ -282,6 +282,7 @@ fun SearchScreen(
                                             url = item.thumbnail,
                                             contentDescription = item.title,
                                             isCircle = item.kind == BrowseKind.ARTIST,
+                                            targetSizePx = 180,
                                             modifier = Modifier.size(44.dp)
                                         )
                                     },
@@ -295,11 +296,11 @@ fun SearchScreen(
                 else -> {
                     LazyColumn(
                         contentPadding = PaddingValues(bottom = 28.dp),
-                        verticalArrangement = Arrangement.spacedBy(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
                         modifier = Modifier.fillMaxSize()
                     ) {
                         if (searchHistory.isNotEmpty()) {
-                            item {
+                            item(key = "search_history_card", contentType = "search_history") {
                                 Column {
                                     Row(
                                         modifier = Modifier
@@ -345,36 +346,48 @@ fun SearchScreen(
                         }
 
                         if (state.isMoodsLoading && state.moodsSections.isEmpty()) {
-                            item {
+                            item(key = "moods_loading", contentType = "loading") {
                                 Box(modifier = Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) {
                                     CircularProgressIndicator()
                                 }
                             }
                         }
 
-                        items(state.moodsSections, key = { it.title }) { section ->
-                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                SectionHeading(title = section.title)
-                                Column(
-                                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                                    modifier = Modifier.padding(horizontal = 16.dp)
+                        state.moodsSections.forEachIndexed { secIdx, section ->
+                            item(
+                                key = "mood_hdr_${secIdx}_${section.title}",
+                                contentType = "section_heading"
+                            ) {
+                                SectionHeading(
+                                    title = section.title,
+                                    modifier = Modifier.padding(top = 6.dp)
+                                )
+                            }
+                            val pairs = section.items.chunked(2)
+                            items(
+                                count = pairs.size,
+                                key = { rowIdx -> "mood_row_${secIdx}_${section.title}_$rowIdx" },
+                                contentType = { "mood_row" }
+                            ) { rowIdx ->
+                                val pair = pairs[rowIdx]
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 16.dp)
                                 ) {
-                                    section.items.chunked(2).forEach { pair ->
-                                        Row(
-                                            horizontalArrangement = Arrangement.spacedBy(10.dp),
-                                            modifier = Modifier.fillMaxWidth()
-                                        ) {
-                                            pair.forEach { tile ->
-                                                MoodGridTile(
-                                                    tile = tile,
-                                                    sectionTitle = section.title,
-                                                    onClick = { onOpenMoodTile(tile) },
-                                                    modifier = Modifier.weight(1f)
-                                                )
-                                            }
-                                            if (pair.size == 1) Spacer(modifier = Modifier.weight(1f))
+                                    pair.forEach { tile ->
+                                        val onTileClick = remember(tile, onOpenMoodTile) {
+                                            { onOpenMoodTile(tile) }
                                         }
+                                        MoodGridTile(
+                                            tile = tile,
+                                            sectionTitle = section.title,
+                                            onClick = onTileClick,
+                                            modifier = Modifier.weight(1f)
+                                        )
                                     }
+                                    if (pair.size == 1) Spacer(modifier = Modifier.weight(1f))
                                 }
                             }
                         }

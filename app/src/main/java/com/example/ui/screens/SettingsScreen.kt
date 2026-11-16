@@ -145,7 +145,7 @@ fun SettingsScreen(
                 .fillMaxSize()
                 .testTag("settings_screen")
         ) {
-            item {
+            item(key = "settings_title", contentType = "title") {
                 Text(
                     text = stringResource(R.string.settings_title),
                     style = MaterialTheme.typography.headlineMedium.copy(fontWeight = FontWeight.Bold),
@@ -154,7 +154,7 @@ fun SettingsScreen(
                 )
             }
 
-            item {
+            item(key = "settings_account", contentType = "account") {
                 AccountSection(
                     prefs = prefs,
                     tasteProfile = tasteProfile,
@@ -172,7 +172,7 @@ fun SettingsScreen(
                 )
             }
 
-            item {
+            item(key = "settings_appearance", contentType = "appearance") {
                 AppearanceSection(
                     prefs = prefs,
                     onSetThemePreset = onSetThemePreset,
@@ -184,7 +184,7 @@ fun SettingsScreen(
                 )
             }
 
-            item {
+            item(key = "settings_playback", contentType = "playback") {
                 PlaybackSection(
                     prefs = prefs,
                     onSetAudioQuality = onSetAudioQuality,
@@ -196,14 +196,14 @@ fun SettingsScreen(
                 )
             }
 
-            item {
+            item(key = "settings_lyrics_providers", contentType = "lyrics_providers") {
                 LyricsProvidersSection(
                     providers = providers,
                     onUpdateLyricsProviders = onUpdateLyricsProviders
                 )
             }
 
-            item {
+            item(key = "settings_scrobbling", contentType = "scrobbling") {
                 ScrobblingSection(
                     prefs = prefs,
                     scrobblePendingCount = scrobblePendingCount,
@@ -213,7 +213,7 @@ fun SettingsScreen(
             }
 
             if (blockedArtists.isNotEmpty()) {
-                item {
+                item(key = "settings_hidden_artists", contentType = "hidden_artists") {
                     HiddenArtistsSection(
                         blockedArtists = blockedArtists,
                         onUnblockArtist = onUnblockArtist
@@ -221,7 +221,7 @@ fun SettingsScreen(
                 }
             }
 
-            item {
+            item(key = "settings_backup", contentType = "backup") {
                 BackupSection(
                     restoredLegacyBackupWarning = restoredLegacyBackupWarning,
                     onDismissLegacyBackupWarning = onDismissLegacyBackupWarning,

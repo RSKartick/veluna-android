@@ -1,6 +1,7 @@
 package com.example.ui.components
 
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -15,6 +16,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -25,7 +27,6 @@ import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
-import androidx.compose.runtime.remember
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.example.R
@@ -45,17 +46,21 @@ fun ArtWashBackdrop(
     val primary = MaterialTheme.colorScheme.primary
     val animatedAccent by animateColorAsState(
         targetValue = accentColor ?: primary,
+        animationSpec = tween(durationMillis = 220),
         label = "art_wash_accent"
     )
 
     Box(modifier = modifier.background(bg)) {
         if (!artworkUrl.isNullOrBlank()) {
-            AsyncImage(
-                model = ImageRequest.Builder(context)
+            val bgRequest = remember(context, artworkUrl) {
+                ImageRequest.Builder(context)
                     .data(artworkUrl)
                     .size(32)
-                    .crossfade(true)
-                    .build(),
+                    .crossfade(120)
+                    .build()
+            }
+            AsyncImage(
+                model = bgRequest,
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier
@@ -95,11 +100,15 @@ fun VelunaArtwork(
     modifier: Modifier = Modifier,
     shape: Shape = MaterialTheme.shapes.medium,
     specialId: String? = null,
-    isCircle: Boolean = false
+    isCircle: Boolean = false,
+    targetSizePx: Int = 360,
+    crossfade: Boolean = false
 ) {
     val context = LocalContext.current
     val effectiveShape = if (isCircle) CircleShape else shape
-    val resolvedUrl = remember(url) { InnerTubeParsers.upgradeThumbnailUrl(url, 720) }
+    val resolvedUrl = remember(url, targetSizePx) {
+        InnerTubeParsers.upgradeThumbnailUrl(url, targetSizePx)
+    }
     Box(
         modifier = modifier
             .clip(effectiveShape)
@@ -153,12 +162,16 @@ fun VelunaArtwork(
                 }
             }
             !resolvedUrl.isNullOrBlank() -> {
-                AsyncImage(
-                    model = ImageRequest.Builder(context)
+                val request = remember(context, resolvedUrl, targetSizePx, crossfade) {
+                    ImageRequest.Builder(context)
                         .data(resolvedUrl)
-                        .crossfade(true)
+                        .size(targetSizePx)
+                        .crossfade(crossfade)
                         .allowHardware(true)
-                        .build(),
+                        .build()
+                }
+                AsyncImage(
+                    model = request,
                     contentDescription = contentDescription,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize()

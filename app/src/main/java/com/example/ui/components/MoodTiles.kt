@@ -17,6 +17,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -38,10 +39,14 @@ fun MoodGridTile(
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val baseColor = parseHexColorOrNull(tile.colorHex) ?: MaterialTheme.colorScheme.primary
+    val primary = MaterialTheme.colorScheme.primary
     val surfaceBase = MaterialTheme.colorScheme.surfaceContainerHigh
-    val tintWash = lerp(surfaceBase, baseColor, 0.22f)
-    val isGenre = sectionTitle.contains("genre", ignoreCase = true)
+    val baseColor = remember(tile.colorHex, primary) { parseHexColorOrNull(tile.colorHex) ?: primary }
+    val gradientBrush = remember(surfaceBase, baseColor) {
+        val tintWash = lerp(surfaceBase, baseColor, 0.22f)
+        Brush.horizontalGradient(listOf(tintWash, surfaceBase))
+    }
+    val isGenre = remember(sectionTitle) { sectionTitle.contains("genre", ignoreCase = true) }
 
     Surface(
         shape = MaterialTheme.shapes.medium,
@@ -56,14 +61,7 @@ fun MoodGridTile(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(
-                    Brush.horizontalGradient(
-                        listOf(
-                            tintWash,
-                            surfaceBase
-                        )
-                    )
-                )
+                .background(gradientBrush)
         ) {
             Box(
                 modifier = Modifier

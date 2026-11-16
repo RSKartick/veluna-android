@@ -1,7 +1,5 @@
 package com.example.ui.screens.settings
 
-import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -24,11 +22,11 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.scale
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
@@ -37,12 +35,15 @@ import com.example.R
 import com.example.data.local.VelunaUserPrefs
 import com.example.model.ThemeMode
 import com.example.model.VelunaThemePreset
-import com.example.ui.theme.VelunaMotion
 import com.example.ui.theme.parseHexColorOrNull
 import com.example.ui.theme.velunaFilterChipBorder
 import com.example.ui.theme.velunaFilterChipColors
 import com.example.ui.theme.velunaSliderColors
 import kotlin.math.roundToInt
+
+private val ACCENT_SWATCHES: List<Pair<String?, Color?>> = listOf<String?>(
+    null, "#EA580C", "#E11D48", "#8B5CF6", "#0EA5E9", "#10B981", "#F59E0B"
+).map { hex -> hex to parseHexColorOrNull(hex) }
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -56,19 +57,8 @@ internal fun AppearanceSection(
     onSetCornerRadius: (Int) -> Unit
 ) {
     SettingsCard(title = stringResource(R.string.settings_card_appearance)) {
-        val previewBg by animateColorAsState(
-            targetValue = MaterialTheme.colorScheme.background,
-            animationSpec = VelunaMotion.snappySpring(),
-            label = "preview_bg"
-        )
-        val previewPrimary by animateColorAsState(
-            targetValue = MaterialTheme.colorScheme.primary,
-            animationSpec = VelunaMotion.snappySpring(),
-            label = "preview_primary"
-        )
-
         Surface(
-            color = previewBg,
+            color = MaterialTheme.colorScheme.background,
             contentColor = MaterialTheme.colorScheme.onBackground,
             shape = MaterialTheme.shapes.medium,
             modifier = Modifier
@@ -101,7 +91,7 @@ internal fun AppearanceSection(
                     modifier = Modifier
                         .size(28.dp)
                         .clip(CircleShape)
-                        .background(previewPrimary)
+                        .background(MaterialTheme.colorScheme.primary)
                 )
             }
         }
@@ -150,20 +140,14 @@ internal fun AppearanceSection(
         }
 
         Text(stringResource(R.string.settings_accent_swatch), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurface)
-        val swatches = listOf<String?>(null, "#EA580C", "#E11D48", "#8B5CF6", "#0EA5E9", "#10B981", "#F59E0B")
         FlowRow(
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
             modifier = Modifier.fillMaxWidth()
         ) {
-            swatches.forEach { hex ->
-                val c = parseHexColorOrNull(hex) ?: MaterialTheme.colorScheme.primary
+            ACCENT_SWATCHES.forEach { (hex, parsedColor) ->
+                val c = parsedColor ?: MaterialTheme.colorScheme.primary
                 val selected = prefs.customAccentHex == hex
-                val swatchScale by animateFloatAsState(
-                    targetValue = if (selected) 1.08f else 1f,
-                    animationSpec = VelunaMotion.bouncyScaleSpring(),
-                    label = "swatch_scale"
-                )
                 Box(
                     contentAlignment = Alignment.Center,
                     modifier = Modifier
@@ -175,7 +159,11 @@ internal fun AppearanceSection(
                     Box(
                         modifier = Modifier
                             .size(34.dp)
-                            .scale(swatchScale)
+                            .graphicsLayer {
+                                val s = if (selected) 1.08f else 1f
+                                scaleX = s
+                                scaleY = s
+                            }
                             .clip(CircleShape)
                             .background(if (hex == null) MaterialTheme.colorScheme.surfaceContainerHighest else c)
                             .border(
