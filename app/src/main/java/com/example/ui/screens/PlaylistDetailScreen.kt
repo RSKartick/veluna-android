@@ -67,7 +67,6 @@ import com.example.ui.components.ArtWashBackdrop
 import com.example.ui.components.CreateEditPlaylistDialog
 import com.example.ui.components.TrackRow
 import com.example.ui.components.VelunaArtwork
-import com.example.ui.theme.VelunaMotion
 import com.example.ui.theme.velunaOutlinedButtonBorder
 import com.example.ui.theme.velunaOutlinedButtonColors
 import com.example.ui.theme.velunaOutlinedFieldColors
@@ -277,6 +276,7 @@ fun PlaylistDetailScreen(
                                 contentDescription = page.title,
                                 specialId = page.id,
                                 shape = MaterialTheme.shapes.large,
+                                targetSizePx = 600,
                                 modifier = Modifier.size(196.dp)
                             )
                             Spacer(modifier = Modifier.height(14.dp))
@@ -392,11 +392,7 @@ fun PlaylistDetailScreen(
                                 song = song,
                                 isPlaying = nowPlayingId == song.videoId,
                                 onClick = { onPlayTracks(displayedTracks, idx, page.title) },
-                                onMoreClick = { onTrackMore(song) },
-                                modifier = Modifier.animateItem(
-                                    fadeInSpec = VelunaMotion.fastFade(),
-                                    placementSpec = VelunaMotion.expressiveIntOffsetSpring()
-                                )
+                                onMoreClick = { onTrackMore(song) }
                             )
                         }
                     }

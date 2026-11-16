@@ -2,7 +2,6 @@ package com.example.ui
 
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.runtime.Composable
@@ -127,9 +126,6 @@ fun VelunaNavHost(
             slideOutHorizontally(
                 animationSpec = VelunaMotion.snappyIntOffsetSpring(),
                 targetOffsetX = { (it * 0.08f).toInt() }
-            ) + scaleOut(
-                animationSpec = VelunaMotion.snappySpring(),
-                targetScale = 0.98f
             ) + fadeOut(VelunaMotion.fastFade())
         },
         modifier = modifier
@@ -146,6 +142,14 @@ fun VelunaNavHost(
                 playbackFlow.map { it.artworkAccentColor }.distinctUntilChanged()
             }.collectAsStateWithLifecycle(initialValue = null)
 
+            val onSignInWithGoogle = remember(context, container) { { container.cloudSyncCoordinator.signIn(context) } }
+            val onOpenAccountSettings = remember(onNavigateTopTab) { { onNavigateTopTab(VelunaTopTab.SETTINGS) } }
+            val onRetry = remember(homeSearchVm, homeState.selectedChipParams) {
+                { homeSearchVm.loadHome(homeState.selectedChipParams) }
+            }
+            val onToggleLike = remember(container) { { song: SongItem -> container.playerController.toggleLike(song) } }
+            val onOpenHistory = remember(navController) { { navController.navigate(HistoryRoute) } }
+
             HomeScreen(
                 homeState = homeState,
                 prefs = prefs,
@@ -156,14 +160,14 @@ fun VelunaNavHost(
                 artworkAccent = artworkAccent,
                 likedIds = likedIds,
                 cloudAuthState = cloudAuthState,
-                onSignInWithGoogle = { container.cloudSyncCoordinator.signIn(context) },
-                onOpenAccountSettings = { onNavigateTopTab(VelunaTopTab.SETTINGS) },
+                onSignInWithGoogle = onSignInWithGoogle,
+                onOpenAccountSettings = onOpenAccountSettings,
                 onSelectChip = homeSearchVm::loadHome,
-                onRetry = { homeSearchVm.loadHome(homeState.selectedChipParams) },
+                onRetry = onRetry,
                 onOpenBrowseItem = onOpenBrowseItem,
                 onTrackMore = onTrackMore,
-                onToggleLike = { container.playerController.toggleLike(it) },
-                onOpenHistory = { navController.navigate(HistoryRoute) },
+                onToggleLike = onToggleLike,
+                onOpenHistory = onOpenHistory,
                 onOpenEditHome = onOpenEditHome
             )
         }

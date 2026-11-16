@@ -251,16 +251,13 @@ fun StatsScreen(
                 if (summary.topSongs.isNotEmpty()) {
                     item { SectionHeading(title = stringResource(R.string.stats_top_songs)) }
                     itemsIndexed(summary.topSongs, key = { idx, s -> "top_s_${idx}_${s.song.videoId}" }) { idx, stat ->
+                        val displaySong = remember(stat) { stat.song.copy(duration = "${stat.plays}x") }
                         TrackRow(
-                            song = stat.song.copy(duration = "${stat.plays}x"),
+                            song = displaySong,
                             isPlaying = nowPlayingId == stat.song.videoId,
                             trackNumber = idx + 1,
                             onClick = { onPlaySong(stat.song) },
-                            onMoreClick = { onTrackMore(stat.song) },
-                            modifier = Modifier.animateItem(
-                                fadeInSpec = VelunaMotion.fastFade(),
-                                placementSpec = VelunaMotion.expressiveIntOffsetSpring()
-                            )
+                            onMoreClick = { onTrackMore(stat.song) }
                         )
                     }
                 }
@@ -352,7 +349,7 @@ private fun StatKpiCard(
 private fun DailyBarChart(series: List<DailyListening>) {
     val primary = MaterialTheme.colorScheme.primary
     val trackBg = MaterialTheme.colorScheme.surfaceVariant
-    val maxSecs = (series.maxOfOrNull { it.secs } ?: 1L).coerceAtLeast(1L)
+    val maxSecs = remember(series) { (series.maxOfOrNull { it.secs } ?: 1L).coerceAtLeast(1L) }
 
     var revealed by remember(series) { mutableStateOf(false) }
     LaunchedEffect(series) { revealed = true }
@@ -397,8 +394,8 @@ private fun DailyBarChart(series: List<DailyListening>) {
 private fun WeekdayHourHeatmap(cells: List<Long>) {
     val primary = MaterialTheme.colorScheme.primary
     val emptyColor = MaterialTheme.colorScheme.surfaceVariant
-    val maxVal = (cells.maxOrNull() ?: 1L).coerceAtLeast(1L)
-    val weekdays = listOf("S", "M", "T", "W", "T", "F", "S")
+    val maxVal = remember(cells) { (cells.maxOrNull() ?: 1L).coerceAtLeast(1L) }
+    val weekdays = remember { listOf("S", "M", "T", "W", "T", "F", "S") }
 
     Row(
         verticalAlignment = Alignment.CenterVertically,

@@ -1,5 +1,6 @@
 package com.example.model
 
+import androidx.compose.runtime.Immutable
 import kotlinx.serialization.Serializable
 
 @Serializable
@@ -41,12 +42,14 @@ enum class ThemeMode(val label: String) {
     SYSTEM("System")
 }
 
+@Immutable
 @Serializable
 data class ArtistRun(
     val text: String,
     val id: String? = null
 )
 
+@Immutable
 @Serializable
 data class SongItem(
     val videoId: String,
@@ -89,6 +92,7 @@ enum class BrowseKind {
     ARTIST
 }
 
+@Immutable
 @Serializable
 data class BrowseItem(
     val kind: BrowseKind,
@@ -135,11 +139,13 @@ fun isLocalId(id: String?): Boolean = id != null && (
         id.startsWith(LOCAL_PLAYLIST_PREFIX)
     )
 
+@Immutable
 data class HomeChip(
     val title: String,
     val params: String
 )
 
+@Immutable
 data class HomeSection(
     val title: String,
     val kind: String? = null,
@@ -148,23 +154,27 @@ data class HomeSection(
     val moreParams: String? = null
 )
 
+@Immutable
 data class HomePage(
     val chips: List<HomeChip> = emptyList(),
     val sections: List<HomeSection> = emptyList(),
     val continuation: String? = null
 )
 
+@Immutable
 data class MoodTile(
     val title: String,
     val params: String,
     val colorHex: String
 )
 
+@Immutable
 data class MoodSection(
     val title: String,
     val items: List<MoodTile>
 )
 
+@Immutable
 data class SearchResults(
     val top: List<BrowseItem> = emptyList(),
     val songs: List<BrowseItem> = emptyList(),
@@ -174,11 +184,13 @@ data class SearchResults(
     val playlists: List<BrowseItem> = emptyList()
 )
 
+@Immutable
 data class SearchSuggestions(
     val queries: List<String> = emptyList(),
     val items: List<BrowseItem> = emptyList()
 )
 
+@Immutable
 data class ArtistCarousel(
     val title: String,
     val items: List<BrowseItem>,
@@ -186,6 +198,7 @@ data class ArtistCarousel(
     val moreParams: String? = null
 )
 
+@Immutable
 data class AlbumPage(
     val id: String,
     val title: String,
@@ -203,6 +216,7 @@ data class AlbumPage(
     val sections: List<ArtistCarousel> = emptyList()
 )
 
+@Immutable
 data class ArtistPage(
     val channelId: String,
     val name: String,
@@ -217,6 +231,7 @@ data class ArtistPage(
     val sections: List<ArtistCarousel> = emptyList()
 )
 
+@Immutable
 data class PlaylistPage(
     val id: String,
     val title: String,
@@ -229,6 +244,7 @@ data class PlaylistPage(
     val isLocal: Boolean = false
 )
 
+@Immutable
 data class CommentItem(
     val id: String,
     val author: String,
@@ -241,12 +257,14 @@ data class CommentItem(
     val isHearted: Boolean = false
 )
 
+@Immutable
 data class CommentsPage(
     val countText: String? = null,
     val comments: List<CommentItem> = emptyList(),
     val disabled: Boolean = false
 )
 
+@Immutable
 @Serializable
 data class LyricWord(
     val text: String,
@@ -254,6 +272,7 @@ data class LyricWord(
     val endMs: Long
 )
 
+@Immutable
 @Serializable
 data class LyricLine(
     val timeMs: Long? = null,
@@ -264,6 +283,7 @@ data class LyricLine(
     val romanized: String? = null
 )
 
+@Immutable
 @Serializable
 data class LyricsData(
     val source: String,
@@ -276,12 +296,14 @@ data class LyricsData(
     val validatedDurationMs: Long = 0L
 )
 
+@Immutable
 data class LyricsProviderInfo(
     val id: String,
     val name: String,
     val enabled: Boolean
 )
 
+@Immutable
 @Serializable
 data class TasteSeed(
     val id: String,
@@ -311,6 +333,7 @@ data class TrackSignal(
     val lastUpdatedMs: Long = 0L
 )
 
+@Immutable
 @Serializable
 data class TasteProfile(
     val onboardingCompleted: Boolean = false,
@@ -329,18 +352,21 @@ enum class StatsRange(val label: String, val days: Int?) {
     ALL("All time", null)
 }
 
+@Immutable
 data class DailyListening(
     val dateKey: String,
     val label: String,
     val secs: Long
 )
 
+@Immutable
 data class TopSongStat(
     val song: SongItem,
     val plays: Int,
     val secs: Long
 )
 
+@Immutable
 data class TopArtistStat(
     val name: String,
     val id: String?,
@@ -349,6 +375,7 @@ data class TopArtistStat(
     val secs: Long
 )
 
+@Immutable
 data class TopAlbumStat(
     val id: String,
     val title: String,
@@ -358,6 +385,7 @@ data class TopAlbumStat(
     val secs: Long
 )
 
+@Immutable
 data class StatsSummary(
     val range: StatsRange,
     val totalSecs: Long = 0L,
@@ -374,11 +402,13 @@ data class StatsSummary(
     val topAlbums: List<TopAlbumStat> = emptyList()
 )
 
+@Immutable
 data class HistoryGroup(
     val title: String,
     val items: List<Pair<Long, SongItem>>
 )
 
+@Immutable
 data class DownloadProgress(
     val videoId: String,
     val title: String,

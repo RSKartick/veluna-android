@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -78,6 +79,9 @@ fun NowPlayingOverlay(
 
     var compactTab by remember { mutableIntStateOf(0) } // 0=Player, 1=Queue, 2=Lyrics, 3=Comments
     var widePanelTab by remember { mutableIntStateOf(0) } // 0=Queue, 1=Lyrics, 2=Comments
+    val queueListState = rememberLazyListState()
+    val lyricsListState = rememberLazyListState()
+    val commentsListState = rememberLazyListState()
 
     LaunchedEffect(compactTab, widePanelTab, song.videoId) {
         if (compactTab == 3 || widePanelTab == 2) {
@@ -152,6 +156,9 @@ fun NowPlayingOverlay(
                             lyricsState = lyricsState,
                             commentsState = commentsState,
                             romanizeEnabled = prefs.romanizeLyrics,
+                            queueListState = queueListState,
+                            lyricsListState = lyricsListState,
+                            commentsListState = commentsListState,
                             onSelectQueueIndex = onSelectQueueIndex,
                             onRemoveQueueIndex = onRemoveQueueIndex,
                             onClearQueue = onClearQueue,
@@ -204,6 +211,7 @@ fun NowPlayingOverlay(
                                         queue = playbackState.queue,
                                         currentIndex = playbackState.currentIndex,
                                         sourceName = playbackState.sourceName,
+                                        listState = queueListState,
                                         onSelectIndex = onSelectQueueIndex,
                                         onRemoveIndex = onRemoveQueueIndex,
                                         onClearQueue = onClearQueue
@@ -212,13 +220,17 @@ fun NowPlayingOverlay(
                                         lyricsState = lyricsState,
                                         positionFlow = positionFlow,
                                         romanizeEnabled = prefs.romanizeLyrics,
+                                        listState = lyricsListState,
                                         onToggleRomanize = onToggleRomanize,
                                         onSelectProvider = onSelectLyricsProvider,
                                         onResetPinned = onResetPinnedLyrics,
                                         onNudgeOffset = onNudgeLyricsOffset,
                                         onSeekToLine = onSeekTo
                                     )
-                                    else -> CommentsPanel(state = commentsState)
+                                    else -> CommentsPanel(
+                                        state = commentsState,
+                                        listState = commentsListState
+                                    )
                                 }
                             }
                         }

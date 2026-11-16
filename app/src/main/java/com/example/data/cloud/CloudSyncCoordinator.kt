@@ -42,6 +42,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import androidx.compose.runtime.Immutable
 import kotlinx.coroutines.withTimeoutOrNull
 import java.security.MessageDigest
 import java.text.SimpleDateFormat
@@ -49,6 +50,7 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicInteger
 
+@Immutable
 data class CloudAuthUiState(
     val isSignedIn: Boolean = false,
     val uid: String? = null,

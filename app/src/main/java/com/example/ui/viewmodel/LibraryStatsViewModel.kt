@@ -1,6 +1,7 @@
 package com.example.ui.viewmodel
 
 import android.net.Uri
+import androidx.compose.runtime.Immutable
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -28,12 +29,14 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
+@Immutable
 data class StatsUiState(
     val range: StatsRange = StatsRange.MONTH,
     val isLoading: Boolean = true,
     val summary: StatsSummary = StatsSummary(StatsRange.MONTH)
 )
 
+@Immutable
 data class ImportDialogState(
     val isImporting: Boolean = false,
     val statusText: String = "",

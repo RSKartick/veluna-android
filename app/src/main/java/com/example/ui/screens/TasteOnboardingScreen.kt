@@ -1,8 +1,6 @@
 package com.example.ui.screens
 
 import androidx.activity.compose.BackHandler
-import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -62,7 +60,6 @@ import com.example.model.TasteProfile
 import com.example.model.TasteSeed
 import com.example.ui.components.ArtWashBackdrop
 import com.example.ui.components.VelunaArtwork
-import com.example.ui.theme.VelunaMotion
 import com.example.ui.theme.velunaFilterChipBorder
 import com.example.ui.theme.velunaFilterChipColors
 import com.example.ui.theme.velunaInputChipColors
@@ -179,8 +176,7 @@ fun TasteOnboardingScreen(
                     if (selectedArtists.isNotEmpty() || selectedSongs.isNotEmpty()) {
                         item {
                             Column(
-                                verticalArrangement = Arrangement.spacedBy(8.dp),
-                                modifier = Modifier.animateContentSize(VelunaMotion.expressiveSpatialSpring())
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
                                 Text(
                                     text = stringResource(R.string.onboarding_your_picks, selectedArtists.size + selectedSongs.size),
@@ -229,11 +225,7 @@ fun TasteOnboardingScreen(
                                 LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                                     items(searchState.artists, key = { "onb_art_${it.id}" }) { artist ->
                                         val picked = selectedArtists.any { it.id == artist.id }
-                                        val borderCol by animateColorAsState(
-                                            targetValue = if (picked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant,
-                                            animationSpec = VelunaMotion.snappySpring(),
-                                            label = "artist_pick_border"
-                                        )
+                                        val borderCol = if (picked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant
                                         Column(
                                             horizontalAlignment = Alignment.CenterHorizontally,
                                             modifier = Modifier
@@ -251,6 +243,7 @@ fun TasteOnboardingScreen(
                                                     url = artist.thumbnail,
                                                     contentDescription = artist.title,
                                                     isCircle = true,
+                                                    targetSizePx = 240,
                                                     modifier = Modifier.matchParentSize().border(if (picked) 3.dp else 1.dp, borderCol, CircleShape)
                                                 )
                                                 if (picked) {
@@ -288,11 +281,7 @@ fun TasteOnboardingScreen(
                         }
                         items(searchState.songs, key = { "onb_song_${it.id}" }) { song ->
                             val picked = selectedSongs.any { it.id == song.id }
-                            val containerColor by animateColorAsState(
-                                targetValue = if (picked) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh,
-                                animationSpec = VelunaMotion.snappySpring(),
-                                label = "song_pick_bg"
-                            )
+                            val containerColor = if (picked) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh
                             val titleColor = if (picked) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface
                             val subtitleColor = if (picked) MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f) else MaterialTheme.colorScheme.onSurfaceVariant
                             Surface(
@@ -314,7 +303,12 @@ fun TasteOnboardingScreen(
                                     verticalAlignment = Alignment.CenterVertically,
                                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
                                 ) {
-                                    VelunaArtwork(url = song.thumbnail, contentDescription = song.title, modifier = Modifier.size(44.dp))
+                                    VelunaArtwork(
+                                        url = song.thumbnail,
+                                        contentDescription = song.title,
+                                        targetSizePx = 180,
+                                        modifier = Modifier.size(44.dp)
+                                    )
                                     Spacer(modifier = Modifier.width(12.dp))
                                     Column(modifier = Modifier.weight(1f)) {
                                         Text(song.title, style = MaterialTheme.typography.titleSmall, color = titleColor, maxLines = 1, overflow = TextOverflow.Ellipsis)

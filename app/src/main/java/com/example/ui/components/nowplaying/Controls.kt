@@ -46,10 +46,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.scale
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
@@ -279,7 +279,10 @@ private fun PlayerDeckInnerContent(
                             if (isLiked) R.string.player_unlike else R.string.player_like
                         ),
                         tint = likeTint,
-                        modifier = Modifier.scale(likeScale)
+                        modifier = Modifier.graphicsLayer {
+                            scaleX = likeScale
+                            scaleY = likeScale
+                        }
                     )
                 }
             }
@@ -348,7 +351,7 @@ private fun PlayerDeckInnerContent(
             modifier = Modifier
                 .size(if (classicLayout) 58.dp else 64.dp)
                 .shadow(
-                    elevation = if (classicLayout) 4.dp else 12.dp,
+                    elevation = if (classicLayout) 4.dp else 6.dp,
                     shape = CircleShape,
                     ambientColor = MaterialTheme.colorScheme.primary,
                     spotColor = MaterialTheme.colorScheme.primary

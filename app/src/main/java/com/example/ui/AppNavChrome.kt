@@ -2,7 +2,9 @@ package com.example.ui
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandHorizontally
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -45,8 +47,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
@@ -55,10 +57,10 @@ import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import com.example.R
 import com.example.ui.navigation.VelunaTopTab
-import com.example.ui.theme.VelunaMotion
 import com.example.ui.theme.velunaNavRailItemColors
 
 @Composable
@@ -68,6 +70,9 @@ fun VelunaBottomNavBar(
 ) {
     val capsuleShape = RoundedCornerShape(30.dp)
     val pillShape = RoundedCornerShape(24.dp)
+    val navAnimSpecFloat = tween<Float>(durationMillis = 150, easing = FastOutSlowInEasing)
+    val navAnimSpecColor = tween<androidx.compose.ui.graphics.Color>(durationMillis = 150, easing = FastOutSlowInEasing)
+    val navAnimSpecSize = tween<IntSize>(durationMillis = 150, easing = FastOutSlowInEasing)
 
     Box(
         contentAlignment = Alignment.Center,
@@ -81,7 +86,7 @@ fun VelunaBottomNavBar(
             contentColor = MaterialTheme.colorScheme.onSurface,
             shape = capsuleShape,
             tonalElevation = 6.dp,
-            shadowElevation = 12.dp,
+            shadowElevation = 4.dp,
             border = BorderStroke(
                 width = 1.dp,
                 brush = Brush.verticalGradient(
@@ -110,7 +115,7 @@ fun VelunaBottomNavBar(
 
                     val slotWeight by animateFloatAsState(
                         targetValue = if (selected) 2.05f else 1f,
-                        animationSpec = VelunaMotion.expressiveSpatialSpring(),
+                        animationSpec = navAnimSpecFloat,
                         label = "nav_slot_weight_${tab.name}"
                     )
                     val pillColor by animateColorAsState(
@@ -119,7 +124,7 @@ fun VelunaBottomNavBar(
                         } else {
                             MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0f)
                         },
-                        animationSpec = VelunaMotion.snappySpring(),
+                        animationSpec = navAnimSpecColor,
                         label = "nav_pill_bg_${tab.name}"
                     )
                     val contentTint by animateColorAsState(
@@ -128,12 +133,12 @@ fun VelunaBottomNavBar(
                         } else {
                             MaterialTheme.colorScheme.onSurfaceVariant
                         },
-                        animationSpec = VelunaMotion.snappySpring(),
+                        animationSpec = navAnimSpecColor,
                         label = "nav_pill_fg_${tab.name}"
                     )
                     val iconScale by animateFloatAsState(
                         targetValue = if (selected) 1.06f else 1f,
-                        animationSpec = VelunaMotion.bouncyScaleSpring(),
+                        animationSpec = navAnimSpecFloat,
                         label = "nav_icon_scale_${tab.name}"
                     )
 
@@ -171,18 +176,21 @@ fun VelunaBottomNavBar(
                                 tint = contentTint,
                                 modifier = Modifier
                                     .size(21.dp)
-                                    .scale(iconScale)
+                                    .graphicsLayer {
+                                        scaleX = iconScale
+                                        scaleY = iconScale
+                                    }
                             )
                             AnimatedVisibility(
                                 visible = selected,
                                 enter = expandHorizontally(
-                                    animationSpec = VelunaMotion.expressiveSpatialSpring(),
+                                    animationSpec = navAnimSpecSize,
                                     expandFrom = Alignment.Start
-                                ) + fadeIn(VelunaMotion.fastFade()),
+                                ) + fadeIn(tween(110)),
                                 exit = shrinkHorizontally(
-                                    animationSpec = VelunaMotion.snappySpring(),
+                                    animationSpec = navAnimSpecSize,
                                     shrinkTowards = Alignment.Start
-                                ) + fadeOut(VelunaMotion.fastFade())
+                                ) + fadeOut(tween(90))
                             ) {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     Spacer(modifier = Modifier.width(6.dp))

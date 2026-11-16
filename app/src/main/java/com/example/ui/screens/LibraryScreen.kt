@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
@@ -192,15 +193,12 @@ fun LibraryScreen(
                                             url = pl.thumbnail,
                                             contentDescription = pl.title,
                                             specialId = pl.id,
+                                            targetSizePx = 180,
                                             modifier = Modifier.size(54.dp)
                                         )
                                     },
                                     modifier = Modifier
                                         .clickable { onOpenBrowseItem(pl) }
-                                        .animateItem(
-                                            fadeInSpec = VelunaMotion.fastFade(),
-                                            placementSpec = VelunaMotion.expressiveIntOffsetSpring()
-                                        )
                                         .testTag("library_playlist_${pl.id}")
                                 )
                             }
@@ -219,27 +217,24 @@ fun LibraryScreen(
                                 contentPadding = PaddingValues(bottom = 28.dp),
                                 modifier = Modifier.fillMaxSize()
                             ) {
-                                item {
+                                item(contentType = "header") {
                                     PlayShuffleHeader(
                                         countLabel = stringResource(R.string.library_liked_count, likedSongs.size),
                                         onPlayAll = { onPlaySongs(likedSongs, 0, likedTitle) },
                                         onShuffleAll = { onPlaySongs(likedSongs.shuffled(), 0, likedTitle) }
                                     )
                                 }
-                                items(likedSongs, key = { "liked_${it.videoId}" }) { song ->
+                                itemsIndexed(
+                                    items = likedSongs,
+                                    key = { _, song -> "liked_${song.videoId}" },
+                                    contentType = { _, _ -> "track" }
+                                ) { idx, song ->
                                     TrackRow(
                                         song = song,
                                         isPlaying = nowPlayingId == song.videoId,
-                                        onClick = {
-                                            val idx = likedSongs.indexOfFirst { it.videoId == song.videoId }.coerceAtLeast(0)
-                                            onPlaySongs(likedSongs, idx, likedTitle)
-                                        },
+                                        onClick = { onPlaySongs(likedSongs, idx, likedTitle) },
                                         onMoreClick = { onTrackMore(song) },
-                                        onLikeClick = { onToggleLike(song) },
-                                        modifier = Modifier.animateItem(
-                                            fadeInSpec = VelunaMotion.fastFade(),
-                                            placementSpec = VelunaMotion.expressiveIntOffsetSpring()
-                                        )
+                                        onLikeClick = { onToggleLike(song) }
                                     )
                                 }
                             }
@@ -270,6 +265,7 @@ fun LibraryScreen(
                                             VelunaArtwork(
                                                 url = al.thumbnail,
                                                 contentDescription = al.title,
+                                                targetSizePx = 180,
                                                 modifier = Modifier.size(54.dp)
                                             )
                                         },
@@ -307,6 +303,7 @@ fun LibraryScreen(
                                                 url = ar.thumbnail,
                                                 contentDescription = ar.title,
                                                 isCircle = true,
+                                                targetSizePx = 180,
                                                 modifier = Modifier.size(52.dp)
                                             )
                                         },

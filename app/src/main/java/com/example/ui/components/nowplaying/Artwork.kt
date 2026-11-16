@@ -12,10 +12,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.scale
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.dp
 import com.example.ui.components.VelunaArtwork
 import com.example.ui.theme.VelunaMotion
@@ -39,8 +39,11 @@ fun NowPlayingArtwork(
         modifier = modifier
             .widthIn(max = if (compact) 230.dp else 330.dp)
             .aspectRatio(1f)
-            .scale(artPlayScale)
-            .shadow(if (compact) 8.dp else 24.dp, heroShape)
+            .graphicsLayer {
+                scaleX = artPlayScale
+                scaleY = artPlayScale
+            }
+            .shadow(if (compact) 6.dp else 12.dp, heroShape)
             .clip(heroShape)
             .then(
                 if (compact) {
@@ -68,6 +71,8 @@ fun NowPlayingArtwork(
             url = thumbnailUrl,
             contentDescription = title,
             shape = heroShape,
+            targetSizePx = 720,
+            crossfade = true,
             modifier = Modifier.fillMaxSize()
         )
     }

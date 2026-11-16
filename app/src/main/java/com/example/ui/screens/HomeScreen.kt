@@ -1,6 +1,6 @@
 package com.example.ui.screens
 
-import androidx.compose.animation.animateContentSize
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -59,8 +59,6 @@ import com.example.ui.components.SectionHeading
 import com.example.ui.components.ShortcutTile
 import com.example.ui.components.TrackRow
 import com.example.ui.components.VelunaArtwork
-import androidx.compose.foundation.BorderStroke
-import com.example.ui.theme.VelunaMotion
 import com.example.ui.theme.velunaFilterChipBorder
 import com.example.ui.theme.velunaFilterChipColors
 import com.example.ui.viewmodel.HomeUiState
@@ -88,7 +86,8 @@ fun HomeScreen(
     onOpenEditHome: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val prefix = when (LocalTime.now().hour) {
+    val currentHour = remember { LocalTime.now().hour }
+    val prefix = when (currentHour) {
         in 5..11 -> stringResource(R.string.home_good_morning)
         in 12..16 -> stringResource(R.string.home_good_afternoon)
         in 17..21 -> stringResource(R.string.home_good_evening)
@@ -98,6 +97,7 @@ fun HomeScreen(
         val name = prefs.userDisplayName.takeIf { it.isNotBlank() && it != "Listener" }
         if (name != null) "$prefix, $name" else prefix
     }
+    val shortcutPairs = remember(shortcuts) { shortcuts.take(6).chunked(2) }
 
     Box(modifier = modifier.fillMaxSize()) {
         if (prefs.showHeroArtworkBackdrop) {
@@ -198,6 +198,7 @@ fun HomeScreen(
                                     url = cloudAuthState.photoUrl,
                                     contentDescription = cloudAuthState.displayName ?: stringResource(R.string.home_account_settings),
                                     isCircle = true,
+                                    targetSizePx = 120,
                                     modifier = Modifier
                                         .size(30.dp)
                                         .border(1.5.dp, MaterialTheme.colorScheme.primary, CircleShape)
@@ -258,16 +259,15 @@ fun HomeScreen(
             }
 
             // Shortcuts Grid
-            if (shortcuts.isNotEmpty()) {
-                item {
-                    Column(modifier = Modifier.animateContentSize(VelunaMotion.expressiveSpatialSpring())) {
+            if (shortcutPairs.isNotEmpty()) {
+                item(key = "home_shortcuts_grid", contentType = "shortcuts") {
+                    Column {
                         SectionHeading(title = stringResource(R.string.home_shortcuts))
-                        val chunked = shortcuts.take(6).chunked(2)
                         Column(
                             verticalArrangement = Arrangement.spacedBy(8.dp),
                             modifier = Modifier.padding(horizontal = 16.dp)
                         ) {
-                            chunked.forEach { pair ->
+                            shortcutPairs.forEach { pair ->
                                 Row(
                                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                                     modifier = Modifier.fillMaxWidth()
@@ -387,62 +387,83 @@ fun HomeScreen(
             }
 
             // Remote InnerTube & Personalized Home Shelves
-            itemsIndexed(
-                homeState.homePage.sections,
-                key = { idx, sec -> "${idx}_${sec.kind}_${sec.title}_${sec.items.size}" }
-            ) { _, section ->
+            homeState.homePage.sections.forEachIndexed { secIdx, section ->
                 val isQuickPicks = section.kind == "PERSONALIZED_SONGS" ||
                     section.title.contains("quick picks", ignoreCase = true) ||
                     (section.items.isNotEmpty() && section.items.all { it.kind == BrowseKind.SONG } && section.items.size <= 16)
 
-                Column(
-                    modifier = Modifier.animateItem(
-                        fadeInSpec = VelunaMotion.fastFade(),
-                        placementSpec = VelunaMotion.expressiveIntOffsetSpring()
-                    )
-                ) {
-                    val openLabel = stringResource(R.string.home_open_action)
-                    SectionHeading(
-                        title = section.title,
-                        actionLabel = if (!section.moreBrowseId.isNullOrBlank()) openLabel else null,
-                        onActionClick = section.moreBrowseId?.let { bid ->
-                            {
-                                onOpenBrowseItem(
-                                    BrowseItem(
-                                        kind = BrowseKind.PLAYLIST,
-                                        id = bid,
-                                        title = section.title
+                if (isQuickPicks) {
+                    val quickPicks = section.items.take(8)
+                    item(
+                        key = "sec_hdr_${secIdx}_${section.kind}_${section.title}",
+                        contentType = "section_heading"
+                    ) {
+                        val openLabel = stringResource(R.string.home_open_action)
+                        SectionHeading(
+                            title = section.title,
+                            actionLabel = if (!section.moreBrowseId.isNullOrBlank()) openLabel else null,
+                            onActionClick = section.moreBrowseId?.let { bid ->
+                                {
+                                    onOpenBrowseItem(
+                                        BrowseItem(
+                                            kind = BrowseKind.PLAYLIST,
+                                            id = bid,
+                                            title = section.title
+                                        )
                                     )
-                                )
+                                }
                             }
-                        }
-                    )
-
-                    if (isQuickPicks) {
-                        Column(modifier = Modifier.padding(horizontal = 4.dp)) {
-                            section.items.take(8).forEach { item ->
-                                val song = item.toSongItem()
-                                TrackRow(
-                                    song = song,
-                                    isPlaying = nowPlayingSong?.videoId == song.videoId,
-                                    isLiked = song.videoId in likedIds,
-                                    onClick = { onOpenBrowseItem(item) },
-                                    onMoreClick = { onTrackMore(song) },
-                                    onLikeClick = onToggleLike?.let { fn -> { fn(song) } }
-                                )
-                            }
-                        }
-                    } else {
-                        LazyRow(
-                            contentPadding = PaddingValues(horizontal = 10.dp),
-                            horizontalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            items(section.items, key = { "${section.title}_${it.id}_${it.title}" }) { item ->
-                                MediaSquareCard(
-                                    item = item,
-                                    showPlayBadge = item.kind == BrowseKind.SONG,
-                                    onClick = { onOpenBrowseItem(item) }
-                                )
+                        )
+                    }
+                    items(
+                        items = quickPicks,
+                        key = { item -> "qp_${secIdx}_${section.title}_${item.id}" },
+                        contentType = { "quick_pick_song" }
+                    ) { item ->
+                        val song = remember(item) { item.toSongItem() }
+                        TrackRow(
+                            song = song,
+                            isPlaying = nowPlayingSong?.videoId == song.videoId,
+                            isLiked = song.videoId in likedIds,
+                            onClick = { onOpenBrowseItem(item) },
+                            onMoreClick = { onTrackMore(song) },
+                            onLikeClick = onToggleLike?.let { fn -> { fn(song) } },
+                            modifier = Modifier.padding(horizontal = 4.dp)
+                        )
+                    }
+                } else {
+                    item(
+                        key = "${secIdx}_${section.kind}_${section.title}_${section.items.size}",
+                        contentType = "carousel_shelf"
+                    ) {
+                        Column {
+                            val openLabel = stringResource(R.string.home_open_action)
+                            SectionHeading(
+                                title = section.title,
+                                actionLabel = if (!section.moreBrowseId.isNullOrBlank()) openLabel else null,
+                                onActionClick = section.moreBrowseId?.let { bid ->
+                                    {
+                                        onOpenBrowseItem(
+                                            BrowseItem(
+                                                kind = BrowseKind.PLAYLIST,
+                                                id = bid,
+                                                title = section.title
+                                            )
+                                        )
+                                    }
+                                }
+                            )
+                            LazyRow(
+                                contentPadding = PaddingValues(horizontal = 10.dp),
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                items(section.items, key = { "${section.title}_${it.id}_${it.title}" }) { item ->
+                                    MediaSquareCard(
+                                        item = item,
+                                        showPlayBadge = item.kind == BrowseKind.SONG,
+                                        onClick = { onOpenBrowseItem(item) }
+                                    )
+                                }
                             }
                         }
                     }

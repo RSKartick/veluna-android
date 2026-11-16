@@ -164,47 +164,65 @@ fun VelunaApp(
         var showEditHome by remember { mutableStateOf(false) }
         var showTasteEditor by remember { mutableStateOf(false) }
 
-        fun playTracks(tracks: List<SongItem>, index: Int, source: String) {
-            ensureNotificationPermission()
-            container.playerController.playQueue(tracks, index, source)
-        }
-
-        fun openBrowseItem(item: BrowseItem) {
-            when (item.kind) {
-                BrowseKind.SONG -> {
-                    ensureNotificationPermission()
-                    container.playerController.playSong(item.toSongItem(), item.title)
-                }
-                BrowseKind.ALBUM -> {
-                    container.playerController.openNowPlaying(false)
-                    navController.navigate(AlbumRoute(item.id))
-                }
-                BrowseKind.ARTIST -> {
-                    container.playerController.openNowPlaying(false)
-                    navController.navigate(ArtistRoute(item.id))
-                }
-                BrowseKind.PLAYLIST -> {
-                    container.playerController.openNowPlaying(false)
-                    navController.navigate(PlaylistRoute(item.id))
-                }
+        val playTracks = remember(ensureNotificationPermission, container) {
+            { tracks: List<SongItem>, index: Int, source: String ->
+                ensureNotificationPermission()
+                container.playerController.playQueue(tracks, index, source)
             }
         }
 
-        fun navigateTopTab(tab: VelunaTopTab) {
-            val route: Any = when (tab) {
-                VelunaTopTab.HOME -> HomeRoute
-                VelunaTopTab.SEARCH -> SearchRoute
-                VelunaTopTab.LIBRARY -> LibraryRoute
-                VelunaTopTab.STATS -> StatsRoute
-                VelunaTopTab.SETTINGS -> SettingsRoute
-            }
-            if (tab == VelunaTopTab.STATS) libraryStatsVm.refreshStats()
-            navController.navigate(route) {
-                popUpTo(navController.graph.findStartDestination().id) { saveState = true }
-                launchSingleTop = true
-                restoreState = true
+        val openBrowseItem = remember(ensureNotificationPermission, container, navController) {
+            { item: BrowseItem ->
+                when (item.kind) {
+                    BrowseKind.SONG -> {
+                        ensureNotificationPermission()
+                        container.playerController.playSong(item.toSongItem(), item.title)
+                    }
+                    BrowseKind.ALBUM -> {
+                        container.playerController.openNowPlaying(false)
+                        navController.navigate(AlbumRoute(item.id))
+                    }
+                    BrowseKind.ARTIST -> {
+                        container.playerController.openNowPlaying(false)
+                        navController.navigate(ArtistRoute(item.id))
+                    }
+                    BrowseKind.PLAYLIST -> {
+                        container.playerController.openNowPlaying(false)
+                        navController.navigate(PlaylistRoute(item.id))
+                    }
+                }
             }
         }
+
+        val navigateTopTab = remember(libraryStatsVm, navController) {
+            { tab: VelunaTopTab ->
+                val route: Any = when (tab) {
+                    VelunaTopTab.HOME -> HomeRoute
+                    VelunaTopTab.SEARCH -> SearchRoute
+                    VelunaTopTab.LIBRARY -> LibraryRoute
+                    VelunaTopTab.STATS -> StatsRoute
+                    VelunaTopTab.SETTINGS -> SettingsRoute
+                }
+                if (tab == VelunaTopTab.STATS) libraryStatsVm.refreshStats()
+                navController.navigate(route) {
+                    popUpTo(navController.graph.findStartDestination().id) { saveState = true }
+                    launchSingleTop = true
+                    restoreState = true
+                }
+            }
+        }
+
+        val onTrackMore = remember { { song: SongItem -> menuTrack = song } }
+        val onOpenEditHome = remember { { showEditHome = true } }
+        val onOpenCreatePlaylist = remember { { showCreatePlaylist = true } }
+        val onOpenImportPlaylist = remember(libraryStatsVm) {
+            {
+                libraryStatsVm.resetImportState()
+                showImportPlaylist = true
+            }
+        }
+        val onOpenTasteOnboarding = remember { { showTasteEditor = true } }
+        val onOpenEqualizer = remember { { showEqualizer = true } }
 
         val currentDestination = backStackEntry?.destination
         val selectedTopTab = when {
@@ -246,7 +264,7 @@ fun VelunaApp(
                                         onToggleLike = { container.playerController.toggleLikeCurrent() }
                                     )
                                 }
-                                VelunaBottomNavBar(selectedTab = selectedTopTab, onSelectTab = ::navigateTopTab)
+                                VelunaBottomNavBar(selectedTab = selectedTopTab, onSelectTab = navigateTopTab)
                             }
                         } else {
                             AnimatedVisibility(
@@ -282,7 +300,7 @@ fun VelunaApp(
                         if (useNavigationRail) {
                             VelunaNavRail(
                                 selectedTab = selectedTopTab,
-                                onSelectTab = ::navigateTopTab,
+                                onSelectTab = navigateTopTab,
                                 modifier = Modifier
                                     .fillMaxHeight()
                                     .statusBarsPadding()
@@ -304,18 +322,15 @@ fun VelunaApp(
                             tasteProfile = tasteProfile,
                             cloudAuthState = cloudAuthState,
                             ensureNotificationPermission = ensureNotificationPermission,
-                            onNavigateTopTab = ::navigateTopTab,
-                            onPlayTracks = ::playTracks,
-                            onOpenBrowseItem = ::openBrowseItem,
-                            onTrackMore = { menuTrack = it },
-                            onOpenEditHome = { showEditHome = true },
-                            onOpenCreatePlaylist = { showCreatePlaylist = true },
-                            onOpenImportPlaylist = {
-                                libraryStatsVm.resetImportState()
-                                showImportPlaylist = true
-                            },
-                            onOpenTasteOnboarding = { showTasteEditor = true },
-                            onOpenEqualizer = { showEqualizer = true },
+                            onNavigateTopTab = navigateTopTab,
+                            onPlayTracks = playTracks,
+                            onOpenBrowseItem = openBrowseItem,
+                            onTrackMore = onTrackMore,
+                            onOpenEditHome = onOpenEditHome,
+                            onOpenCreatePlaylist = onOpenCreatePlaylist,
+                            onOpenImportPlaylist = onOpenImportPlaylist,
+                            onOpenTasteOnboarding = onOpenTasteOnboarding,
+                            onOpenEqualizer = onOpenEqualizer,
                             modifier = Modifier
                                 .weight(1f)
                                 .fillMaxHeight()

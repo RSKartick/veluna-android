@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
@@ -77,7 +78,8 @@ fun SyncedLyricsPanel(
     onResetPinned: () -> Unit,
     onNudgeOffset: (Long) -> Unit,
     onSeekToLine: (Long) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    listState: LazyListState = rememberLazyListState()
 ) {
     var providerMenuOpen by remember { mutableStateOf(false) }
     val data = lyricsState.data
@@ -219,7 +221,6 @@ fun SyncedLyricsPanel(
                     if (data.synced) data.lines else emptyList()
                 }
                 val activeIndex by rememberActiveLyricIndex(syncedLines, data.offsetMs, positionFlow)
-                val listState = rememberLazyListState()
 
                 LaunchedEffect(activeIndex, data.synced) {
                     if (data.synced && activeIndex >= 0) {
@@ -310,20 +311,27 @@ private fun ActiveKaraokeLyricLine(
     positionFlow: StateFlow<PlaybackPositionState>
 ) {
     val pos by positionFlow.collectAsStateWithLifecycle()
-    val effectivePos = pos.positionMs - offsetMs
+    val reachedCount by remember(words, offsetMs) {
+        derivedStateOf {
+            val effectivePos = pos.positionMs - offsetMs
+            words.count { effectivePos >= it.startMs }
+        }
+    }
     val primaryColor = MaterialTheme.colorScheme.primary
     val upcomingColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f)
-    val annotated = buildAnnotatedString {
-        words.forEachIndexed { wIdx, w ->
-            if (wIdx > 0) append(" ")
-            val reached = effectivePos >= w.startMs
-            withStyle(
-                SpanStyle(
-                    color = if (reached) primaryColor else upcomingColor,
-                    fontWeight = if (reached) FontWeight.Bold else FontWeight.Medium
-                )
-            ) {
-                append(w.text)
+    val annotated = remember(words, reachedCount, primaryColor, upcomingColor) {
+        buildAnnotatedString {
+            words.forEachIndexed { wIdx, w ->
+                if (wIdx > 0) append(" ")
+                val reached = wIdx < reachedCount
+                withStyle(
+                    SpanStyle(
+                        color = if (reached) primaryColor else upcomingColor,
+                        fontWeight = if (reached) FontWeight.Bold else FontWeight.Medium
+                    )
+                ) {
+                    append(w.text)
+                }
             }
         }
     }

@@ -1,7 +1,5 @@
 package com.example.ui.components
 
-import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -32,11 +30,10 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
@@ -49,7 +46,6 @@ import com.example.model.BrowseItem
 import com.example.model.BrowseKind
 import com.example.model.Rating
 import com.example.model.SongItem
-import com.example.ui.theme.VelunaMotion
 
 @Composable
 fun SectionHeading(
@@ -112,6 +108,7 @@ fun MediaSquareCard(
                 contentDescription = item.title,
                 specialId = item.id,
                 isCircle = isArtist,
+                targetSizePx = 360,
                 modifier = Modifier.matchParentSize()
             )
             if (showPlayBadge && item.kind == BrowseKind.SONG) {
@@ -182,6 +179,7 @@ fun FamiliarArtistCard(
                 url = item.thumbnail,
                 contentDescription = item.title,
                 isCircle = true,
+                targetSizePx = 280,
                 modifier = Modifier.matchParentSize()
             )
             Surface(
@@ -236,6 +234,7 @@ fun ShortcutTile(
                 contentDescription = item.title,
                 specialId = item.id,
                 shape = RoundedCornerShape(topStart = 10.dp, bottomStart = 10.dp),
+                targetSizePx = 180,
                 modifier = Modifier.size(60.dp)
             )
             Spacer(modifier = Modifier.width(10.dp))
@@ -265,20 +264,11 @@ fun TrackRow(
     onLikeClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
-    val rowBg by animateColorAsState(
-        targetValue = if (isPlaying) {
-            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)
-        } else {
-            MaterialTheme.colorScheme.background.copy(alpha = 0f)
-        },
-        animationSpec = VelunaMotion.snappySpring(),
-        label = "track_row_bg"
-    )
-    val likeScale by animateFloatAsState(
-        targetValue = if (isLiked) 1.15f else 1f,
-        animationSpec = VelunaMotion.bouncyScaleSpring(),
-        label = "track_like_scale"
-    )
+    val rowBg = if (isPlaying) {
+        MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)
+    } else {
+        Color.Transparent
+    }
 
     Row(
         modifier = modifier
@@ -305,6 +295,7 @@ fun TrackRow(
                 url = song.thumbnail,
                 contentDescription = song.title,
                 shape = MaterialTheme.shapes.small,
+                targetSizePx = 180,
                 modifier = Modifier.size(48.dp)
             )
             Spacer(modifier = Modifier.width(12.dp))
@@ -340,11 +331,14 @@ fun TrackRow(
                 }
             }
             Spacer(modifier = Modifier.height(2.dp))
-            Text(
-                text = listOfNotNull(
+            val subtitleText = remember(song.artists, song.album) {
+                listOfNotNull(
                     song.artists.takeIf { it.isNotBlank() },
                     song.album?.takeIf { it.isNotBlank() }
-                ).joinToString(" • ").ifBlank { stringResource(R.string.track_fallback_label) },
+                ).joinToString(" • ")
+            }.ifBlank { stringResource(R.string.track_fallback_label) }
+            Text(
+                text = subtitleText,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
@@ -372,8 +366,7 @@ fun TrackRow(
                 Icon(
                     imageVector = if (isLiked) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
                     contentDescription = stringResource(if (isLiked) R.string.track_unlike else R.string.track_like),
-                    tint = if (isLiked) Color(0xFFEF4444) else MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.scale(likeScale)
+                    tint = if (isLiked) Color(0xFFEF4444) else MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
         }

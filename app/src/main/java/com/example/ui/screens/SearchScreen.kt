@@ -52,8 +52,8 @@ import com.example.ui.components.VelunaArtwork
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.TabRowDefaults
 import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
+import androidx.compose.runtime.remember
 import androidx.compose.ui.graphics.Color
-import com.example.ui.theme.VelunaMotion
 import com.example.ui.theme.velunaOutlinedFieldColors
 import com.example.ui.viewmodel.SearchUiState
 
@@ -157,14 +157,17 @@ fun SearchScreen(
                         }
                     }
 
-                    val list = when (state.selectedCategoryTab) {
-                        0 -> state.results.top + state.results.songs.take(6) + state.results.albums.take(4) + state.results.artists.take(4)
-                        1 -> state.results.songs
-                        2 -> state.results.videos
-                        3 -> state.results.albums
-                        4 -> state.results.artists
-                        else -> state.results.playlists
-                    }.distinctBy { "${it.kind}_${it.id}" }
+                    val results = state.results
+                    val list = remember(results, state.selectedCategoryTab) {
+                        when (state.selectedCategoryTab) {
+                            0 -> results.top + results.songs.take(6) + results.albums.take(4) + results.artists.take(4)
+                            1 -> results.songs
+                            2 -> results.videos
+                            3 -> results.albums
+                            4 -> results.artists
+                            else -> results.playlists
+                        }.distinctBy { "${it.kind}_${it.id}" }
+                    }
 
                     if (list.isEmpty()) {
                         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -178,18 +181,18 @@ fun SearchScreen(
                             contentPadding = PaddingValues(top = 8.dp, bottom = 28.dp),
                             modifier = Modifier.fillMaxSize()
                         ) {
-                            items(list, key = { "${it.kind}_${it.id}_${it.title}" }) { item ->
+                            items(
+                                items = list,
+                                key = { "${it.kind}_${it.id}_${it.title}" },
+                                contentType = { it.kind }
+                            ) { item ->
                                 if (item.kind == BrowseKind.SONG) {
-                                    val song = item.toSongItem()
+                                    val song = remember(item) { item.toSongItem() }
                                     TrackRow(
                                         song = song,
                                         isPlaying = nowPlayingId == song.videoId,
                                         onClick = { onOpenBrowseItem(item) },
-                                        onMoreClick = { onTrackMore(song) },
-                                        modifier = Modifier.animateItem(
-                                            fadeInSpec = VelunaMotion.fastFade(),
-                                            placementSpec = VelunaMotion.expressiveIntOffsetSpring()
-                                        )
+                                        onMoreClick = { onTrackMore(song) }
                                     )
                                 } else {
                                     ListItem(
@@ -211,15 +214,12 @@ fun SearchScreen(
                                                 url = item.thumbnail,
                                                 contentDescription = item.title,
                                                 isCircle = item.kind == BrowseKind.ARTIST,
+                                                targetSizePx = 180,
                                                 modifier = Modifier.size(48.dp)
                                             )
                                         },
                                         modifier = Modifier
                                             .clickable { onOpenBrowseItem(item) }
-                                            .animateItem(
-                                                fadeInSpec = VelunaMotion.fastFade(),
-                                                placementSpec = VelunaMotion.expressiveIntOffsetSpring()
-                                            )
                                             .testTag("search_result_${item.id}")
                                     )
                                 }
@@ -282,6 +282,7 @@ fun SearchScreen(
                                             url = item.thumbnail,
                                             contentDescription = item.title,
                                             isCircle = item.kind == BrowseKind.ARTIST,
+                                            targetSizePx = 180,
                                             modifier = Modifier.size(44.dp)
                                         )
                                     },

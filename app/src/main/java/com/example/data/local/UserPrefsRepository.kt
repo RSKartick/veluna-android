@@ -1,6 +1,7 @@
 package com.example.data.local
 
 import android.content.Context
+import androidx.compose.runtime.Immutable
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
@@ -17,18 +18,23 @@ import com.example.model.LyricsProviderInfo
 import com.example.model.TasteProfile
 import com.example.model.ThemeMode
 import com.example.model.VelunaThemePreset
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onStart
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import java.util.concurrent.atomic.AtomicBoolean
 
 private val Context.velunaPrefsDataStore: DataStore<Preferences> by preferencesDataStore(name = "veluna_prefs")
 
+@Immutable
 @Serializable
 data class VelunaUserPrefs(
     val themePreset: VelunaThemePreset = VelunaThemePreset.DEFAULT,
@@ -73,7 +79,8 @@ class UserPrefsRepository(
 ) {
     private val json = Json { ignoreUnknownKeys = true }
 
-    private val vaultState = MutableStateFlow(readVaultSnapshot())
+    private val vaultLoaded = AtomicBoolean(false)
+    private val vaultState = MutableStateFlow(VaultSecretsSnapshot())
 
     private object Keys {
         val THEME_PRESET = stringPreferencesKey("theme_preset")
@@ -131,12 +138,21 @@ class UserPrefsRepository(
     }
 
     fun refreshVaultSecrets() {
+        vaultLoaded.set(true)
         vaultState.value = readVaultSnapshot()
     }
 
     val prefsFlow: Flow<VelunaUserPrefs> = combine(
         dataStore.data,
-        vaultState
+        vaultState.onStart {
+            if (!vaultLoaded.get()) {
+                withContext(Dispatchers.IO) {
+                    if (vaultLoaded.compareAndSet(false, true)) {
+                        vaultState.value = readVaultSnapshot()
+                    }
+                }
+            }
+        }
     ) { p, secrets ->
         val preset = p[Keys.THEME_PRESET]?.let { id ->
             VelunaThemePreset.entries.find { it.id == id }
@@ -179,7 +195,7 @@ class UserPrefsRepository(
             showHeroArtworkBackdrop = p[Keys.SHOW_HERO_BACKDROP] ?: true,
             userDisplayName = p[Keys.DISPLAY_NAME] ?: "Listener"
         )
-    }
+    }.distinctUntilChanged()
 
     val tasteProfileFlow: Flow<TasteProfile> = dataStore.data
         .map { p ->

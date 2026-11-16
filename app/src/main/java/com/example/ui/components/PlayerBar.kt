@@ -35,8 +35,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
@@ -78,7 +78,7 @@ fun MiniPlayerBar(
     Surface(
         color = MaterialTheme.colorScheme.surfaceContainerHigh,
         tonalElevation = 6.dp,
-        shadowElevation = 8.dp,
+        shadowElevation = 4.dp,
         shape = MaterialTheme.shapes.medium,
         modifier = modifier
             .fillMaxWidth()
@@ -97,6 +97,7 @@ fun MiniPlayerBar(
                     url = song.thumbnail,
                     contentDescription = song.title,
                     shape = MaterialTheme.shapes.small,
+                    targetSizePx = 180,
                     modifier = Modifier.size(46.dp)
                 )
                 Spacer(modifier = Modifier.width(12.dp))
@@ -128,7 +129,10 @@ fun MiniPlayerBar(
                             imageVector = if (isLiked) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
                             contentDescription = stringResource(if (isLiked) R.string.player_unlike else R.string.player_like),
                             tint = likeTint,
-                            modifier = Modifier.scale(likeScale)
+                            modifier = Modifier.graphicsLayer {
+                                scaleX = likeScale
+                                scaleY = likeScale
+                            }
                         )
                     }
                 }

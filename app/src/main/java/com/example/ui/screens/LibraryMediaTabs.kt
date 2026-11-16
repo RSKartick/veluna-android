@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AudioFile
 import androidx.compose.material.icons.rounded.CreateNewFolder
@@ -34,6 +35,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
@@ -59,10 +61,12 @@ internal fun LibraryDownloadsTab(
     onTrackMore: (SongItem) -> Unit,
     onDeleteDownload: (String) -> Unit
 ) {
-    val activeList = activeDownloads.values.filter {
-        it.status == DownloadStatus.DOWNLOADING ||
-            it.status == DownloadStatus.QUEUED ||
-            it.status == DownloadStatus.FAILED
+    val activeList = remember(activeDownloads) {
+        activeDownloads.values.filter {
+            it.status == DownloadStatus.DOWNLOADING ||
+                it.status == DownloadStatus.QUEUED ||
+                it.status == DownloadStatus.FAILED
+        }
     }
     if (activeList.isEmpty() && downloads.isEmpty()) {
         EmptyLibraryNotice(
@@ -109,17 +113,14 @@ internal fun LibraryDownloadsTab(
                 }
             }
 
-            items(downloads, key = { "dl_done_${it.videoId}" }) { song ->
+            itemsIndexed(downloads, key = { _, song -> "dl_done_${song.videoId}" }) { idx, song ->
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Box(modifier = Modifier.weight(1f)) {
                         TrackRow(
                             song = song,
                             isPlaying = nowPlayingId == song.videoId,
                             isDownloaded = true,
-                            onClick = {
-                                val idx = downloads.indexOfFirst { it.videoId == song.videoId }.coerceAtLeast(0)
-                                onPlaySongs(downloads, idx, downloadsLabel)
-                            },
+                            onClick = { onPlaySongs(downloads, idx, downloadsLabel) },
                             onMoreClick = { onTrackMore(song) }
                         )
                     }
@@ -219,16 +220,13 @@ internal fun LibraryLocalMusicTab(
                     onShuffleAll = { onPlaySongs(localTracks.shuffled(), 0, localMusicLabel) }
                 )
             }
-            items(localTracks, key = { it.videoId }) { song ->
+            itemsIndexed(localTracks, key = { _, song -> song.videoId }) { idx, song ->
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Box(modifier = Modifier.weight(1f)) {
                         TrackRow(
                             song = song,
                             isPlaying = nowPlayingId == song.videoId,
-                            onClick = {
-                                val idx = localTracks.indexOfFirst { it.videoId == song.videoId }.coerceAtLeast(0)
-                                onPlaySongs(localTracks, idx, localMusicLabel)
-                            },
+                            onClick = { onPlaySongs(localTracks, idx, localMusicLabel) },
                             onMoreClick = { onTrackMore(song) }
                         )
                     }
