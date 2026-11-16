@@ -11,9 +11,16 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.MutableIntState
+import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.Stable
+import androidx.compose.runtime.State
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.focusProperties
@@ -31,13 +38,10 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.toRoute
 import com.example.VelunaAppContainer
-import com.example.data.cloud.CloudAuthUiState
-import com.example.data.local.VelunaUserPrefs
 import com.example.model.BrowseItem
 import com.example.model.DownloadProgress
 import com.example.model.MoodTile
 import com.example.model.SongItem
-import com.example.model.TasteProfile
 import com.example.playback.PlaybackUiState
 import com.example.ui.navigation.AlbumRoute
 import com.example.ui.navigation.ArtistRoute
@@ -59,27 +63,55 @@ import com.example.ui.viewmodel.DetailViewModel
 import com.example.ui.viewmodel.HomeSearchViewModel
 import com.example.ui.viewmodel.LibraryStatsViewModel
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.map
+
+@Stable
+class VelunaTabNavState(
+    selectedTabState: MutableState<VelunaTopTab>,
+    visitedMaskState: MutableIntState
+) {
+    var selectedTab: VelunaTopTab by selectedTabState
+        private set
+
+    var visitedMask: Int by visitedMaskState
+        private set
+
+    fun selectTab(tab: VelunaTopTab) {
+        val flag = 1 shl tab.ordinal
+        if ((visitedMask and flag) == 0) {
+            visitedMask = visitedMask or flag
+        }
+        if (selectedTab != tab) {
+            selectedTab = tab
+        }
+    }
+
+    fun isSelected(tab: VelunaTopTab): Boolean = selectedTab == tab
+
+    fun isVisited(tab: VelunaTopTab): Boolean = (visitedMask and (1 shl tab.ordinal)) != 0
+}
+
+@Composable
+fun rememberVelunaTabNavState(
+    initialTab: VelunaTopTab = VelunaTopTab.HOME
+): VelunaTabNavState {
+    val selectedTabState = rememberSaveable { mutableStateOf(initialTab) }
+    val visitedMaskState = rememberSaveable { mutableIntStateOf(1 shl initialTab.ordinal) }
+    return remember(selectedTabState, visitedMaskState) {
+        VelunaTabNavState(selectedTabState, visitedMaskState)
+    }
+}
 
 @Composable
 fun VelunaNavHost(
     navController: NavHostController,
-    selectedTopTab: VelunaTopTab,
-    visitedTabMask: Int,
-    isAtTopTabRoot: Boolean,
+    tabNavState: VelunaTabNavState,
+    isAtTopTabRootState: State<Boolean>,
     container: VelunaAppContainer,
     homeSearchVm: HomeSearchViewModel,
     detailVm: DetailViewModel,
     libraryStatsVm: LibraryStatsViewModel,
-    prefs: VelunaUserPrefs,
-    playbackFlow: StateFlow<PlaybackUiState>,
-    playlists: List<BrowseItem>,
-    likedIds: Set<String>,
-    downloadedTracks: List<SongItem>,
+    playbackState: State<PlaybackUiState>,
     downloadsFlow: StateFlow<Map<String, DownloadProgress>>,
-    tasteProfile: TasteProfile?,
-    cloudAuthState: CloudAuthUiState,
     ensureNotificationPermission: () -> Unit,
     onNavigateTopTab: (VelunaTopTab) -> Unit,
     onPlayTracks: (List<SongItem>, Int, String) -> Unit,
@@ -92,52 +124,50 @@ fun VelunaNavHost(
     onOpenEqualizer: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val enterAnim = remember {
+        slideInHorizontally(
+            animationSpec = VelunaMotion.expressiveIntOffsetSpring(),
+            initialOffsetX = { (it * 0.08f).toInt() }
+        ) + fadeIn(VelunaMotion.fastFade())
+    }
+    val exitAnim = remember {
+        slideOutHorizontally(
+            animationSpec = VelunaMotion.snappyIntOffsetSpring(),
+            targetOffsetX = { -(it * 0.05f).toInt() }
+        ) + fadeOut(VelunaMotion.fastFade())
+    }
+    val popEnterAnim = remember {
+        slideInHorizontally(
+            animationSpec = VelunaMotion.expressiveIntOffsetSpring(),
+            initialOffsetX = { -(it * 0.08f).toInt() }
+        ) + fadeIn(VelunaMotion.fastFade())
+    }
+    val popExitAnim = remember {
+        slideOutHorizontally(
+            animationSpec = VelunaMotion.snappyIntOffsetSpring(),
+            targetOffsetX = { (it * 0.08f).toInt() }
+        ) + fadeOut(VelunaMotion.fastFade())
+    }
+
     NavHost(
         navController = navController,
         startDestination = HomeRoute,
-        enterTransition = {
-            slideInHorizontally(
-                animationSpec = VelunaMotion.expressiveIntOffsetSpring(),
-                initialOffsetX = { (it * 0.08f).toInt() }
-            ) + fadeIn(VelunaMotion.fastFade())
-        },
-        exitTransition = {
-            slideOutHorizontally(
-                animationSpec = VelunaMotion.snappyIntOffsetSpring(),
-                targetOffsetX = { -(it * 0.05f).toInt() }
-            ) + fadeOut(VelunaMotion.fastFade())
-        },
-        popEnterTransition = {
-            slideInHorizontally(
-                animationSpec = VelunaMotion.expressiveIntOffsetSpring(),
-                initialOffsetX = { -(it * 0.08f).toInt() }
-            ) + fadeIn(VelunaMotion.fastFade())
-        },
-        popExitTransition = {
-            slideOutHorizontally(
-                animationSpec = VelunaMotion.snappyIntOffsetSpring(),
-                targetOffsetX = { (it * 0.08f).toInt() }
-            ) + fadeOut(VelunaMotion.fastFade())
-        },
+        enterTransition = { enterAnim },
+        exitTransition = { exitAnim },
+        popEnterTransition = { popEnterAnim },
+        popExitTransition = { popExitAnim },
         modifier = modifier
     ) {
         composable<HomeRoute> {
             TopLevelTabDeck(
-                selectedTopTab = selectedTopTab,
-                visitedTabMask = visitedTabMask,
-                isAtTopTabRoot = isAtTopTabRoot,
+                tabNavState = tabNavState,
+                isAtTopTabRootState = isAtTopTabRootState,
                 navController = navController,
                 container = container,
                 homeSearchVm = homeSearchVm,
                 libraryStatsVm = libraryStatsVm,
-                prefs = prefs,
-                playbackFlow = playbackFlow,
-                playlists = playlists,
-                likedIds = likedIds,
-                downloadedTracks = downloadedTracks,
+                playbackState = playbackState,
                 downloadsFlow = downloadsFlow,
-                tasteProfile = tasteProfile,
-                cloudAuthState = cloudAuthState,
                 ensureNotificationPermission = ensureNotificationPermission,
                 onNavigateTopTab = onNavigateTopTab,
                 onPlayTracks = onPlayTracks,
@@ -153,42 +183,51 @@ fun VelunaNavHost(
 
         composable<AlbumRoute> { entry ->
             val route = entry.toRoute<AlbumRoute>()
-            LaunchedEffect(route.albumId) { detailVm.loadAlbum(route.albumId) }
+            val savedAlbumId by rememberSaveable(route.albumId) { mutableStateOf(route.albumId) }
+            LaunchedEffect(savedAlbumId) { detailVm.loadAlbum(savedAlbumId) }
             val albumState by detailVm.albumState.collectAsStateWithLifecycle()
-            val isSaved by detailVm.observeIsAlbumSaved(route.albumId).collectAsStateWithLifecycle()
-            val nowPlayingId by remember(playbackFlow) {
-                playbackFlow.map { it.nowPlaying?.videoId }.distinctUntilChanged()
-            }.collectAsStateWithLifecycle(initialValue = null)
+            val isSavedFlow = remember(detailVm, savedAlbumId) { detailVm.observeIsAlbumSaved(savedAlbumId) }
+            val isSaved by isSavedFlow.collectAsStateWithLifecycle()
+            val nowPlayingId by remember(playbackState) {
+                derivedStateOf { playbackState.value.nowPlaying?.videoId }
+            }
+            val onBack = remember(navController) { { navController.popBackStack(); Unit } }
+            val onToggleSave = remember(detailVm, isSaved) { { detailVm.toggleSaveAlbum(isSaved) } }
+            val onOpenArtist = remember(navController) { { id: String -> navController.navigate(ArtistRoute(id)) } }
 
             AlbumDetailScreen(
                 state = albumState,
                 isSaved = isSaved,
                 nowPlayingId = nowPlayingId,
-                onBack = { navController.popBackStack() },
-                onToggleSave = { detailVm.toggleSaveAlbum(isSaved) },
+                onBack = onBack,
+                onToggleSave = onToggleSave,
                 onPinShortcut = detailVm::pinAsShortcut,
                 onPlayTracks = onPlayTracks,
                 onTrackMore = onTrackMore,
                 onOpenBrowseItem = onOpenBrowseItem,
-                onOpenArtist = { id -> navController.navigate(ArtistRoute(id)) }
+                onOpenArtist = onOpenArtist
             )
         }
 
         composable<ArtistRoute> { entry ->
             val route = entry.toRoute<ArtistRoute>()
-            LaunchedEffect(route.channelId) { detailVm.loadArtist(route.channelId) }
+            val savedChannelId by rememberSaveable(route.channelId) { mutableStateOf(route.channelId) }
+            LaunchedEffect(savedChannelId) { detailVm.loadArtist(savedChannelId) }
             val artistState by detailVm.artistState.collectAsStateWithLifecycle()
-            val isFollowed by detailVm.observeIsArtistFollowed(route.channelId).collectAsStateWithLifecycle()
-            val nowPlayingId by remember(playbackFlow) {
-                playbackFlow.map { it.nowPlaying?.videoId }.distinctUntilChanged()
-            }.collectAsStateWithLifecycle(initialValue = null)
+            val isFollowedFlow = remember(detailVm, savedChannelId) { detailVm.observeIsArtistFollowed(savedChannelId) }
+            val isFollowed by isFollowedFlow.collectAsStateWithLifecycle()
+            val nowPlayingId by remember(playbackState) {
+                derivedStateOf { playbackState.value.nowPlaying?.videoId }
+            }
+            val onBack = remember(navController) { { navController.popBackStack(); Unit } }
+            val onToggleFollow = remember(detailVm, isFollowed) { { detailVm.toggleFollowArtist(isFollowed) } }
 
             ArtistDetailScreen(
                 state = artistState,
                 isFollowed = isFollowed,
                 nowPlayingId = nowPlayingId,
-                onBack = { navController.popBackStack() },
-                onToggleFollow = { detailVm.toggleFollowArtist(isFollowed) },
+                onBack = onBack,
+                onToggleFollow = onToggleFollow,
                 onPinShortcut = detailVm::pinAsShortcut,
                 onPlayTracks = onPlayTracks,
                 onTrackMore = onTrackMore,
@@ -198,29 +237,37 @@ fun VelunaNavHost(
 
         composable<PlaylistRoute> { entry ->
             val route = entry.toRoute<PlaylistRoute>()
-            LaunchedEffect(route.playlistId) { detailVm.loadPlaylist(route.playlistId, force = true) }
+            val savedPlaylistId by rememberSaveable(route.playlistId) { mutableStateOf(route.playlistId) }
+            LaunchedEffect(savedPlaylistId) { detailVm.loadPlaylist(savedPlaylistId, force = true) }
             val playlistState by detailVm.playlistState.collectAsStateWithLifecycle()
-            val nowPlayingId by remember(playbackFlow) {
-                playbackFlow.map { it.nowPlaying?.videoId }.distinctUntilChanged()
-            }.collectAsStateWithLifecycle(initialValue = null)
+            val nowPlayingId by remember(playbackState) {
+                derivedStateOf { playbackState.value.nowPlaying?.videoId }
+            }
+            val onBack = remember(navController) { { navController.popBackStack(); Unit } }
+            val onRemoveDuplicates = remember(detailVm, libraryStatsVm) {
+                { id: Long ->
+                    detailVm.removeDuplicatesFromLocalPlaylist(id) { removed ->
+                        libraryStatsVm.postStatus("Removed $removed duplicate track(s)")
+                    }
+                }
+            }
+            val onDeletePlaylist = remember(detailVm, navController) {
+                { id: Long ->
+                    detailVm.deleteLocalPlaylist(id) { navController.popBackStack() }
+                }
+            }
 
             PlaylistDetailScreen(
                 state = playlistState,
                 nowPlayingId = nowPlayingId,
-                onBack = { navController.popBackStack() },
+                onBack = onBack,
                 onFilterChange = detailVm::setPlaylistFilter,
                 onSortChange = detailVm::setPlaylistSort,
                 onPlayTracks = onPlayTracks,
                 onTrackMore = onTrackMore,
                 onEditLocalPlaylist = detailVm::updateLocalPlaylistDetails,
-                onRemoveDuplicates = { id ->
-                    detailVm.removeDuplicatesFromLocalPlaylist(id) { removed ->
-                        libraryStatsVm.postStatus("Removed $removed duplicate track(s)")
-                    }
-                },
-                onDeletePlaylist = { id ->
-                    detailVm.deleteLocalPlaylist(id) { navController.popBackStack() }
-                },
+                onRemoveDuplicates = onRemoveDuplicates,
+                onDeletePlaylist = onDeletePlaylist,
                 onExportM3u = detailVm::exportM3uText,
                 onExportCsv = detailVm::exportCsvText,
                 onPinShortcut = detailVm::pinAsShortcut,
@@ -230,13 +277,17 @@ fun VelunaNavHost(
 
         composable<HistoryRoute> {
             val groups by libraryStatsVm.historyGroups.collectAsStateWithLifecycle()
-            HistoryScreen(
-                groups = groups,
-                onBack = { navController.popBackStack() },
-                onPlaySong = { song ->
+            val onBack = remember(navController) { { navController.popBackStack(); Unit } }
+            val onPlaySong = remember(ensureNotificationPermission, container) {
+                { song: SongItem ->
                     ensureNotificationPermission()
                     container.playerController.playSong(song, "Listening History")
-                },
+                }
+            }
+            HistoryScreen(
+                groups = groups,
+                onBack = onBack,
+                onPlaySong = onPlaySong,
                 onTrackMore = onTrackMore
             )
         }
@@ -245,21 +296,14 @@ fun VelunaNavHost(
 
 @Composable
 private fun TopLevelTabDeck(
-    selectedTopTab: VelunaTopTab,
-    visitedTabMask: Int,
-    isAtTopTabRoot: Boolean,
+    tabNavState: VelunaTabNavState,
+    isAtTopTabRootState: State<Boolean>,
     navController: NavHostController,
     container: VelunaAppContainer,
     homeSearchVm: HomeSearchViewModel,
     libraryStatsVm: LibraryStatsViewModel,
-    prefs: VelunaUserPrefs,
-    playbackFlow: StateFlow<PlaybackUiState>,
-    playlists: List<BrowseItem>,
-    likedIds: Set<String>,
-    downloadedTracks: List<SongItem>,
+    playbackState: State<PlaybackUiState>,
     downloadsFlow: StateFlow<Map<String, DownloadProgress>>,
-    tasteProfile: TasteProfile?,
-    cloudAuthState: CloudAuthUiState,
     ensureNotificationPermission: () -> Unit,
     onNavigateTopTab: (VelunaTopTab) -> Unit,
     onPlayTracks: (List<SongItem>, Int, String) -> Unit,
@@ -271,21 +315,39 @@ private fun TopLevelTabDeck(
     onOpenTasteOnboarding: () -> Unit,
     onOpenEqualizer: () -> Unit
 ) {
-    BackHandler(enabled = isAtTopTabRoot && selectedTopTab != VelunaTopTab.HOME) {
+    val backHandlerEnabled by remember(isAtTopTabRootState, tabNavState) {
+        derivedStateOf {
+            isAtTopTabRootState.value && !tabNavState.isSelected(VelunaTopTab.HOME)
+        }
+    }
+    BackHandler(enabled = backHandlerEnabled) {
         onNavigateTopTab(VelunaTopTab.HOME)
     }
 
+    val isHomeVisited by remember(tabNavState) { derivedStateOf { tabNavState.isVisited(VelunaTopTab.HOME) } }
+    val isHomeSelected = remember(tabNavState) { derivedStateOf { tabNavState.isSelected(VelunaTopTab.HOME) } }
+
+    val isSearchVisited by remember(tabNavState) { derivedStateOf { tabNavState.isVisited(VelunaTopTab.SEARCH) } }
+    val isSearchSelected = remember(tabNavState) { derivedStateOf { tabNavState.isSelected(VelunaTopTab.SEARCH) } }
+
+    val isLibraryVisited by remember(tabNavState) { derivedStateOf { tabNavState.isVisited(VelunaTopTab.LIBRARY) } }
+    val isLibrarySelected = remember(tabNavState) { derivedStateOf { tabNavState.isSelected(VelunaTopTab.LIBRARY) } }
+
+    val isStatsVisited by remember(tabNavState) { derivedStateOf { tabNavState.isVisited(VelunaTopTab.STATS) } }
+    val isStatsSelected = remember(tabNavState) { derivedStateOf { tabNavState.isSelected(VelunaTopTab.STATS) } }
+
+    val isSettingsVisited by remember(tabNavState) { derivedStateOf { tabNavState.isVisited(VelunaTopTab.SETTINGS) } }
+    val isSettingsSelected = remember(tabNavState) { derivedStateOf { tabNavState.isSelected(VelunaTopTab.SETTINGS) } }
+
     Box(modifier = Modifier.fillMaxSize()) {
-        if ((visitedTabMask and (1 shl VelunaTopTab.HOME.ordinal)) != 0) {
-            KeepAliveTabSlot(active = selectedTopTab == VelunaTopTab.HOME) {
+        if (isHomeVisited) {
+            KeepAliveTabSlot(activeState = isHomeSelected) {
                 HomeTabPane(
                     navController = navController,
                     container = container,
                     homeSearchVm = homeSearchVm,
-                    prefs = prefs,
-                    playbackFlow = playbackFlow,
-                    likedIds = likedIds,
-                    cloudAuthState = cloudAuthState,
+                    libraryStatsVm = libraryStatsVm,
+                    playbackState = playbackState,
                     onNavigateTopTab = onNavigateTopTab,
                     onOpenBrowseItem = onOpenBrowseItem,
                     onTrackMore = onTrackMore,
@@ -294,13 +356,12 @@ private fun TopLevelTabDeck(
             }
         }
 
-        if ((visitedTabMask and (1 shl VelunaTopTab.SEARCH.ordinal)) != 0) {
-            val active = selectedTopTab == VelunaTopTab.SEARCH
-            KeepAliveTabSlot(active = active) {
+        if (isSearchVisited) {
+            KeepAliveTabSlot(activeState = isSearchSelected) {
                 SearchTabPane(
-                    active = active,
+                    activeState = isSearchSelected,
                     homeSearchVm = homeSearchVm,
-                    playbackFlow = playbackFlow,
+                    playbackState = playbackState,
                     onNavigateTopTab = onNavigateTopTab,
                     onOpenBrowseItem = onOpenBrowseItem,
                     onTrackMore = onTrackMore
@@ -308,14 +369,12 @@ private fun TopLevelTabDeck(
             }
         }
 
-        if ((visitedTabMask and (1 shl VelunaTopTab.LIBRARY.ordinal)) != 0) {
-            KeepAliveTabSlot(active = selectedTopTab == VelunaTopTab.LIBRARY) {
+        if (isLibraryVisited) {
+            KeepAliveTabSlot(activeState = isLibrarySelected) {
                 LibraryTabPane(
                     container = container,
                     libraryStatsVm = libraryStatsVm,
-                    playbackFlow = playbackFlow,
-                    playlists = playlists,
-                    downloadedTracks = downloadedTracks,
+                    playbackState = playbackState,
                     downloadsFlow = downloadsFlow,
                     onOpenBrowseItem = onOpenBrowseItem,
                     onPlayTracks = onPlayTracks,
@@ -326,27 +385,25 @@ private fun TopLevelTabDeck(
             }
         }
 
-        if ((visitedTabMask and (1 shl VelunaTopTab.STATS.ordinal)) != 0) {
-            KeepAliveTabSlot(active = selectedTopTab == VelunaTopTab.STATS) {
+        if (isStatsVisited) {
+            KeepAliveTabSlot(activeState = isStatsSelected) {
                 StatsTabPane(
                     navController = navController,
                     container = container,
                     libraryStatsVm = libraryStatsVm,
-                    playbackFlow = playbackFlow,
+                    playbackState = playbackState,
                     ensureNotificationPermission = ensureNotificationPermission,
                     onTrackMore = onTrackMore
                 )
             }
         }
 
-        if ((visitedTabMask and (1 shl VelunaTopTab.SETTINGS.ordinal)) != 0) {
-            KeepAliveTabSlot(active = selectedTopTab == VelunaTopTab.SETTINGS) {
+        if (isSettingsVisited) {
+            KeepAliveTabSlot(activeState = isSettingsSelected) {
                 SettingsTabPane(
                     container = container,
+                    homeSearchVm = homeSearchVm,
                     libraryStatsVm = libraryStatsVm,
-                    prefs = prefs,
-                    tasteProfile = tasteProfile,
-                    cloudAuthState = cloudAuthState,
                     onOpenTasteOnboarding = onOpenTasteOnboarding,
                     onOpenEqualizer = onOpenEqualizer
                 )
@@ -357,10 +414,11 @@ private fun TopLevelTabDeck(
 
 @Composable
 private fun KeepAliveTabSlot(
-    active: Boolean,
+    activeState: State<Boolean>,
     content: @Composable () -> Unit
 ) {
-    var wasActive by remember { mutableStateOf(active) }
+    val active = activeState.value
+    var wasActive by rememberSaveable { mutableStateOf(active) }
     val alpha = remember { Animatable(if (active) 1f else 0f) }
     LaunchedEffect(active) {
         if (active) {
@@ -383,13 +441,13 @@ private fun KeepAliveTabSlot(
             .layout { measurable, constraints ->
                 val placeable = measurable.measure(constraints)
                 layout(placeable.width, placeable.height) {
-                    if (active) {
+                    if (activeState.value) {
                         placeable.place(0, 0)
                     }
                 }
             }
             .graphicsLayer {
-                this.alpha = if (active) alpha.value else 0f
+                this.alpha = if (activeState.value) alpha.value else 0f
             }
             .focusProperties { canFocus = active }
             .semantics {
@@ -405,10 +463,8 @@ private fun HomeTabPane(
     navController: NavHostController,
     container: VelunaAppContainer,
     homeSearchVm: HomeSearchViewModel,
-    prefs: VelunaUserPrefs,
-    playbackFlow: StateFlow<PlaybackUiState>,
-    likedIds: Set<String>,
-    cloudAuthState: CloudAuthUiState,
+    libraryStatsVm: LibraryStatsViewModel,
+    playbackState: State<PlaybackUiState>,
     onNavigateTopTab: (VelunaTopTab) -> Unit,
     onOpenBrowseItem: (BrowseItem) -> Unit,
     onTrackMore: (SongItem) -> Unit,
@@ -419,17 +475,22 @@ private fun HomeTabPane(
     val shortcuts by homeSearchVm.shortcuts.collectAsStateWithLifecycle()
     val jumpBack by homeSearchVm.recentJumpBack.collectAsStateWithLifecycle()
     val familiarArtists by homeSearchVm.familiarArtists.collectAsStateWithLifecycle()
-    val nowPlayingSong by remember(playbackFlow) {
-        playbackFlow.map { it.nowPlaying }.distinctUntilChanged()
-    }.collectAsStateWithLifecycle(initialValue = null)
-    val artworkAccent by remember(playbackFlow) {
-        playbackFlow.map { it.artworkAccentColor }.distinctUntilChanged()
-    }.collectAsStateWithLifecycle(initialValue = null)
+    val prefs by libraryStatsVm.prefs.collectAsStateWithLifecycle()
+    val likedIds by libraryStatsVm.likedVideoIds.collectAsStateWithLifecycle()
+    val cloudAuthState by container.cloudSyncCoordinator.authState.collectAsStateWithLifecycle()
+
+    val nowPlayingSong by remember(playbackState) {
+        derivedStateOf { playbackState.value.nowPlaying }
+    }
+    val artworkAccent by remember(playbackState) {
+        derivedStateOf { playbackState.value.artworkAccentColor }
+    }
 
     val onSignInWithGoogle = remember(context, container) { { container.cloudSyncCoordinator.signIn(context) } }
     val onOpenAccountSettings = remember(onNavigateTopTab) { { onNavigateTopTab(VelunaTopTab.SETTINGS) } }
-    val onRetry = remember(homeSearchVm, homeState.selectedChipParams) {
-        { homeSearchVm.loadHome(homeState.selectedChipParams) }
+    val selectedChipParams by remember { derivedStateOf { homeState.selectedChipParams } }
+    val onRetry = remember(homeSearchVm) {
+        { homeSearchVm.loadHome(selectedChipParams) }
     }
     val onToggleLike = remember(container) { { song: SongItem -> container.playerController.toggleLike(song) } }
     val onOpenHistory = remember(navController) { { navController.navigate(HistoryRoute) } }
@@ -458,13 +519,14 @@ private fun HomeTabPane(
 
 @Composable
 private fun SearchTabPane(
-    active: Boolean,
+    activeState: State<Boolean>,
     homeSearchVm: HomeSearchViewModel,
-    playbackFlow: StateFlow<PlaybackUiState>,
+    playbackState: State<PlaybackUiState>,
     onNavigateTopTab: (VelunaTopTab) -> Unit,
     onOpenBrowseItem: (BrowseItem) -> Unit,
     onTrackMore: (SongItem) -> Unit
 ) {
+    val active = activeState.value
     val focusManager = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
     LaunchedEffect(active) {
@@ -476,9 +538,9 @@ private fun SearchTabPane(
 
     val searchState by homeSearchVm.searchState.collectAsStateWithLifecycle()
     val history by homeSearchVm.searchHistory.collectAsStateWithLifecycle()
-    val nowPlayingId by remember(playbackFlow) {
-        playbackFlow.map { it.nowPlaying?.videoId }.distinctUntilChanged()
-    }.collectAsStateWithLifecycle(initialValue = null)
+    val nowPlayingId by remember(playbackState) {
+        derivedStateOf { playbackState.value.nowPlaying?.videoId }
+    }
     val onOpenMoodTile = remember(homeSearchVm, onNavigateTopTab) {
         { tile: MoodTile ->
             homeSearchVm.openMoodTile(tile)
@@ -506,9 +568,7 @@ private fun SearchTabPane(
 private fun LibraryTabPane(
     container: VelunaAppContainer,
     libraryStatsVm: LibraryStatsViewModel,
-    playbackFlow: StateFlow<PlaybackUiState>,
-    playlists: List<BrowseItem>,
-    downloadedTracks: List<SongItem>,
+    playbackState: State<PlaybackUiState>,
     downloadsFlow: StateFlow<Map<String, DownloadProgress>>,
     onOpenBrowseItem: (BrowseItem) -> Unit,
     onPlayTracks: (List<SongItem>, Int, String) -> Unit,
@@ -516,14 +576,16 @@ private fun LibraryTabPane(
     onOpenCreatePlaylist: () -> Unit,
     onOpenImportPlaylist: () -> Unit
 ) {
+    val playlists by libraryStatsVm.playlists.collectAsStateWithLifecycle()
     val likedSongs by libraryStatsVm.likedSongs.collectAsStateWithLifecycle()
     val savedAlbums by libraryStatsVm.savedAlbums.collectAsStateWithLifecycle()
     val followedArtists by libraryStatsVm.followedArtists.collectAsStateWithLifecycle()
+    val downloadedTracks by libraryStatsVm.downloadedTracks.collectAsStateWithLifecycle()
     val localTracks by libraryStatsVm.localTracks.collectAsStateWithLifecycle()
     val activeDownloads by downloadsFlow.collectAsStateWithLifecycle()
-    val nowPlayingId by remember(playbackFlow) {
-        playbackFlow.map { it.nowPlaying?.videoId }.distinctUntilChanged()
-    }.collectAsStateWithLifecycle(initialValue = null)
+    val nowPlayingId by remember(playbackState) {
+        derivedStateOf { playbackState.value.nowPlaying?.videoId }
+    }
     val onToggleLike = remember(container) { { song: SongItem -> container.playerController.toggleLike(song) } }
 
     LibraryScreen(
@@ -553,14 +615,14 @@ private fun StatsTabPane(
     navController: NavHostController,
     container: VelunaAppContainer,
     libraryStatsVm: LibraryStatsViewModel,
-    playbackFlow: StateFlow<PlaybackUiState>,
+    playbackState: State<PlaybackUiState>,
     ensureNotificationPermission: () -> Unit,
     onTrackMore: (SongItem) -> Unit
 ) {
     val statsState by libraryStatsVm.statsState.collectAsStateWithLifecycle()
-    val nowPlayingId by remember(playbackFlow) {
-        playbackFlow.map { it.nowPlaying?.videoId }.distinctUntilChanged()
-    }.collectAsStateWithLifecycle(initialValue = null)
+    val nowPlayingId by remember(playbackState) {
+        derivedStateOf { playbackState.value.nowPlaying?.videoId }
+    }
     val onOpenHistory = remember(navController) { { navController.navigate(HistoryRoute) } }
     val onPlaySong = remember(ensureNotificationPermission, container) {
         { song: SongItem ->
@@ -586,14 +648,15 @@ private fun StatsTabPane(
 @Composable
 private fun SettingsTabPane(
     container: VelunaAppContainer,
+    homeSearchVm: HomeSearchViewModel,
     libraryStatsVm: LibraryStatsViewModel,
-    prefs: VelunaUserPrefs,
-    tasteProfile: TasteProfile?,
-    cloudAuthState: CloudAuthUiState,
     onOpenTasteOnboarding: () -> Unit,
     onOpenEqualizer: () -> Unit
 ) {
     val context = LocalContext.current
+    val prefs by libraryStatsVm.prefs.collectAsStateWithLifecycle()
+    val tasteProfile by homeSearchVm.tasteProfile.collectAsStateWithLifecycle()
+    val cloudAuthState by container.cloudSyncCoordinator.authState.collectAsStateWithLifecycle()
     val blockedArtists by libraryStatsVm.blockedArtists.collectAsStateWithLifecycle()
     val scrobblePendingCount by libraryStatsVm.scrobblePendingCount.collectAsStateWithLifecycle()
     val lastScrobbleError by libraryStatsVm.lastScrobbleError.collectAsStateWithLifecycle()
