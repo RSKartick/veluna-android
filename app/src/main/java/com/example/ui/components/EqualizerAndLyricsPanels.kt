@@ -53,6 +53,7 @@ import androidx.compose.ui.unit.dp
 import com.example.R
 import com.example.model.EqualizerPresets
 import com.example.model.SongItem
+import com.example.ui.theme.rememberVelunaFlingBehavior
 import com.example.ui.theme.velunaFilterChipBorder
 import com.example.ui.theme.velunaFilterChipColors
 import com.example.ui.theme.velunaSliderColors
@@ -111,12 +112,18 @@ fun QueuePanel(
                 Text(stringResource(R.string.queue_empty), color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         } else {
+            val smoothFling = rememberVelunaFlingBehavior()
             LazyColumn(
                 state = listState,
+                flingBehavior = smoothFling,
                 contentPadding = PaddingValues(bottom = 24.dp),
                 modifier = Modifier.fillMaxSize()
             ) {
-                itemsIndexed(queue, key = { idx, s -> "${idx}_${s.videoId}" }) { idx, song ->
+                itemsIndexed(
+                    items = queue,
+                    key = { idx, s -> "${idx}_${s.videoId}" },
+                    contentType = { _, _ -> "queue_track" }
+                ) { idx, song ->
                     val isCurrent = idx == currentIndex
                     Row(
                         modifier = Modifier
@@ -219,14 +226,16 @@ fun CommentsPanel(
             }
         }
         else -> {
+            val smoothFling = rememberVelunaFlingBehavior()
             LazyColumn(
                 state = listState,
+                flingBehavior = smoothFling,
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
                 modifier = modifier.fillMaxSize()
             ) {
                 if (!state.page.countText.isNullOrBlank()) {
-                    item {
+                    item(key = "comments_count", contentType = "count_header") {
                         Text(
                             text = stringResource(R.string.comments_count, state.page.countText),
                             style = MaterialTheme.typography.labelLarge,
@@ -234,7 +243,11 @@ fun CommentsPanel(
                         )
                     }
                 }
-                items(state.page.comments, key = { it.id }) { comment ->
+                items(
+                    items = state.page.comments,
+                    key = { it.id },
+                    contentType = { "comment_card" }
+                ) { comment ->
                     Surface(
                         color = MaterialTheme.colorScheme.surfaceContainer,
                         contentColor = MaterialTheme.colorScheme.onSurface,

@@ -48,6 +48,8 @@ import com.example.model.DownloadProgress
 import com.example.model.DownloadStatus
 import com.example.model.SongItem
 import com.example.ui.components.TrackRow
+import com.example.ui.theme.rememberVelunaFlingBehavior
+import com.example.ui.theme.rememberVelunaLazyListState
 import com.example.ui.theme.velunaOutlinedButtonBorder
 import com.example.ui.theme.velunaOutlinedButtonColors
 import com.example.ui.theme.velunaPrimaryButtonColors
@@ -75,11 +77,19 @@ internal fun LibraryDownloadsTab(
         )
     } else {
         val downloadsLabel = stringResource(R.string.library_tab_downloads)
+        val listState = rememberVelunaLazyListState()
+        val smoothFling = rememberVelunaFlingBehavior()
         LazyColumn(
+            state = listState,
+            flingBehavior = smoothFling,
             contentPadding = PaddingValues(bottom = 28.dp),
             modifier = Modifier.fillMaxSize()
         ) {
-            items(activeList, key = { "dl_active_${it.videoId}" }) { prog ->
+            items(
+                items = activeList,
+                key = { "dl_active_${it.videoId}" },
+                contentType = { "download_progress" }
+            ) { prog ->
                 Surface(
                     color = MaterialTheme.colorScheme.surfaceContainer,
                     contentColor = MaterialTheme.colorScheme.onSurface,
@@ -104,7 +114,7 @@ internal fun LibraryDownloadsTab(
             }
 
             if (downloads.isNotEmpty()) {
-                item {
+                item(key = "dl_header", contentType = "header") {
                     PlayShuffleHeader(
                         countLabel = stringResource(R.string.library_offline_count, downloads.size),
                         onPlayAll = { onPlaySongs(downloads, 0, downloadsLabel) },
@@ -113,7 +123,11 @@ internal fun LibraryDownloadsTab(
                 }
             }
 
-            itemsIndexed(downloads, key = { _, song -> "dl_done_${song.videoId}" }) { idx, song ->
+            itemsIndexed(
+                items = downloads,
+                key = { _, song -> "dl_done_${song.videoId}" },
+                contentType = { _, _ -> "track" }
+            ) { idx, song ->
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Box(modifier = Modifier.weight(1f)) {
                         TrackRow(
@@ -163,12 +177,16 @@ internal fun LibraryLocalMusicTab(
     }
 
     val localMusicLabel = stringResource(R.string.library_tab_local_music)
+    val listState = rememberVelunaLazyListState()
+    val smoothFling = rememberVelunaFlingBehavior()
 
     LazyColumn(
+        state = listState,
+        flingBehavior = smoothFling,
         contentPadding = PaddingValues(bottom = 28.dp),
         modifier = Modifier.fillMaxSize()
     ) {
-        item {
+        item(key = "local_actions", contentType = "actions") {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -206,21 +224,25 @@ internal fun LibraryLocalMusicTab(
         }
 
         if (localTracks.isEmpty()) {
-            item {
+            item(key = "local_empty", contentType = "empty") {
                 EmptyLibraryNotice(
                     title = stringResource(R.string.library_empty_local_title),
                     body = stringResource(R.string.library_empty_local_body)
                 )
             }
         } else {
-            item {
+            item(key = "local_header", contentType = "header") {
                 PlayShuffleHeader(
                     countLabel = stringResource(R.string.library_local_count, localTracks.size),
                     onPlayAll = { onPlaySongs(localTracks, 0, localMusicLabel) },
                     onShuffleAll = { onPlaySongs(localTracks.shuffled(), 0, localMusicLabel) }
                 )
             }
-            itemsIndexed(localTracks, key = { _, song -> song.videoId }) { idx, song ->
+            itemsIndexed(
+                items = localTracks,
+                key = { _, song -> song.videoId },
+                contentType = { _, _ -> "track" }
+            ) { idx, song ->
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Box(modifier = Modifier.weight(1f)) {
                         TrackRow(

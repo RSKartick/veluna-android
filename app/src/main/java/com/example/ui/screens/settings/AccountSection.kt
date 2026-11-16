@@ -54,8 +54,9 @@ import com.example.ui.theme.velunaOutlinedButtonBorder
 import com.example.ui.theme.velunaOutlinedButtonColors
 import com.example.ui.theme.velunaOutlinedFieldColors
 import com.example.ui.theme.velunaPrimaryButtonColors
-import java.text.SimpleDateFormat
-import java.util.Date
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 @Composable
@@ -145,8 +146,14 @@ internal fun AccountSection(
                                 cloudAuthState.isSyncing -> stringResource(R.string.settings_sync_syncing)
                                 isSyncError -> cloudAuthState.syncStatus.orEmpty()
                                 cloudAuthState.lastSyncedAtMs != null -> {
-                                    val fmt = remember { SimpleDateFormat("HH:mm", Locale.getDefault()) }
-                                    stringResource(R.string.settings_sync_up_to_date, fmt.format(Date(cloudAuthState.lastSyncedAtMs)))
+                                    val fmt = remember {
+                                        DateTimeFormatter.ofPattern("HH:mm", Locale.getDefault())
+                                            .withZone(ZoneId.systemDefault())
+                                    }
+                                    stringResource(
+                                        R.string.settings_sync_up_to_date,
+                                        fmt.format(Instant.ofEpochMilli(cloudAuthState.lastSyncedAtMs))
+                                    )
                                 }
                                 else -> cloudAuthState.syncStatus ?: stringResource(R.string.settings_sync_connected)
                             }

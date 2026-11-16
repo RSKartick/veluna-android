@@ -11,7 +11,9 @@ import androidx.credentials.GetCredentialRequest
 import androidx.credentials.exceptions.GetCredentialCancellationException
 import androidx.credentials.exceptions.GetCredentialException
 import androidx.credentials.exceptions.NoCredentialException
+import com.example.BuildConfig
 import com.example.R
+import com.example.util.SecurityValidators
 import com.google.android.libraries.identity.googleid.GetGoogleIdOption
 import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
 import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
@@ -43,7 +45,7 @@ object GoogleAuthHelper {
 
     private fun webClientId(context: Context): String {
         val id = runCatching { context.getString(R.string.default_web_client_id) }.getOrNull().orEmpty()
-        if (id.isBlank()) {
+        if (id.isBlank() && BuildConfig.DEBUG) {
             Log.e(TAG, "default_web_client_id string resource is missing; check google-services.json")
         }
         return id
@@ -86,18 +88,18 @@ object GoogleAuthHelper {
         } catch (e: CancellationException) {
             throw e
         } catch (e: GetCredentialCancellationException) {
-            Log.w(TAG, "Silent auto sign-in cancelled", e)
+            if (BuildConfig.DEBUG) Log.w(TAG, "Silent auto sign-in cancelled", e)
             Result.success(null)
         } catch (_: NoCredentialException) {
             Result.success(null)
         } catch (e: GetCredentialException) {
-            Log.w(TAG, "Silent auto sign-in unavailable: ${e.message}")
+            if (BuildConfig.DEBUG) Log.w(TAG, "Silent auto sign-in unavailable: ${e.message}")
             Result.success(null)
         } catch (e: GoogleIdTokenParsingException) {
-            Log.w(TAG, "Failed to parse Google ID token on auto sign-in", e)
+            if (BuildConfig.DEBUG) Log.w(TAG, "Failed to parse Google ID token on auto sign-in", e)
             Result.failure(e)
         } catch (e: Exception) {
-            Log.e(TAG, "Unexpected auto sign-in error", e)
+            if (BuildConfig.DEBUG) Log.e(TAG, "Unexpected auto sign-in error", e)
             Result.failure(e)
         }
     }
@@ -139,20 +141,27 @@ object GoogleAuthHelper {
         } catch (e: CancellationException) {
             throw e
         } catch (e: GetCredentialCancellationException) {
-            Log.w(TAG, "Google sign-in cancelled by user", e)
+            if (BuildConfig.DEBUG) Log.w(TAG, "Google sign-in cancelled by user", e)
             GoogleSignInOutcome.Cancelled
         } catch (e: NoCredentialException) {
-            Log.w(TAG, "No Google accounts found on device", e)
+            if (BuildConfig.DEBUG) Log.w(TAG, "No Google accounts found on device", e)
             GoogleSignInOutcome.Error("No Google account found on this device. Add one in Android Settings first.")
         } catch (e: GoogleIdTokenParsingException) {
-            Log.e(TAG, "Invalid Google ID token response", e)
+            if (BuildConfig.DEBUG) Log.e(TAG, "Invalid Google ID token response", e)
             GoogleSignInOutcome.Error("Failed to verify Google ID token. Please try again.")
         } catch (e: GetCredentialException) {
-            Log.e(TAG, "Google credential error: ${e.message}", e)
-            GoogleSignInOutcome.Error(e.errorMessage?.toString() ?: "Google Sign-In failed. Please try again.")
+            if (BuildConfig.DEBUG) Log.e(TAG, "Google credential error: ${e.message}", e)
+            GoogleSignInOutcome.Error(
+                SecurityValidators.sanitizeErrorText(
+                    e.errorMessage?.toString(),
+                    "Google Sign-In failed. Please try again."
+                )
+            )
         } catch (e: Exception) {
-            Log.e(TAG, "Firebase Google authentication failed", e)
-            GoogleSignInOutcome.Error(e.message ?: "Google Sign-In failed.")
+            if (BuildConfig.DEBUG) Log.e(TAG, "Firebase Google authentication failed", e)
+            GoogleSignInOutcome.Error(
+                SecurityValidators.safeUserErrorMessage(e, "Google Sign-In failed.")
+            )
         }
     }
 
@@ -187,10 +196,12 @@ object GoogleAuthHelper {
             GoogleSignInOutcome.Success(user)
         } catch (e: CancellationException) {
             throw e
-        } catch (e: GetCredentialCancellationException) {
+        } catch (_: GetCredentialCancellationException) {
             GoogleSignInOutcome.Cancelled
         } catch (e: Exception) {
-            GoogleSignInOutcome.Error(e.localizedMessage ?: "Re-authentication failed.")
+            GoogleSignInOutcome.Error(
+                SecurityValidators.safeUserErrorMessage(e, "Re-authentication failed.")
+            )
         }
     }
 
@@ -203,7 +214,7 @@ object GoogleAuthHelper {
             runCatching {
                 CredentialManager.create(context).clearCredentialState(ClearCredentialStateRequest())
             }.onFailure { err ->
-                Log.w(TAG, "clearCredentialState skipped: ${err.message}")
+                if (BuildConfig.DEBUG) Log.w(TAG, "clearCredentialState skipped: ${err.message}")
             }
             Firebase.auth.signOut()
         }

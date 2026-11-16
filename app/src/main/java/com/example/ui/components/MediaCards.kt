@@ -1,7 +1,7 @@
 package com.example.ui.components
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -115,7 +115,7 @@ fun MediaSquareCard(
                 Surface(
                     color = MaterialTheme.colorScheme.primary,
                     shape = RoundedCornerShape(50),
-                    shadowElevation = 4.dp,
+                    tonalElevation = 4.dp,
                     modifier = Modifier
                         .align(Alignment.BottomEnd)
                         .padding(8.dp)
@@ -215,13 +215,15 @@ fun ShortcutTile(
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val shape = MaterialTheme.shapes.medium
+    val borderColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)
+    val border = remember(borderColor) { BorderStroke(1.dp, borderColor) }
     Surface(
         color = MaterialTheme.colorScheme.surfaceContainerHigh,
-        shape = MaterialTheme.shapes.medium,
+        shape = shape,
+        border = border,
         modifier = modifier
             .heightIn(min = 60.dp)
-            .clip(MaterialTheme.shapes.medium)
-            .border(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f), MaterialTheme.shapes.medium)
             .clickable(onClick = onClick)
             .testTag("shortcut_tile_${item.id}")
     ) {
@@ -255,14 +257,14 @@ fun ShortcutTile(
 @Composable
 fun TrackRow(
     song: SongItem,
+    modifier: Modifier = Modifier,
     isPlaying: Boolean = false,
     isDownloaded: Boolean = false,
     isLiked: Boolean = song.rating == Rating.LIKE,
     trackNumber: Int? = null,
     onClick: () -> Unit,
     onMoreClick: () -> Unit,
-    onLikeClick: (() -> Unit)? = null,
-    modifier: Modifier = Modifier
+    onLikeClick: (() -> Unit)? = null
 ) {
     val rowBg = if (isPlaying) {
         MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)
@@ -270,12 +272,13 @@ fun TrackRow(
         Color.Transparent
     }
 
+    val rowShape = MaterialTheme.shapes.small
     Row(
         modifier = modifier
             .fillMaxWidth()
             .heightIn(min = 60.dp)
-            .clip(MaterialTheme.shapes.small)
-            .background(rowBg)
+            .background(rowBg, rowShape)
+            .clip(rowShape)
             .clickable(onClick = onClick)
             .padding(start = 12.dp, end = 4.dp, top = 6.dp, bottom = 6.dp)
             .testTag("track_row_${song.videoId}"),

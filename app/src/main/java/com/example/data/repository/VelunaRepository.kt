@@ -5,6 +5,7 @@ import android.content.Intent
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.provider.DocumentsContract
+import androidx.core.net.toUri
 import androidx.room.withTransaction
 import com.example.data.local.BlockedArtistEntity
 import com.example.data.local.DownloadedTrackEntity
@@ -36,10 +37,14 @@ import com.example.model.SongItem
 import com.example.model.StatsRange
 import com.example.model.StatsSummary
 import com.example.model.TasteProfile
+import com.example.model.EqualizerPresets
 import com.example.model.TopAlbumStat
 import com.example.model.TopArtistStat
 import com.example.model.TopSongStat
+import com.example.util.SecurityValidators
 import com.example.util.readContentUriText
+import com.example.util.suspendRunCatching
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
@@ -54,7 +59,6 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.File
-import java.security.MessageDigest
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
@@ -489,8 +493,8 @@ class VelunaRepository(
 
                 val embeddedArt = retriever.embeddedPicture
                 var coverUri: String? = null
-                if (embeddedArt != null && embeddedArt.isNotEmpty()) {
-                    val file = File(coversDir, "${uri.toString().hashCode()}.jpg")
+                if (embeddedArt != null && embeddedArt.isNotEmpty() && embeddedArt.size <= MAX_COVER_BYTES) {
+                    val file = File(coversDir, "${SecurityValidators.sha256Hex(uri.toString()).take(32)}.jpg")
                     file.writeBytes(embeddedArt)
                     coverUri = Uri.fromFile(file).toString()
                 }
@@ -507,6 +511,8 @@ class VelunaRepository(
                         coverUri = coverUri
                     )
                 )
+            } catch (e: CancellationException) {
+                throw e
             } catch (_: Exception) {
                 // Skip unreadable URI
             } finally {
@@ -554,7 +560,26 @@ class VelunaRepository(
         importAudioUris(audioUris)
     }
 
-    suspend fun removeLocalTrack(uri: String) = dao.deleteLocalTrack(uri)
+    suspend fun removeLocalTrack(uri: String) = withContext(Dispatchers.IO) {
+        val tracks = dao.getLocalTracksOnce()
+        val targetCover = tracks.firstOrNull { it.uri == uri }?.coverUri
+        dao.deleteLocalTrack(uri)
+        if (!targetCover.isNullOrBlank()) {
+            val stillUsed = tracks.any { it.uri != uri && it.coverUri == targetCover }
+            if (!stillUsed) {
+                runCatching {
+                    val parsed = targetCover.toUri()
+                    if (parsed.scheme == "file") {
+                        val coversDir = File(context.filesDir, "local_covers").canonicalFile
+                        val targetFile = parsed.path?.let { File(it).canonicalFile }
+                        if (targetFile != null && targetFile.path.startsWith(coversDir.path + File.separator)) {
+                            targetFile.delete()
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // --- Playlist Import (Spotify CSV / M3U / YouTube URL) ---
     suspend fun importFromYouTubeUrl(urlOrId: String, onProgress: (String) -> Unit): Result<Long> = withContext(Dispatchers.IO) {
@@ -674,39 +699,81 @@ class VelunaRepository(
     }
 
     suspend fun importBackupJson(rawJson: String): Result<BackupRestoreResult> = withContext(Dispatchers.IO) {
-        runCatching {
+        suspendRunCatching {
+            require(rawJson.length <= MAX_BACKUP_JSON_CHARS) { "Backup file exceeds maximum supported size." }
             val payload = json.decodeFromString<VelunaBackupPayload>(rawJson)
             val blockWrite: suspend () -> Int = {
                 prefsRepo.applyBackup(clampBackupPrefs(payload.prefs))
-                payload.tasteProfile?.let { prefsRepo.saveTasteProfile(it) }
+                payload.tasteProfile?.let(::sanitizeBackupTasteProfile)?.let { prefsRepo.saveTasteProfile(it) }
 
                 payload.likedSongs
-                    .filter { !it.isLocal && !it.videoId.startsWith(LOCAL_SONG_PREFIX) }
+                    .take(5_000)
+                    .mapNotNull(::sanitizeBackupSong)
                     .forEach { song ->
                         dao.insertLikedSong(LikedSongEntity(song.videoId, encodeSong(song)))
                     }
-                payload.blockedArtists.forEach { name ->
-                    if (name.isNotBlank()) {
-                        dao.insertBlockedArtist(BlockedArtistEntity(name.trim()))
+                payload.blockedArtists.take(500).forEach { name ->
+                    val clean = name.trim().take(160)
+                    if (clean.isNotEmpty()) {
+                        dao.insertBlockedArtist(BlockedArtistEntity(clean))
                     }
                 }
-                payload.savedAlbums.forEach { al ->
-                    dao.insertSavedAlbum(SavedAlbumEntity(al.albumId, al.title, al.subtitle, al.thumbnail, al.savedAt))
+                payload.savedAlbums.take(1_000).forEach { al ->
+                    val cleanId = al.albumId.trim().takeIf { it.isNotEmpty() && it.length <= 128 } ?: return@forEach
+                    dao.insertSavedAlbum(
+                        SavedAlbumEntity(
+                            albumId = cleanId,
+                            title = al.title.trim().ifBlank { "Album" }.take(200),
+                            subtitle = al.subtitle?.take(200),
+                            thumbnail = SecurityValidators.sanitizeHttpsUrl(al.thumbnail, 2048),
+                            savedAt = al.savedAt.coerceAtLeast(0L)
+                        )
+                    )
                 }
-                payload.followedArtists.forEach { ar ->
-                    dao.insertFollowedArtist(FollowedArtistEntity(ar.channelId, ar.name, ar.thumbnail, ar.subscribers, ar.followedAt))
+                payload.followedArtists.take(1_000).forEach { ar ->
+                    val cleanId = ar.channelId.trim().takeIf { it.isNotEmpty() && it.length <= 128 } ?: return@forEach
+                    dao.insertFollowedArtist(
+                        FollowedArtistEntity(
+                            channelId = cleanId,
+                            name = ar.name.trim().ifBlank { "Artist" }.take(160),
+                            thumbnail = SecurityValidators.sanitizeHttpsUrl(ar.thumbnail, 2048),
+                            subscribers = ar.subscribers?.take(64),
+                            followedAt = ar.followedAt.coerceAtLeast(0L)
+                        )
+                    )
                 }
-                payload.shortcuts.forEach { sc ->
-                    dao.upsertShortcut(ShortcutEntity(sc.id, sc.kind, sc.title, sc.subtitle, sc.thumbnail, sc.position))
+                payload.shortcuts.take(100).forEach { sc ->
+                    val cleanId = sc.id.trim().takeIf { it.isNotEmpty() && it.length <= 128 } ?: return@forEach
+                    val safeKind = runCatching { BrowseKind.valueOf(sc.kind) }.getOrDefault(BrowseKind.PLAYLIST).name
+                    dao.upsertShortcut(
+                        ShortcutEntity(
+                            id = cleanId,
+                            kind = safeKind,
+                            title = sc.title.trim().ifBlank { "Shortcut" }.take(160),
+                            subtitle = sc.subtitle?.take(160),
+                            thumbnail = SecurityValidators.sanitizeHttpsUrl(sc.thumbnail, 2048),
+                            position = sc.position.coerceIn(0, 1_000)
+                        )
+                    )
                 }
                 payload.searchHistory.take(100).forEach { sh ->
-                    dao.upsertSearchHistory(SearchHistoryEntity(sh.query, sh.searchedAt))
-                }
-                payload.listens.forEach { l ->
-                    l.song?.let { song ->
-                        dao.upsertListenSong(ListenSongEntity(l.videoId, encodeSong(song)))
+                    val cleanQuery = sh.query.trim().take(200)
+                    if (cleanQuery.isNotEmpty()) {
+                        dao.upsertSearchHistory(SearchHistoryEntity(cleanQuery, sh.searchedAt.coerceAtLeast(0L)))
                     }
-                    dao.insertListen(ListenEntity(videoId = l.videoId, playedAt = l.playedAt, secs = l.secs))
+                }
+                payload.listens.take(10_000).forEach { l ->
+                    val cleanVid = l.videoId.trim().takeIf { SecurityValidators.isValidYouTubeId(it) } ?: return@forEach
+                    l.song?.let(::sanitizeBackupSong)?.let { song ->
+                        dao.upsertListenSong(ListenSongEntity(cleanVid, encodeSong(song)))
+                    }
+                    dao.insertListen(
+                        ListenEntity(
+                            videoId = cleanVid,
+                            playedAt = l.playedAt.coerceAtLeast(0L),
+                            secs = l.secs.coerceIn(0L, 86_400L)
+                        )
+                    )
                 }
 
                 // Deduplicate playlists against existing ones using (normalizedTitle, trackSignature)
@@ -716,29 +783,29 @@ class VelunaRepository(
                 }.toMutableSet()
 
                 var count = 0
-                payload.playlists.forEach { pl ->
-                    val sigKey = normalizePlaylistTitle(pl.title) to playlistTrackSignature(pl.tracks.map { it.videoId })
+                payload.playlists.take(500).forEach { pl ->
+                    val cleanTracks = pl.tracks.take(5_000).mapNotNull(::sanitizeBackupSong)
+                    val cleanTitle = pl.title.trim().ifBlank { "Playlist" }.take(120)
+                    val sigKey = normalizePlaylistTitle(cleanTitle) to playlistTrackSignature(cleanTracks.map { it.videoId })
                     if (existingSignatures.add(sigKey)) {
                         val now = System.currentTimeMillis()
                         val id = dao.insertPlaylist(
                             LocalPlaylistEntity(
-                                title = pl.title.trim().ifBlank { "Playlist" },
-                                description = pl.description.trim(),
+                                title = cleanTitle,
+                                description = pl.description.trim().take(500),
                                 createdAt = now,
                                 updatedAt = now
                             )
                         )
-                        pl.tracks.forEachIndexed { idx, song ->
-                            if (!song.isLocal && !song.videoId.startsWith(LOCAL_SONG_PREFIX)) {
-                                dao.insertPlaylistTrack(
-                                    LocalPlaylistTrackEntity(
-                                        playlistId = id,
-                                        videoId = song.videoId,
-                                        songJson = encodeSong(song),
-                                        position = idx
-                                    )
+                        cleanTracks.forEachIndexed { idx, song ->
+                            dao.insertPlaylistTrack(
+                                LocalPlaylistTrackEntity(
+                                    playlistId = id,
+                                    videoId = song.videoId,
+                                    songJson = encodeSong(song),
+                                    position = idx
                                 )
-                            }
+                            )
                         }
                         count++
                     }
@@ -753,6 +820,76 @@ class VelunaRepository(
             }
             BackupRestoreResult(restoredPlaylists = restoredCount, sourceVersion = payload.version)
         }
+    }
+
+    private fun sanitizeBackupSong(song: SongItem): SongItem? {
+        if (song.isLocal || song.videoId.startsWith(LOCAL_SONG_PREFIX)) return null
+        val cleanId = song.videoId.trim().takeIf { SecurityValidators.isValidYouTubeId(it) } ?: return null
+        return song.copy(
+            videoId = cleanId,
+            title = song.title.trim().ifBlank { "Track" }.take(200),
+            artists = song.artists.trim().take(200),
+            album = song.album?.take(200),
+            albumId = song.albumId?.take(128),
+            artistId = song.artistId?.take(128),
+            duration = song.duration?.take(24),
+            thumbnail = SecurityValidators.sanitizeHttpsUrl(song.thumbnail, 2048),
+            isLocal = false,
+            localUri = null
+        )
+    }
+
+    private fun sanitizeBackupTasteProfile(profile: TasteProfile): TasteProfile {
+        return profile.copy(
+            selectedGenres = profile.selectedGenres.map { it.trim().take(80) }.filter { it.isNotEmpty() }.distinct().take(25),
+            seedArtists = profile.seedArtists.take(30).map {
+                it.copy(
+                    id = it.id.trim().take(128),
+                    name = it.name.trim().ifBlank { "Artist" }.take(160),
+                    subtitle = it.subtitle?.take(160),
+                    thumbnail = SecurityValidators.sanitizeHttpsUrl(it.thumbnail, 2048)
+                )
+            },
+            seedSongs = profile.seedSongs.take(30).map {
+                it.copy(
+                    id = it.id.trim().take(128),
+                    name = it.name.trim().ifBlank { "Track" }.take(160),
+                    subtitle = it.subtitle?.take(160),
+                    thumbnail = SecurityValidators.sanitizeHttpsUrl(it.thumbnail, 2048)
+                )
+            },
+            artistSignals = profile.artistSignals.entries.take(500)
+                .mapNotNull { (k, sig) ->
+                    val key = k.trim().take(160)
+                    if (key.isEmpty()) null else key to sig.copy(
+                        id = sig.id?.trim()?.take(128),
+                        name = sig.name.trim().ifBlank { key }.take(160),
+                        score = if (sig.score.isFinite()) sig.score.coerceIn(-100f, 1000f) else 0f,
+                        plays = sig.plays.coerceAtLeast(0),
+                        skips = sig.skips.coerceAtLeast(0),
+                        lastUpdatedMs = sig.lastUpdatedMs.coerceAtLeast(0L)
+                    )
+                }.toMap(),
+            genreWeights = profile.genreWeights.entries.take(100)
+                .mapNotNull { (k, v) ->
+                    val key = k.trim().take(80)
+                    if (key.isEmpty()) null else key to (if (v.isFinite()) v.coerceIn(-100f, 1000f) else 0f)
+                }.toMap(),
+            trackSignals = profile.trackSignals.entries.take(1000)
+                .mapNotNull { (k, sig) ->
+                    val key = k.trim().take(64)
+                    val vid = sig.videoId.trim().takeIf { SecurityValidators.isValidYouTubeId(it) }
+                    if (key.isEmpty() || vid == null) null else key to sig.copy(
+                        videoId = vid,
+                        title = sig.title.trim().take(200),
+                        artist = sig.artist.trim().take(200),
+                        score = if (sig.score.isFinite()) sig.score.coerceIn(-100f, 1000f) else 0f,
+                        completions = sig.completions.coerceAtLeast(0),
+                        skips = sig.skips.coerceAtLeast(0),
+                        lastUpdatedMs = sig.lastUpdatedMs.coerceAtLeast(0L)
+                    )
+                }.toMap()
+        )
     }
 
     // --- Stats & History ---
@@ -910,9 +1047,13 @@ class VelunaRepository(
 
     private fun extractYouTubePlaylistId(input: String): String? {
         val trimmed = input.trim()
-        if (trimmed.startsWith("PL") || trimmed.startsWith("VL") || trimmed.startsWith("OLAK")) return trimmed
+        if ((trimmed.startsWith("PL") || trimmed.startsWith("VL") || trimmed.startsWith("OLAK")) &&
+            SecurityValidators.isValidPlaylistId(trimmed)
+        ) {
+            return trimmed
+        }
         val match = Regex("""[?&]list=([A-Za-z0-9_\-]+)""").find(trimmed)
-        return match?.groupValues?.getOrNull(1)
+        return match?.groupValues?.getOrNull(1)?.takeIf { SecurityValidators.isValidPlaylistId(it) }
     }
 
     private fun formatSecs(secs: Long): String {
@@ -924,6 +1065,8 @@ class VelunaRepository(
 
     companion object {
         private const val MAX_PLAYLIST_IMPORT_BYTES = 5 * 1024 * 1024
+        private const val MAX_COVER_BYTES = 8 * 1024 * 1024
+        private const val MAX_BACKUP_JSON_CHARS = 16 * 1024 * 1024
 
         private fun m3uSingleLine(value: String): String = value.replace(Regex("[\\r\\n\\u0000]+"), " ")
 
@@ -936,8 +1079,14 @@ class VelunaRepository(
 
         fun clampBackupPrefs(prefs: VelunaUserPrefs): VelunaUserPrefs = redactPrefsForExport(
             prefs.copy(
+                customAccentHex = prefs.customAccentHex?.trim()?.takeIf { SecurityValidators.isValidHexColor(it) },
                 cornerRadiusDp = prefs.cornerRadiusDp.coerceIn(4, 24),
-                playbackSpeed = prefs.playbackSpeed.coerceIn(0.5f, 2.0f)
+                playbackSpeed = if (prefs.playbackSpeed.isFinite()) prefs.playbackSpeed.coerceIn(0.5f, 2.0f) else 1.0f,
+                eqPresetName = prefs.eqPresetName.trim().take(40).ifBlank { "Flat" },
+                eqBandsDb = UserPrefsRepository.sanitizeEqBands(prefs.eqBandsDb)
+                    ?: EqualizerPresets.presets.getValue("Flat"),
+                lyricsProviderOrder = UserPrefsRepository.normalizeProviderOrder(prefs.lyricsProviderOrder),
+                userDisplayName = prefs.userDisplayName.trim().take(80).ifBlank { "Listener" }
             )
         )
 
@@ -946,13 +1095,14 @@ class VelunaRepository(
 
         fun playlistTrackSignature(videoIds: List<String>): String {
             val sorted = videoIds.sorted().joinToString(",")
-            val bytes = MessageDigest.getInstance("SHA-256").digest(sorted.toByteArray(Charsets.UTF_8))
-            return bytes.joinToString("") { "%02x".format(it) }
+            return SecurityValidators.sha256Hex(sorted)
         }
 
         fun csvEscape(s: String): String {
+            val rawFirst = s.firstOrNull()
             val firstContent = s.firstOrNull { !it.isWhitespace() }
-            val formulaLike = firstContent == '=' || firstContent == '+' || firstContent == '-' || firstContent == '@'
+            val formulaLike = rawFirst == '\t' || rawFirst == '\r' ||
+                firstContent == '=' || firstContent == '+' || firstContent == '-' || firstContent == '@'
             val safe = if (formulaLike) "'$s" else s
             return if (safe.contains(',') || safe.contains('"') || safe.contains('\n') || safe.contains('\r')) {
                 "\"" + safe.replace("\"", "\"\"") + "\""

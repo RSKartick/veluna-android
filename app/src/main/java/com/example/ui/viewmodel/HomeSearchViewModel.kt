@@ -19,6 +19,8 @@ import com.example.model.SearchSuggestions
 import com.example.model.SongItem
 import com.example.model.TasteProfile
 import com.example.model.TasteSeed
+import com.example.util.SecurityValidators
+import com.example.util.suspendRunCatching
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -153,7 +155,7 @@ class HomeSearchViewModel(
                 it.copy(isLoading = true, error = null, selectedChipParams = params, moodsTitle = null)
             }
             innerTube.getHome(params).onSuccess { remotePage ->
-                val personalized = runCatching {
+                val personalized = suspendRunCatching {
                     tasteEngine?.personalizeHomePage(remotePage, isFilteredChipOrMood = !params.isNullOrBlank())
                 }.getOrNull() ?: remotePage
 
@@ -168,7 +170,7 @@ class HomeSearchViewModel(
                 }
             }.onFailure { err ->
                 // Even if FEmusic_home fails temporarily, try building personalized shelves from seeds
-                val seedFallback = runCatching {
+                val seedFallback = suspendRunCatching {
                     tasteEngine?.personalizeHomePage(InnerTubeClient.fallbackDiscoveryHome(), isFilteredChipOrMood = false)
                 }.getOrNull()
                 if (seedFallback != null && seedFallback.sections.isNotEmpty()) {
@@ -185,7 +187,7 @@ class HomeSearchViewModel(
                     _homeState.update {
                         it.copy(
                             isLoading = false,
-                            error = err.message ?: "Unable to reach YouTube Music"
+                            error = SecurityValidators.safeUserErrorMessage(err, "Unable to reach YouTube Music")
                         )
                     }
                 }
@@ -199,7 +201,12 @@ class HomeSearchViewModel(
             innerTube.getMoodCategory(tile.params).onSuccess { page ->
                 _homeState.update { it.copy(isLoading = false, homePage = page) }
             }.onFailure { err ->
-                _homeState.update { it.copy(isLoading = false, error = err.message) }
+                _homeState.update {
+                    it.copy(
+                        isLoading = false,
+                        error = SecurityValidators.safeUserErrorMessage(err, "Failed to load mood category")
+                    )
+                }
             }
         }
     }
@@ -302,7 +309,10 @@ class HomeSearchViewModel(
                 }
             }.onFailure { err ->
                 _searchState.update {
-                    it.copy(isSearching = false, error = err.message ?: "Search failed")
+                    it.copy(
+                        isSearching = false,
+                        error = SecurityValidators.safeUserErrorMessage(err, "Search failed")
+                    )
                 }
             }
         }

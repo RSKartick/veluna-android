@@ -20,6 +20,7 @@ import com.example.model.StatsRange
 import com.example.model.StatsSummary
 import com.example.model.ThemeMode
 import com.example.model.VelunaThemePreset
+import com.example.util.SecurityValidators
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -206,7 +207,7 @@ class LibraryStatsViewModel(
             }.onFailure { err ->
                 _importState.value = ImportDialogState(
                     isImporting = false,
-                    error = err.message ?: "Failed to import playlist"
+                    error = SecurityValidators.safeUserErrorMessage(err, "Failed to import playlist")
                 )
             }
         }
@@ -232,7 +233,7 @@ class LibraryStatsViewModel(
             }.onFailure { err ->
                 _importState.value = ImportDialogState(
                     isImporting = false,
-                    error = err.message ?: "Import failed"
+                    error = SecurityValidators.safeUserErrorMessage(err, "Import failed")
                 )
             }
         }
@@ -247,7 +248,7 @@ class LibraryStatsViewModel(
                 _restoredLegacyBackupWarning.value = result.sourceVersion < 2
                 _statusBanner.value = "Restored settings & ${result.restoredPlaylists} playlist(s)"
             }.onFailure { err ->
-                _statusBanner.value = "Restore failed: ${err.message}"
+                _statusBanner.value = "Restore failed: ${SecurityValidators.safeUserErrorMessage(err, "Invalid backup file")}"
             }
         }
     }

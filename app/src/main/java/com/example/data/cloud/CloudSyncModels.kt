@@ -1,6 +1,8 @@
 package com.example.data.cloud
 
+import com.example.model.LOCAL_SONG_PREFIX
 import com.example.model.SongItem
+import com.example.util.SecurityValidators
 import com.google.firebase.Timestamp
 import com.google.firebase.firestore.DocumentId
 import com.google.firebase.firestore.IgnoreExtraProperties
@@ -67,7 +69,7 @@ data class CloudLikedSong(
         albumId = albumId,
         artistId = artistId,
         duration = duration,
-        thumbnail = thumbnail,
+        thumbnail = SecurityValidators.sanitizeHttpsUrl(thumbnail, 2048),
         explicit = explicit,
         rating = com.example.model.Rating.LIKE
     )
@@ -94,7 +96,9 @@ data class CloudPlaylistTrack(
     @ServerTimestamp val updatedAt: Timestamp? = null
 ) {
     fun toSongItem(): SongItem? {
-        val vid = videoId.ifBlank { docId }.takeIf { it.isNotBlank() } ?: return null
+        val vid = videoId.ifBlank { docId }.trim()
+            .takeIf { it.isNotBlank() && !it.startsWith(LOCAL_SONG_PREFIX) }
+            ?: return null
         if (title.isBlank()) return null
         return SongItem(
             videoId = vid,
@@ -104,7 +108,7 @@ data class CloudPlaylistTrack(
             albumId = albumId,
             artistId = artistId,
             duration = duration,
-            thumbnail = thumbnail,
+            thumbnail = SecurityValidators.sanitizeHttpsUrl(thumbnail, 2048),
             explicit = explicit,
             addedAt = addedAt.takeIf { it > 0L }
         )

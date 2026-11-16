@@ -8,6 +8,7 @@ import android.net.Uri
 import androidx.compose.runtime.Immutable
 import androidx.compose.ui.graphics.Color
 import androidx.core.content.ContextCompat
+import androidx.core.net.toUri
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.MimeTypes
@@ -36,6 +37,8 @@ import com.example.model.Rating
 import com.example.model.RepeatMode
 import com.example.model.ResolvedStream
 import com.example.model.SongItem
+import com.example.util.SecurityValidators
+import com.example.util.suspendRunCatching
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -59,7 +62,6 @@ import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.Request
 import java.io.File
 import java.io.FileOutputStream
-import java.security.MessageDigest
 
 @Immutable
 data class PlaybackUiState(
@@ -239,11 +241,12 @@ class PlayerController(
     }
 
     private fun surfacePlaybackError(error: PlaybackException) {
+        val safeDetail = SecurityValidators.sanitizeErrorText(error.localizedMessage, "Source unavailable")
         _state.update {
             it.copy(
                 isBuffering = false,
                 isPlaying = false,
-                errorMessage = "Playback failed (${error.errorCodeName}): ${error.localizedMessage ?: "Source unavailable"}"
+                errorMessage = "Playback failed (${error.errorCodeName}): $safeDetail"
             )
         }
     }
@@ -648,15 +651,16 @@ class PlayerController(
 
             // 1) Local audio file
             if (hydratedSong.isLocal && hydratedSong.localUri != null) {
-                playUri(Uri.parse(hydratedSong.localUri), hydratedSong, "Local File", null, null)
+                playUri(hydratedSong.localUri.toUri(), hydratedSong, "Local File", null, null)
                 prefetchNextInQueue()
                 return@launch
             }
 
-            // 2) Offline downloaded track
+            // 2) Offline downloaded track (strictly confined to app downloads directory)
             val downloaded = withContext(Dispatchers.IO) { dao.getDownload(hydratedSong.videoId) }
-            if (downloaded != null && File(downloaded.filePath).exists()) {
-                playUri(Uri.fromFile(File(downloaded.filePath)), hydratedSong, "Offline", null, null)
+            val offlineFile = downloaded?.let { resolveSafeDownloadFile(it.filePath) }
+            if (offlineFile != null) {
+                playUri(Uri.fromFile(offlineFile), hydratedSong, "Offline", null, null)
                 prefetchNextInQueue()
                 return@launch
             }
@@ -676,7 +680,10 @@ class PlayerController(
                     it.copy(
                         isBuffering = false,
                         isPlaying = false,
-                        errorMessage = err.message ?: "Unable to resolve audio stream"
+                        errorMessage = SecurityValidators.safeUserErrorMessage(
+                            err,
+                            "Unable to resolve audio stream"
+                        )
                     )
                 }
             }
@@ -687,13 +694,22 @@ class PlayerController(
         }
     }
 
+    private fun resolveSafeDownloadFile(rawPath: String): File? {
+        val downloadsDir = File(context.filesDir, "downloads")
+        val canonicalRoot = runCatching { downloadsDir.canonicalPath }.getOrNull() ?: return null
+        val target = File(rawPath)
+        val canonicalTarget = runCatching { target.canonicalPath }.getOrNull() ?: return null
+        if (!canonicalTarget.startsWith("$canonicalRoot${File.separator}")) return null
+        return target.takeIf { it.isFile && it.exists() }
+    }
+
     private fun prefetchNextInQueue() {
         val nextSong = _state.value.queue.getOrNull(_state.value.currentIndex + 1) ?: return
         if (nextSong.isLocal) return
         prefetchJob?.cancel()
         prefetchJob = scope.launch(Dispatchers.IO) {
             delay(900L)
-            runCatching {
+            suspendRunCatching {
                 innerTube.resolveStreamCandidates(
                     nextSong.videoId,
                     currentPrefs.audioQuality,
@@ -705,11 +721,26 @@ class PlayerController(
 
     private suspend fun tryCandidateStream(song: SongItem, idx: Int) {
         val candidate = activeCandidates.getOrNull(idx) ?: return
+        if (!SecurityValidators.isSafeHttpsUrl(candidate.url, maxLength = 8192)) {
+            val nextIdx = idx + 1
+            if (nextIdx in activeCandidates.indices) {
+                tryCandidateStream(song, nextIdx)
+            } else {
+                _state.update {
+                    it.copy(
+                        isBuffering = false,
+                        isPlaying = false,
+                        errorMessage = "Unable to play audio stream from untrusted source"
+                    )
+                }
+            }
+            return
+        }
         activeCandidateIndex = idx
         VelunaPlaybackService.registerStreamHeaders(candidate.url, candidate.userAgent)
         val mimeOverride = if (candidate.isHls) MimeTypes.APPLICATION_M3U8 else null
         playUri(
-            uri = Uri.parse(candidate.url),
+            uri = candidate.url.toUri(),
             song = song,
             clientName = candidate.clientName,
             loudnessDb = candidate.loudnessDb,
@@ -731,7 +762,9 @@ class PlayerController(
             .setArtist(song.artists)
             .setAlbumTitle(song.album)
             .apply {
-                song.thumbnail?.let { setArtworkUri(Uri.parse(it)) }
+                SecurityValidators.sanitizeHttpsUrl(song.thumbnail, maxLength = 2048)?.let {
+                    setArtworkUri(it.toUri())
+                }
             }
             .build()
 
@@ -817,9 +850,10 @@ class PlayerController(
     }
 
     private suspend fun loadBitmap(url: String): Bitmap? = withContext(Dispatchers.IO) {
-        runCatching {
+        val safeUrl = SecurityValidators.sanitizeHttpsUrl(url, maxLength = 2048) ?: return@withContext null
+        suspendRunCatching {
             val req = ImageRequest.Builder(context)
-                .data(url)
+                .data(safeUrl)
                 .allowHardware(false)
                 .size(120)
                 .build()
@@ -846,21 +880,24 @@ class PlayerController(
                 ))
             }
 
+            var partFile: File? = null
             try {
                 val stream = innerTube.resolveStreamUrl(
                     song.videoId,
                     currentPrefs.audioQuality,
                     allowMirrorFallbacks = currentPrefs.allowMirrorFallbacks
                 ).getOrThrow()
+                if (stream.isHls || !SecurityValidators.isSafeHttpsUrl(stream.url, maxLength = 8192)) {
+                    throw IllegalStateException("Downloadable HTTPS audio stream unavailable")
+                }
                 val ext = when {
                     "webm" in stream.mimeType || "opus" in stream.mimeType -> "opus"
                     else -> "m4a"
                 }
                 val dir = File(context.filesDir, "downloads").apply { mkdirs() }
-                val fileId = MessageDigest.getInstance("SHA-256")
-                    .digest(song.videoId.toByteArray(Charsets.UTF_8))
-                    .joinToString("") { byte -> (byte.toInt() and 0xff).toString(16).padStart(2, '0') }
+                val fileId = SecurityValidators.sha256Hex(song.videoId)
                 val outFile = File(dir, "$fileId.$ext")
+                partFile = File(dir, "$fileId.$ext.part")
 
                 val req = Request.Builder()
                     .url(stream.url)
@@ -868,20 +905,26 @@ class PlayerController(
                     .build()
 
                 innerTube.httpClient.newCall(req).execute().use { resp ->
-                    if (!resp.isSuccessful) throw IllegalStateException("HTTP ${resp.code}")
-                    val body = resp.body ?: throw IllegalStateException("Empty body")
+                    if (!resp.isSuccessful) throw IllegalStateException("Download server returned HTTP ${resp.code}")
+                    val body = resp.body ?: throw IllegalStateException("Empty download response")
                     val total = body.contentLength()
+                    if (total > MAX_DOWNLOAD_BYTES) {
+                        throw IllegalStateException("Audio file exceeds maximum allowed size")
+                    }
                     var downloaded = 0L
                     var lastUiProgressAt = System.nanoTime()
                     var lastUiProgressBytes = 0L
                     val buf = ByteArray(16 * 1024)
                     body.byteStream().use { input ->
-                        FileOutputStream(outFile).use { output ->
+                        FileOutputStream(partFile).use { output ->
                             while (true) {
                                 val read = input.read(buf)
                                 if (read <= 0) break
-                                output.write(buf, 0, read)
                                 downloaded += read
+                                if (downloaded > MAX_DOWNLOAD_BYTES) {
+                                    throw IllegalStateException("Audio file exceeds maximum allowed size")
+                                }
+                                output.write(buf, 0, read)
                                 val now = System.nanoTime()
                                 if (downloaded - lastUiProgressBytes >= DOWNLOAD_PROGRESS_BYTE_INTERVAL &&
                                     now - lastUiProgressAt >= DOWNLOAD_PROGRESS_TIME_INTERVAL_NANOS
@@ -906,6 +949,12 @@ class PlayerController(
                             }
                         }
                     }
+
+                    if (!partFile.renameTo(outFile)) {
+                        partFile.copyTo(outFile, overwrite = true)
+                        partFile.delete()
+                    }
+                    partFile = null
 
                     dao.upsertDownload(
                         DownloadedTrackEntity(
@@ -934,17 +983,19 @@ class PlayerController(
                     map[song.videoId]?.let { progress ->
                         map + (song.videoId to progress.copy(
                             status = DownloadStatus.FAILED,
-                            error = t.message
+                            error = SecurityValidators.safeUserErrorMessage(t, "Download failed")
                         ))
                     } ?: map
                 }
+            } finally {
+                partFile?.let { tmp -> runCatching { if (tmp.exists()) tmp.delete() } }
             }
         }
     }
 
     fun deleteDownload(videoId: String) {
         scope.launch(Dispatchers.IO) {
-            dao.getDownload(videoId)?.let { File(it.filePath).delete() }
+            dao.getDownload(videoId)?.let { resolveSafeDownloadFile(it.filePath)?.delete() }
             dao.deleteDownload(videoId)
             _downloads.update { it - videoId }
         }
@@ -953,5 +1004,6 @@ class PlayerController(
     private companion object {
         const val DOWNLOAD_PROGRESS_BYTE_INTERVAL = 128L * 1024L
         const val DOWNLOAD_PROGRESS_TIME_INTERVAL_NANOS = 250_000_000L
+        const val MAX_DOWNLOAD_BYTES = 250L * 1024L * 1024L
     }
 }

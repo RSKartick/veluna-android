@@ -1,7 +1,6 @@
 package com.example.data.security
 
 import android.content.Context
-import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
@@ -40,6 +39,7 @@ class AndroidKeyStoreVaultCipher(
         )
             .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
             .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+            .setRandomizedEncryptionRequired(true)
             .setKeySize(256)
             .build()
         generator.init(spec)
@@ -120,7 +120,7 @@ class SecretVault(
 ) {
     constructor(context: Context) : this(
         storageFile = File(context.applicationContext.noBackupFilesDir, VAULT_FILENAME),
-        cipher = createDefaultCipher()
+        cipher = AndroidKeyStoreVaultCipher()
     )
 
     private val lock = Any()
@@ -171,6 +171,10 @@ class SecretVault(
                 if (storageFile.exists()) {
                     storageFile.delete()
                 }
+                val tmp = File(storageFile.parentFile, "$VAULT_FILENAME.tmp")
+                if (tmp.exists()) {
+                    tmp.delete()
+                }
             }
             cipher.deleteKey()
         }
@@ -213,17 +217,5 @@ class SecretVault(
         const val KEY_LASTFM_SECRET = "lastfm_secret"
         const val KEY_LASTFM_SESSION = "lastfm_session"
         const val KEY_LISTENBRAINZ_TOKEN = "listenbrainz_token"
-
-        private fun isRobolectricRuntime(): Boolean =
-            Build.FINGERPRINT.equals("robolectric", ignoreCase = true)
-
-        private fun createDefaultCipher(): VaultCipher {
-            return if (isRobolectricRuntime()) {
-                // Robolectric JVM has no AndroidKeyStore provider; tests covering key lifecycle pass explicit ciphers.
-                InMemoryAesGcmVaultCipher("robolectric-deterministic-test-key".toByteArray(Charsets.UTF_8).copyOf(32))
-            } else {
-                AndroidKeyStoreVaultCipher()
-            }
-        }
     }
 }

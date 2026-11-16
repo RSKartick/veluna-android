@@ -32,10 +32,17 @@ import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -51,6 +58,9 @@ import com.example.model.DownloadProgress
 import com.example.model.SongItem
 import com.example.ui.components.TrackRow
 import com.example.ui.components.VelunaArtwork
+import com.example.ui.theme.VelunaMotion
+import com.example.ui.theme.rememberVelunaFlingBehavior
+import com.example.ui.theme.rememberVelunaLazyListState
 import com.example.ui.theme.velunaFilterChipBorder
 import com.example.ui.theme.velunaFilterChipColors
 import com.example.ui.theme.velunaOutlinedButtonBorder
@@ -79,7 +89,12 @@ fun LibraryScreen(
     onDeleteDownload: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    var selectedTab by remember { mutableIntStateOf(0) }
+    var selectedTab by rememberSaveable { mutableIntStateOf(0) }
+    val smoothFling = rememberVelunaFlingBehavior()
+    val playlistsListState = rememberVelunaLazyListState()
+    val likedListState = rememberVelunaLazyListState()
+    val albumsListState = rememberVelunaLazyListState()
+    val artistsListState = rememberVelunaLazyListState()
     val tabs = listOf(
         "playlists" to stringResource(R.string.library_tab_playlists),
         "liked_songs" to stringResource(R.string.library_tab_liked_songs),
@@ -162,14 +177,33 @@ fun LibraryScreen(
 
             Spacer(modifier = Modifier.height(6.dp))
 
-            Box(modifier = Modifier.weight(1f)) {
-                when (selectedTab) {
+            AnimatedContent(
+                targetState = selectedTab,
+                transitionSpec = {
+                    val dir = if (targetState >= initialState) 1 else -1
+                    (slideInHorizontally(VelunaMotion.screenSlideEnterSpring()) { dir * (it / 16) } +
+                        fadeIn(VelunaMotion.tabTransitionTween()))
+                        .togetherWith(
+                            slideOutHorizontally(tween(150)) { -dir * (it / 24) } +
+                                fadeOut(VelunaMotion.tabFadeOutTween())
+                        )
+                },
+                modifier = Modifier.weight(1f),
+                label = "library_tab_content"
+            ) { tab ->
+                when (tab) {
                     0 -> {
                         LazyColumn(
+                            state = playlistsListState,
+                            flingBehavior = smoothFling,
                             contentPadding = PaddingValues(bottom = 28.dp),
                             modifier = Modifier.fillMaxSize()
                         ) {
-                            items(playlists, key = { it.id }) { pl ->
+                            items(
+                                items = playlists,
+                                key = { it.id },
+                                contentType = { "playlist_row" }
+                            ) { pl ->
                                 ListItem(
                                     colors = ListItemDefaults.colors(
                                         containerColor = Color.Transparent,
@@ -204,10 +238,12 @@ fun LibraryScreen(
                         } else {
                             val likedTitle = stringResource(R.string.library_tab_liked_songs)
                             LazyColumn(
+                                state = likedListState,
+                                flingBehavior = smoothFling,
                                 contentPadding = PaddingValues(bottom = 28.dp),
                                 modifier = Modifier.fillMaxSize()
                             ) {
-                                item(contentType = "header") {
+                                item(key = "liked_header", contentType = "header") {
                                     PlayShuffleHeader(
                                         countLabel = stringResource(R.string.library_liked_count, likedSongs.size),
                                         onPlayAll = { onPlaySongs(likedSongs, 0, likedTitle) },
@@ -239,10 +275,16 @@ fun LibraryScreen(
                             )
                         } else {
                             LazyColumn(
+                                state = albumsListState,
+                                flingBehavior = smoothFling,
                                 contentPadding = PaddingValues(bottom = 28.dp),
                                 modifier = Modifier.fillMaxSize()
                             ) {
-                                items(savedAlbums, key = { it.id }) { al ->
+                                items(
+                                    items = savedAlbums,
+                                    key = { it.id },
+                                    contentType = { "album_row" }
+                                ) { al ->
                                     ListItem(
                                         colors = ListItemDefaults.colors(
                                             containerColor = Color.Transparent,
@@ -276,10 +318,16 @@ fun LibraryScreen(
                             )
                         } else {
                             LazyColumn(
+                                state = artistsListState,
+                                flingBehavior = smoothFling,
                                 contentPadding = PaddingValues(bottom = 28.dp),
                                 modifier = Modifier.fillMaxSize()
                             ) {
-                                items(followedArtists, key = { it.id }) { ar ->
+                                items(
+                                    items = followedArtists,
+                                    key = { it.id },
+                                    contentType = { "artist_row" }
+                                ) { ar ->
                                     ListItem(
                                         colors = ListItemDefaults.colors(
                                             containerColor = Color.Transparent,

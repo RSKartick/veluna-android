@@ -37,12 +37,14 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
@@ -59,6 +61,8 @@ import com.example.ui.components.MediaSquareCard
 import com.example.ui.components.SectionHeading
 import com.example.ui.components.TrackRow
 import com.example.ui.theme.VelunaMotion
+import com.example.ui.theme.rememberVelunaFlingBehavior
+import com.example.ui.theme.rememberVelunaLazyListState
 import com.example.ui.theme.velunaFilterChipBorder
 import com.example.ui.theme.velunaFilterChipColors
 import com.example.ui.viewmodel.StatsUiState
@@ -76,12 +80,16 @@ fun StatsScreen(
     modifier: Modifier = Modifier
 ) {
     val summary = state.summary
+    val listState = rememberVelunaLazyListState()
+    val smoothFling = rememberVelunaFlingBehavior()
 
     Box(
         modifier = modifier.fillMaxSize(),
         contentAlignment = Alignment.TopCenter
     ) {
         LazyColumn(
+            state = listState,
+            flingBehavior = smoothFling,
             contentPadding = PaddingValues(bottom = 28.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
             modifier = Modifier
@@ -272,8 +280,15 @@ fun StatsScreen(
                     item(key = "stats_top_artists", contentType = "carousel") {
                         Column {
                             SectionHeading(title = stringResource(R.string.stats_top_artists))
-                            LazyRow(contentPadding = PaddingValues(horizontal = 10.dp)) {
-                                items(summary.topArtists, key = { it.name }) { ar ->
+                            LazyRow(
+                                flingBehavior = smoothFling,
+                                contentPadding = PaddingValues(horizontal = 10.dp)
+                            ) {
+                                items(
+                                    items = summary.topArtists,
+                                    key = { it.name },
+                                    contentType = { "media_card" }
+                                ) { ar ->
                                     MediaSquareCard(
                                         item = BrowseItem(
                                             kind = BrowseKind.ARTIST,
@@ -294,8 +309,15 @@ fun StatsScreen(
                     item(key = "stats_top_albums", contentType = "carousel") {
                         Column {
                             SectionHeading(title = stringResource(R.string.stats_top_albums))
-                            LazyRow(contentPadding = PaddingValues(horizontal = 10.dp)) {
-                                items(summary.topAlbums, key = { it.id }) { al ->
+                            LazyRow(
+                                flingBehavior = smoothFling,
+                                contentPadding = PaddingValues(horizontal = 10.dp)
+                            ) {
+                                items(
+                                    items = summary.topAlbums,
+                                    key = { it.id },
+                                    contentType = { "media_card" }
+                                ) { al ->
                                     MediaSquareCard(
                                         item = BrowseItem(
                                             kind = BrowseKind.ALBUM,
@@ -357,7 +379,7 @@ private fun DailyBarChart(series: List<DailyListening>) {
     val trackBg = MaterialTheme.colorScheme.surfaceVariant
     val maxSecs = remember(series) { (series.maxOfOrNull { it.secs } ?: 1L).coerceAtLeast(1L) }
 
-    var revealed by remember { mutableStateOf(false) }
+    var revealed by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(Unit) { revealed = true }
     val growth by animateFloatAsState(
         targetValue = if (revealed) 1f else 0f,
@@ -431,6 +453,7 @@ private fun WeekdayHourHeatmap(cells: List<Long>) {
             modifier = Modifier
                 .weight(1f)
                 .height(98.dp)
+                .graphicsLayer { }
         ) {
             val cols = 24
             val rows = 7

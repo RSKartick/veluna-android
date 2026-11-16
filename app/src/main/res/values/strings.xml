@@ -28,7 +28,6 @@
     <string name="home_shortcuts">Shortcuts</string>
     <string name="home_jump_back_in">Jump back in</string>
     <string name="home_familiar_artists">Familiar Artists</string>
-    <string name="home_quick_picks">Quick Picks</string>
     <string name="home_subtitle_default">Veluna Music</string>
     <string name="home_subtitle_mood">Mood &amp; Genre Mix</string>
     <string name="home_listening_history">Listening history</string>
@@ -41,7 +40,6 @@
     <string name="home_feed_error_title">Could not load online feed</string>
 
     <string name="search_placeholder">Search songs, albums, artists…</string>
-    <string name="search_moods_genres">Moods &amp; Genres</string>
     <string name="search_clear">Clear search</string>
     <string name="search_no_results">No results in %1$s</string>
     <string name="search_recent">Recent searches</string>
@@ -79,7 +77,6 @@
     <string name="history_title">Listening History</string>
     <string name="history_empty">No listening history yet</string>
 
-    <string name="player_not_playing">Not playing</string>
     <string name="player_now_playing_default">Now Playing</string>
     <string name="player_minimize">Minimize player</string>
     <string name="player_more_options">More options</string>
@@ -180,7 +177,6 @@
     <string name="settings_syncing">Syncing…</string>
     <string name="settings_sync_syncing">Syncing…</string>
     <string name="settings_sync_up_to_date">Up to date at %1$s</string>
-    <string name="settings_sync_failed">Sync failed: %1$s</string>
     <string name="settings_sync_connected">Connected with Google</string>
     <string name="settings_display_name">Display Name</string>
     <string name="settings_display_name_saved">Name updated</string>

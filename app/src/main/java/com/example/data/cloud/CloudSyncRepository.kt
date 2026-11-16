@@ -8,6 +8,7 @@ import com.example.model.LOCAL_SONG_PREFIX
 import com.example.model.SongItem
 import com.example.model.TasteProfile
 import com.example.model.TasteSeed
+import com.example.util.SecurityValidators
 import com.google.firebase.Firebase
 import com.google.firebase.Timestamp
 import com.google.firebase.auth.FirebaseAuth
@@ -282,13 +283,13 @@ class CloudSyncRepository(
             .ifBlank { "Listener" }
             .take(80)
         val safeEmail = email?.trim()?.takeIf { it.isNotEmpty() }?.take(200)
-        val safePhoto = photoUrl?.trim()?.takeIf { it.isNotEmpty() }?.take(500)
+        val safePhoto = SecurityValidators.sanitizeHttpsUrl(photoUrl, 500)
         val safeGenres = tasteProfile.selectedGenres
             .map { it.trim() }
             .filter { it.isNotEmpty() }
             .distinct()
             .take(25)
-        val safeAccent = prefs.customAccentHex?.trim()?.takeIf { it.isNotEmpty() }?.take(16)
+        val safeAccent = prefs.customAccentHex?.trim()?.takeIf { SecurityValidators.isValidHexColor(it) }
 
         val mutableFields = mapOf<String, Any?>(
             "displayName" to safeName,
@@ -342,7 +343,7 @@ class CloudSyncRepository(
                 "kind" to "ARTIST",
                 "name" to seed.name.trim().ifBlank { "Artist" }.take(160),
                 "subtitle" to seed.subtitle?.take(160),
-                "thumbnail" to seed.thumbnail?.take(500),
+                "thumbnail" to SecurityValidators.sanitizeHttpsUrl(seed.thumbnail, 500),
                 "deleted" to false,
                 "clientUpdatedAt" to nowMs.coerceAtLeast(0L),
                 "updatedAt" to FieldValue.serverTimestamp()
@@ -354,7 +355,7 @@ class CloudSyncRepository(
                 "kind" to "SONG",
                 "name" to seed.name.trim().ifBlank { "Track" }.take(160),
                 "subtitle" to seed.subtitle?.take(160),
-                "thumbnail" to seed.thumbnail?.take(500),
+                "thumbnail" to SecurityValidators.sanitizeHttpsUrl(seed.thumbnail, 500),
                 "deleted" to false,
                 "clientUpdatedAt" to nowMs.coerceAtLeast(0L),
                 "updatedAt" to FieldValue.serverTimestamp()
@@ -430,7 +431,7 @@ class CloudSyncRepository(
                 "artistId" to song.artistId?.take(128),
                 "duration" to song.duration?.take(24),
                 "durationSecs" to song.durationSeconds.coerceAtLeast(0L),
-                "thumbnail" to song.thumbnail?.take(500),
+                "thumbnail" to SecurityValidators.sanitizeHttpsUrl(song.thumbnail, 500),
                 "explicit" to song.explicit,
                 "likedAt" to likedAtMs.coerceAtLeast(0L),
                 "deleted" to false,
@@ -454,10 +455,14 @@ class CloudSyncRepository(
         val uid = requireUserId()
         val col = db.collection("users").document(uid).collection("liked_songs")
         for (id in videoIds) {
-            runCatching {
+            try {
                 val safeId = sanitizeDocId(id, prefix = "trk")
                 col.document(safeId).delete().await()
                 knownExistingPaths.remove(col.document(safeId).path)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // Best-effort cleanup of legacy local docs
             }
         }
     }
@@ -481,7 +486,7 @@ class CloudSyncRepository(
         val mutableFields = linkedMapOf<String, Any?>(
             "title" to title.trim().ifBlank { "Playlist" }.take(120),
             "description" to description.take(500),
-            "coverUri" to coverUri?.takeIf { !it.startsWith("content://") }?.take(500),
+            "coverUri" to SecurityValidators.sanitizeHttpsUrl(coverUri, 500),
             "deleted" to false,
             "clientUpdatedAt" to clientUpdatedAt.coerceAtLeast(0L),
             "updatedAt" to FieldValue.serverTimestamp()
@@ -505,7 +510,7 @@ class CloudSyncRepository(
                     "artistId" to s.artistId?.take(128),
                     "duration" to s.duration?.take(24),
                     "durationSecs" to s.durationSeconds.coerceAtLeast(0L),
-                    "thumbnail" to s.thumbnail?.take(500),
+                    "thumbnail" to SecurityValidators.sanitizeHttpsUrl(s.thumbnail, 500),
                     "explicit" to s.explicit,
                     "position" to idx,
                     "addedAt" to (s.addedAt ?: clientUpdatedAt).coerceAtLeast(0L),
@@ -716,7 +721,9 @@ class CloudSyncRepository(
         }
 
         fun songFromCloudMap(map: Map<String, Any?>): SongItem? {
-            val videoId = (map["videoId"] as? String)?.takeIf { it.isNotBlank() && !it.startsWith(LOCAL_SONG_PREFIX) } ?: return null
+            val videoId = (map["videoId"] as? String)?.trim()
+                ?.takeIf { it.isNotBlank() && !it.startsWith(LOCAL_SONG_PREFIX) }
+                ?: return null
             val title = (map["title"] as? String)?.takeIf { it.isNotBlank() } ?: return null
             return SongItem(
                 videoId = videoId,
@@ -726,7 +733,7 @@ class CloudSyncRepository(
                 albumId = map["albumId"] as? String,
                 artistId = map["artistId"] as? String,
                 duration = map["duration"] as? String,
-                thumbnail = map["thumbnail"] as? String,
+                thumbnail = SecurityValidators.sanitizeHttpsUrl(map["thumbnail"] as? String, 2048),
                 explicit = (map["explicit"] as? Boolean) ?: false
             )
         }
