@@ -27,8 +27,10 @@ import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -36,7 +38,6 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavDestination.Companion.hasRoute
-import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.example.VelunaAppContainer
@@ -47,11 +48,7 @@ import com.example.ui.components.MiniPlayerBar
 import com.example.ui.navigation.AlbumRoute
 import com.example.ui.navigation.ArtistRoute
 import com.example.ui.navigation.HomeRoute
-import com.example.ui.navigation.LibraryRoute
 import com.example.ui.navigation.PlaylistRoute
-import com.example.ui.navigation.SearchRoute
-import com.example.ui.navigation.SettingsRoute
-import com.example.ui.navigation.StatsRoute
 import com.example.ui.navigation.VelunaTopTab
 import com.example.ui.theme.VelunaMotion
 import com.example.ui.theme.VelunaTheme
@@ -194,20 +191,16 @@ fun VelunaApp(
             }
         }
 
+        var selectedTopTab by rememberSaveable { mutableStateOf(VelunaTopTab.HOME) }
+        var visitedTabMask by rememberSaveable { mutableIntStateOf(1 shl VelunaTopTab.HOME.ordinal) }
+
         val navigateTopTab = remember(libraryStatsVm, navController) {
             { tab: VelunaTopTab ->
-                val route: Any = when (tab) {
-                    VelunaTopTab.HOME -> HomeRoute
-                    VelunaTopTab.SEARCH -> SearchRoute
-                    VelunaTopTab.LIBRARY -> LibraryRoute
-                    VelunaTopTab.STATS -> StatsRoute
-                    VelunaTopTab.SETTINGS -> SettingsRoute
-                }
+                visitedTabMask = visitedTabMask or (1 shl tab.ordinal)
+                selectedTopTab = tab
                 if (tab == VelunaTopTab.STATS) libraryStatsVm.refreshStats()
-                navController.navigate(route) {
-                    popUpTo(navController.graph.findStartDestination().id) { saveState = true }
-                    launchSingleTop = true
-                    restoreState = true
+                if (navController.currentDestination?.hasRoute<HomeRoute>() != true) {
+                    navController.popBackStack<HomeRoute>(inclusive = false)
                 }
             }
         }
@@ -225,13 +218,7 @@ fun VelunaApp(
         val onOpenEqualizer = remember { { showEqualizer = true } }
 
         val currentDestination = backStackEntry?.destination
-        val selectedTopTab = when {
-            currentDestination?.hasRoute<SearchRoute>() == true -> VelunaTopTab.SEARCH
-            currentDestination?.hasRoute<LibraryRoute>() == true -> VelunaTopTab.LIBRARY
-            currentDestination?.hasRoute<StatsRoute>() == true -> VelunaTopTab.STATS
-            currentDestination?.hasRoute<SettingsRoute>() == true -> VelunaTopTab.SETTINGS
-            else -> VelunaTopTab.HOME
-        }
+        val isAtTopTabRoot = currentDestination == null || currentDestination.hasRoute<HomeRoute>()
 
         Surface(
             color = MaterialTheme.colorScheme.background,
@@ -309,6 +296,9 @@ fun VelunaApp(
 
                         VelunaNavHost(
                             navController = navController,
+                            selectedTopTab = selectedTopTab,
+                            visitedTabMask = visitedTabMask,
+                            isAtTopTabRoot = isAtTopTabRoot,
                             container = container,
                             homeSearchVm = homeSearchVm,
                             detailVm = detailVm,

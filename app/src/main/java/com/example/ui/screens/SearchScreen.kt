@@ -296,11 +296,11 @@ fun SearchScreen(
                 else -> {
                     LazyColumn(
                         contentPadding = PaddingValues(bottom = 28.dp),
-                        verticalArrangement = Arrangement.spacedBy(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
                         modifier = Modifier.fillMaxSize()
                     ) {
                         if (searchHistory.isNotEmpty()) {
-                            item {
+                            item(key = "search_history_card", contentType = "search_history") {
                                 Column {
                                     Row(
                                         modifier = Modifier
@@ -346,36 +346,48 @@ fun SearchScreen(
                         }
 
                         if (state.isMoodsLoading && state.moodsSections.isEmpty()) {
-                            item {
+                            item(key = "moods_loading", contentType = "loading") {
                                 Box(modifier = Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) {
                                     CircularProgressIndicator()
                                 }
                             }
                         }
 
-                        items(state.moodsSections, key = { it.title }) { section ->
-                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                SectionHeading(title = section.title)
-                                Column(
-                                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                                    modifier = Modifier.padding(horizontal = 16.dp)
+                        state.moodsSections.forEachIndexed { secIdx, section ->
+                            item(
+                                key = "mood_hdr_${secIdx}_${section.title}",
+                                contentType = "section_heading"
+                            ) {
+                                SectionHeading(
+                                    title = section.title,
+                                    modifier = Modifier.padding(top = 6.dp)
+                                )
+                            }
+                            val pairs = section.items.chunked(2)
+                            items(
+                                count = pairs.size,
+                                key = { rowIdx -> "mood_row_${secIdx}_${section.title}_$rowIdx" },
+                                contentType = { "mood_row" }
+                            ) { rowIdx ->
+                                val pair = pairs[rowIdx]
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 16.dp)
                                 ) {
-                                    section.items.chunked(2).forEach { pair ->
-                                        Row(
-                                            horizontalArrangement = Arrangement.spacedBy(10.dp),
-                                            modifier = Modifier.fillMaxWidth()
-                                        ) {
-                                            pair.forEach { tile ->
-                                                MoodGridTile(
-                                                    tile = tile,
-                                                    sectionTitle = section.title,
-                                                    onClick = { onOpenMoodTile(tile) },
-                                                    modifier = Modifier.weight(1f)
-                                                )
-                                            }
-                                            if (pair.size == 1) Spacer(modifier = Modifier.weight(1f))
+                                    pair.forEach { tile ->
+                                        val onTileClick = remember(tile, onOpenMoodTile) {
+                                            { onOpenMoodTile(tile) }
                                         }
+                                        MoodGridTile(
+                                            tile = tile,
+                                            sectionTitle = section.title,
+                                            onClick = onTileClick,
+                                            modifier = Modifier.weight(1f)
+                                        )
                                     }
+                                    if (pair.size == 1) Spacer(modifier = Modifier.weight(1f))
                                 }
                             }
                         }

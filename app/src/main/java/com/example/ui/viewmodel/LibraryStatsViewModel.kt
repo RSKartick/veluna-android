@@ -113,8 +113,13 @@ class LibraryStatsViewModel(
     }
 
     fun refreshStats(range: StatsRange = _statsState.value.range) {
+        val showSpinner = _statsState.value.isLoading || _statsState.value.summary.range != range
         viewModelScope.launch {
-            _statsState.update { it.copy(range = range, isLoading = true) }
+            if (showSpinner) {
+                _statsState.update { it.copy(range = range, isLoading = true) }
+            } else {
+                _statsState.update { it.copy(range = range) }
+            }
             val summary = repository.computeStats(range)
             _statsState.update { it.copy(range = range, isLoading = false, summary = summary) }
         }

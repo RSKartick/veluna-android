@@ -89,7 +89,7 @@ fun StatsScreen(
                 .fillMaxSize()
                 .testTag("stats_screen")
         ) {
-            item {
+            item(key = "stats_header", contentType = "header") {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -137,13 +137,13 @@ fun StatsScreen(
             }
 
             if (state.isLoading) {
-                item {
+                item(key = "stats_loading", contentType = "loading") {
                     Box(modifier = Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) {
                         CircularProgressIndicator()
                     }
                 }
             } else {
-                item {
+                item(key = "stats_kpis", contentType = "kpis") {
                     val deltaText = summary.prevSecs?.takeIf { it > 0 }?.let { prev ->
                         val pct = (((summary.totalSecs - prev).toDouble() / prev.toDouble()) * 100.0).toInt()
                         val sign = if (pct >= 0) "+" else ""
@@ -187,7 +187,7 @@ fun StatsScreen(
                 }
 
                 if (summary.dailySeries.isNotEmpty()) {
-                    item {
+                    item(key = "stats_daily_chart", contentType = "daily_chart") {
                         Surface(
                             color = MaterialTheme.colorScheme.surfaceContainer,
                             contentColor = MaterialTheme.colorScheme.onSurface,
@@ -226,7 +226,7 @@ fun StatsScreen(
                     }
                 }
 
-                item {
+                item(key = "stats_heatmap", contentType = "heatmap") {
                     Surface(
                         color = MaterialTheme.colorScheme.surfaceContainer,
                         contentColor = MaterialTheme.colorScheme.onSurface,
@@ -249,8 +249,14 @@ fun StatsScreen(
                 }
 
                 if (summary.topSongs.isNotEmpty()) {
-                    item { SectionHeading(title = stringResource(R.string.stats_top_songs)) }
-                    itemsIndexed(summary.topSongs, key = { idx, s -> "top_s_${idx}_${s.song.videoId}" }) { idx, stat ->
+                    item(key = "stats_top_songs_hdr", contentType = "section_heading") {
+                        SectionHeading(title = stringResource(R.string.stats_top_songs))
+                    }
+                    itemsIndexed(
+                        items = summary.topSongs,
+                        key = { idx, s -> "top_s_${idx}_${s.song.videoId}" },
+                        contentType = { _, _ -> "track_row" }
+                    ) { idx, stat ->
                         val displaySong = remember(stat) { stat.song.copy(duration = "${stat.plays}x") }
                         TrackRow(
                             song = displaySong,
@@ -263,7 +269,7 @@ fun StatsScreen(
                 }
 
                 if (summary.topArtists.isNotEmpty()) {
-                    item {
+                    item(key = "stats_top_artists", contentType = "carousel") {
                         Column {
                             SectionHeading(title = stringResource(R.string.stats_top_artists))
                             LazyRow(contentPadding = PaddingValues(horizontal = 10.dp)) {
@@ -285,7 +291,7 @@ fun StatsScreen(
                 }
 
                 if (summary.topAlbums.isNotEmpty()) {
-                    item {
+                    item(key = "stats_top_albums", contentType = "carousel") {
                         Column {
                             SectionHeading(title = stringResource(R.string.stats_top_albums))
                             LazyRow(contentPadding = PaddingValues(horizontal = 10.dp)) {
@@ -351,8 +357,8 @@ private fun DailyBarChart(series: List<DailyListening>) {
     val trackBg = MaterialTheme.colorScheme.surfaceVariant
     val maxSecs = remember(series) { (series.maxOfOrNull { it.secs } ?: 1L).coerceAtLeast(1L) }
 
-    var revealed by remember(series) { mutableStateOf(false) }
-    LaunchedEffect(series) { revealed = true }
+    var revealed by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) { revealed = true }
     val growth by animateFloatAsState(
         targetValue = if (revealed) 1f else 0f,
         animationSpec = VelunaMotion.expressiveSpatialSpring(),
@@ -394,7 +400,13 @@ private fun DailyBarChart(series: List<DailyListening>) {
 private fun WeekdayHourHeatmap(cells: List<Long>) {
     val primary = MaterialTheme.colorScheme.primary
     val emptyColor = MaterialTheme.colorScheme.surfaceVariant
-    val maxVal = remember(cells) { (cells.maxOrNull() ?: 1L).coerceAtLeast(1L) }
+    val cellRatios = remember(cells) {
+        val maxVal = (cells.maxOrNull() ?: 1L).coerceAtLeast(1L).toFloat()
+        FloatArray(168) { idx ->
+            val value = cells.getOrElse(idx) { 0L }
+            if (value <= 0L) 0f else (value.toFloat() / maxVal).coerceIn(0.18f, 1f)
+        }
+    }
     val weekdays = remember { listOf("S", "M", "T", "W", "T", "F", "S") }
 
     Row(
@@ -428,8 +440,7 @@ private fun WeekdayHourHeatmap(cells: List<Long>) {
 
             for (r in 0 until rows) {
                 for (c in 0 until cols) {
-                    val value = cells.getOrElse(r * 24 + c) { 0L }
-                    val ratio = if (value <= 0L) 0f else (value.toFloat() / maxVal.toFloat()).coerceIn(0.18f, 1f)
+                    val ratio = cellRatios[r * 24 + c]
                     val color = if (ratio == 0f) emptyColor else primary.copy(alpha = ratio)
                     drawRoundRect(
                         color = color,

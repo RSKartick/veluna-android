@@ -1,6 +1,5 @@
 package com.example.ui.screens.settings
 
-import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -25,7 +24,6 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -38,7 +36,6 @@ import com.example.R
 import com.example.data.local.VelunaUserPrefs
 import com.example.model.AudioQuality
 import com.example.model.LyricsProviderInfo
-import com.example.ui.theme.VelunaMotion
 import com.example.ui.theme.velunaOutlinedButtonBorder
 import com.example.ui.theme.velunaOutlinedButtonColors
 
@@ -57,15 +54,11 @@ internal fun PlaybackSection(
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             AudioQuality.entries.forEach { q ->
                 val selected = prefs.audioQuality == q
-                val rowBg by animateColorAsState(
-                    targetValue = if (selected) {
-                        MaterialTheme.colorScheme.primaryContainer
-                    } else {
-                        MaterialTheme.colorScheme.surfaceContainerHigh
-                    },
-                    animationSpec = VelunaMotion.snappySpring(),
-                    label = "quality_row_bg"
-                )
+                val rowBg = if (selected) {
+                    MaterialTheme.colorScheme.primaryContainer
+                } else {
+                    MaterialTheme.colorScheme.surfaceContainerHigh
+                }
                 Surface(
                     color = rowBg,
                     shape = MaterialTheme.shapes.medium,

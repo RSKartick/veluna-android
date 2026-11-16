@@ -1,10 +1,6 @@
 package com.example.ui.screens
 
 import android.net.Uri
-import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -55,7 +51,6 @@ import com.example.model.DownloadProgress
 import com.example.model.SongItem
 import com.example.ui.components.TrackRow
 import com.example.ui.components.VelunaArtwork
-import com.example.ui.theme.VelunaMotion
 import com.example.ui.theme.velunaFilterChipBorder
 import com.example.ui.theme.velunaFilterChipColors
 import com.example.ui.theme.velunaOutlinedButtonBorder
@@ -167,13 +162,8 @@ fun LibraryScreen(
 
             Spacer(modifier = Modifier.height(6.dp))
 
-            AnimatedContent(
-                targetState = selectedTab,
-                transitionSpec = { fadeIn(VelunaMotion.fastFade()) togetherWith fadeOut(VelunaMotion.fastFade()) },
-                label = "library_tab_content",
-                modifier = Modifier.weight(1f)
-            ) { tab ->
-                when (tab) {
+            Box(modifier = Modifier.weight(1f)) {
+                when (selectedTab) {
                     0 -> {
                         LazyColumn(
                             contentPadding = PaddingValues(bottom = 28.dp),

@@ -1,14 +1,5 @@
 package com.example.ui
 
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.tween
-import androidx.compose.animation.expandHorizontally
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -43,11 +34,12 @@ import androidx.compose.material3.NavigationRailItem
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
@@ -57,22 +49,31 @@ import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import com.example.R
 import com.example.ui.navigation.VelunaTopTab
 import com.example.ui.theme.velunaNavRailItemColors
+
+private val NavCapsuleShape = RoundedCornerShape(30.dp)
+private val NavPillShape = RoundedCornerShape(24.dp)
 
 @Composable
 fun VelunaBottomNavBar(
     selectedTab: VelunaTopTab,
     onSelectTab: (VelunaTopTab) -> Unit
 ) {
-    val capsuleShape = RoundedCornerShape(30.dp)
-    val pillShape = RoundedCornerShape(24.dp)
-    val navAnimSpecFloat = tween<Float>(durationMillis = 150, easing = FastOutSlowInEasing)
-    val navAnimSpecColor = tween<androidx.compose.ui.graphics.Color>(durationMillis = 150, easing = FastOutSlowInEasing)
-    val navAnimSpecSize = tween<IntSize>(durationMillis = 150, easing = FastOutSlowInEasing)
+    val outlineTop = MaterialTheme.colorScheme.outline.copy(alpha = 0.36f)
+    val outlineBottom = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)
+    val capsuleBorder = remember(outlineTop, outlineBottom) {
+        BorderStroke(
+            width = 1.dp,
+            brush = Brush.verticalGradient(colors = listOf(outlineTop, outlineBottom))
+        )
+    }
+    val selectedBorderColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.32f)
+    val selectedBorder = remember(selectedBorderColor) {
+        BorderStroke(1.dp, selectedBorderColor)
+    }
 
     Box(
         contentAlignment = Alignment.Center,
@@ -84,18 +85,10 @@ fun VelunaBottomNavBar(
         Surface(
             color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.96f),
             contentColor = MaterialTheme.colorScheme.onSurface,
-            shape = capsuleShape,
+            shape = NavCapsuleShape,
             tonalElevation = 6.dp,
             shadowElevation = 4.dp,
-            border = BorderStroke(
-                width = 1.dp,
-                brush = Brush.verticalGradient(
-                    colors = listOf(
-                        MaterialTheme.colorScheme.outline.copy(alpha = 0.36f),
-                        MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)
-                    )
-                )
-            ),
+            border = capsuleBorder,
             modifier = Modifier
                 .fillMaxWidth()
                 .widthIn(max = 440.dp)
@@ -113,49 +106,29 @@ fun VelunaBottomNavBar(
                     val icon = tabIcon(tab, selected)
                     val label = tabLabel(tab)
 
-                    val slotWeight by animateFloatAsState(
-                        targetValue = if (selected) 2.05f else 1f,
-                        animationSpec = navAnimSpecFloat,
-                        label = "nav_slot_weight_${tab.name}"
-                    )
-                    val pillColor by animateColorAsState(
-                        targetValue = if (selected) {
-                            MaterialTheme.colorScheme.primaryContainer
-                        } else {
-                            MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0f)
-                        },
-                        animationSpec = navAnimSpecColor,
-                        label = "nav_pill_bg_${tab.name}"
-                    )
-                    val contentTint by animateColorAsState(
-                        targetValue = if (selected) {
-                            MaterialTheme.colorScheme.onPrimaryContainer
-                        } else {
-                            MaterialTheme.colorScheme.onSurfaceVariant
-                        },
-                        animationSpec = navAnimSpecColor,
-                        label = "nav_pill_fg_${tab.name}"
-                    )
-                    val iconScale by animateFloatAsState(
-                        targetValue = if (selected) 1.06f else 1f,
-                        animationSpec = navAnimSpecFloat,
-                        label = "nav_icon_scale_${tab.name}"
-                    )
+                    val slotWeight = if (selected) 2.05f else 1f
+                    val pillColor = if (selected) {
+                        MaterialTheme.colorScheme.primaryContainer
+                    } else {
+                        Color.Transparent
+                    }
+                    val contentTint = if (selected) {
+                        MaterialTheme.colorScheme.onPrimaryContainer
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    }
+                    val iconScale = if (selected) 1.06f else 1f
 
                     Surface(
                         color = pillColor,
                         contentColor = contentTint,
-                        shape = pillShape,
-                        border = if (selected) {
-                            BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.32f))
-                        } else {
-                            null
-                        },
+                        shape = NavPillShape,
+                        border = if (selected) selectedBorder else null,
                         modifier = Modifier
                             .weight(slotWeight)
                             .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
                             .height(48.dp)
-                            .clip(pillShape)
+                            .clip(NavPillShape)
                             .semantics {
                                 this.selected = selected
                                 role = Role.Tab
@@ -181,30 +154,18 @@ fun VelunaBottomNavBar(
                                         scaleY = iconScale
                                     }
                             )
-                            AnimatedVisibility(
-                                visible = selected,
-                                enter = expandHorizontally(
-                                    animationSpec = navAnimSpecSize,
-                                    expandFrom = Alignment.Start
-                                ) + fadeIn(tween(110)),
-                                exit = shrinkHorizontally(
-                                    animationSpec = navAnimSpecSize,
-                                    shrinkTowards = Alignment.Start
-                                ) + fadeOut(tween(90))
-                            ) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text(
-                                        text = label,
-                                        style = MaterialTheme.typography.labelMedium.copy(
-                                            fontWeight = FontWeight.SemiBold
-                                        ),
-                                        color = contentTint,
-                                        maxLines = 1,
-                                        softWrap = false,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
+                            if (selected) {
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = label,
+                                    style = MaterialTheme.typography.labelMedium.copy(
+                                        fontWeight = FontWeight.SemiBold
+                                    ),
+                                    color = contentTint,
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    overflow = TextOverflow.Ellipsis
+                                )
                             }
                         }
                     }
