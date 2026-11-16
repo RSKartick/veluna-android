@@ -47,6 +47,8 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import androidx.compose.runtime.Immutable
 import kotlinx.coroutines.withTimeoutOrNull
+import com.example.data.cloud.GoogleAuthHelper.findActivity
+import java.lang.ref.WeakReference
 import java.security.MessageDigest
 import java.time.Instant
 import java.time.ZoneId
@@ -88,8 +90,11 @@ class CloudSyncCoordinator(
     private val _authState = MutableStateFlow(buildUiState(auth.currentUser))
     val authState: StateFlow<CloudAuthUiState> = _authState.asStateFlow()
 
+    @Volatile
     private var activeUserId: String? = null
     private var autoSignInAttempted = false
+    private var autoSignInJob: Job? = null
+    private val syncLifecycleLock = Any()
     private val watcherJobs = mutableListOf<Job>()
     private var retryJob: Job? = null
     private var retryAttempt = 0
@@ -121,17 +126,23 @@ class CloudSyncCoordinator(
             }
         }
 
-        if (user == null) {
-            stopSyncForSignedOut()
-        } else if (activeUserId != user.uid) {
-            startSyncForUser(user)
+        synchronized(syncLifecycleLock) {
+            if (user == null) {
+                stopSyncForSignedOutLocked()
+            } else if (activeUserId != user.uid) {
+                startSyncForUserLocked(user)
+            }
         }
     }
 
     init {
         auth.addAuthStateListener(authStateListener)
         auth.currentUser?.let { existing ->
-            startSyncForUser(existing)
+            synchronized(syncLifecycleLock) {
+                if (activeUserId != existing.uid) {
+                    startSyncForUserLocked(existing)
+                }
+            }
         }
     }
 
@@ -150,45 +161,72 @@ class CloudSyncCoordinator(
     }
 
     fun attemptAutoSignInOnLaunch(activityContext: Context) {
-        if (autoSignInAttempted || auth.currentUser != null) return
-        autoSignInAttempted = true
-        scope.launch {
-            GoogleAuthHelper.attemptAutoSignIn(activityContext)
+        val activityRef = WeakReference(activityContext.findActivity())
+        synchronized(syncLifecycleLock) {
+            if (autoSignInAttempted || auth.currentUser != null || _authState.value.isAuthBusy) return
+            autoSignInAttempted = true
+            autoSignInJob?.cancel()
+            autoSignInJob = scope.launch {
+                val activity = activityRef.get()?.takeIf { !it.isFinishing && !it.isDestroyed }
+                    ?: return@launch
+                GoogleAuthHelper.attemptAutoSignIn(activity)
+            }
         }
     }
 
     fun signIn(activityContext: Context) {
-        if (_authState.value.isAuthBusy) return
-        _authState.update { it.copy(isAuthBusy = true, errorMessage = null) }
+        val activityRef = WeakReference(activityContext.findActivity())
+        synchronized(syncLifecycleLock) {
+            if (_authState.value.isAuthBusy) return
+            autoSignInJob?.cancel()
+            autoSignInJob = null
+            _authState.update { it.copy(isAuthBusy = true, errorMessage = null) }
+        }
         scope.launch {
-            when (val outcome = GoogleAuthHelper.signInWithGoogle(activityContext)) {
-                is GoogleSignInOutcome.Success -> {
-                    _authState.update {
-                        it.copy(
-                            isSignedIn = true,
-                            uid = outcome.user.uid,
-                            displayName = outcome.user.displayName,
-                            email = outcome.user.email,
-                            photoUrl = SecurityValidators.sanitizeHttpsUrl(outcome.user.photoUrl?.toString(), 500),
-                            isAuthBusy = false,
-                            errorMessage = null
-                        )
-                    }
-                    if (activeUserId != outcome.user.uid) {
-                        startSyncForUser(outcome.user)
-                    }
-                }
-                GoogleSignInOutcome.Cancelled -> {
-                    _authState.update { it.copy(isAuthBusy = false) }
-                }
-                is GoogleSignInOutcome.Error -> {
+            try {
+                val activity = activityRef.get()?.takeIf { !it.isFinishing && !it.isDestroyed }
+                if (activity == null) {
                     _authState.update {
                         it.copy(
                             isAuthBusy = false,
-                            errorMessage = outcome.message
+                            errorMessage = "Unable to open Google Sign-In from this screen."
                         )
                     }
+                    return@launch
                 }
+                when (val outcome = GoogleAuthHelper.signInWithGoogle(activity)) {
+                    is GoogleSignInOutcome.Success -> {
+                        _authState.update {
+                            it.copy(
+                                isSignedIn = true,
+                                uid = outcome.user.uid,
+                                displayName = outcome.user.displayName,
+                                email = outcome.user.email,
+                                photoUrl = SecurityValidators.sanitizeHttpsUrl(outcome.user.photoUrl?.toString(), 500),
+                                isAuthBusy = false,
+                                errorMessage = null
+                            )
+                        }
+                        synchronized(syncLifecycleLock) {
+                            if (activeUserId != outcome.user.uid) {
+                                startSyncForUserLocked(outcome.user)
+                            }
+                        }
+                    }
+                    GoogleSignInOutcome.Cancelled -> {
+                        _authState.update { it.copy(isAuthBusy = false) }
+                    }
+                    is GoogleSignInOutcome.Error -> {
+                        _authState.update {
+                            it.copy(
+                                isAuthBusy = false,
+                                errorMessage = outcome.message
+                            )
+                        }
+                    }
+                }
+            } finally {
+                _authState.update { it.copy(isAuthBusy = false) }
             }
         }
     }
@@ -240,13 +278,24 @@ class CloudSyncCoordinator(
     fun deleteAccount(activityContext: Context) {
         if (_authState.value.isDeletingAccount) return
         val user = auth.currentUser ?: return
+        val activityRef = WeakReference(activityContext.findActivity())
         _authState.update { it.copy(isDeletingAccount = true, deleteAccountError = null) }
 
         scope.launch {
             try {
                 // Step 1: Ensure recent login before touching Firestore data so failed re-auth never leaves partial deletes
                 if (!_authState.value.needsRetryAuthDelete && GoogleAuthHelper.needsRecentSignIn(user)) {
-                    when (val reauth = GoogleAuthHelper.reauthenticateWithGoogle(activityContext, user)) {
+                    val reauthActivity = activityRef.get()?.takeIf { !it.isFinishing && !it.isDestroyed }
+                    if (reauthActivity == null) {
+                        _authState.update {
+                            it.copy(
+                                isDeletingAccount = false,
+                                deleteAccountError = "Re-authentication requires an active screen."
+                            )
+                        }
+                        return@launch
+                    }
+                    when (val reauth = GoogleAuthHelper.reauthenticateWithGoogle(reauthActivity, user)) {
                         is GoogleSignInOutcome.Success -> Unit
                         GoogleSignInOutcome.Cancelled -> {
                             _authState.update { it.copy(isDeletingAccount = false) }
@@ -292,7 +341,18 @@ class CloudSyncCoordinator(
                 try {
                     GoogleAuthHelper.deleteAuthUser(user)
                 } catch (_: FirebaseAuthRecentLoginRequiredException) {
-                    when (val reauth = GoogleAuthHelper.reauthenticateWithGoogle(activityContext, user)) {
+                    val reauthActivity = activityRef.get()?.takeIf { !it.isFinishing && !it.isDestroyed }
+                    if (reauthActivity == null) {
+                        _authState.update {
+                            it.copy(
+                                isDeletingAccount = false,
+                                needsRetryAuthDelete = true,
+                                deleteAccountError = "Cloud data erased. Re-open Account settings to confirm deletion."
+                            )
+                        }
+                        return@launch
+                    }
+                    when (val reauth = GoogleAuthHelper.reauthenticateWithGoogle(reauthActivity, user)) {
                         is GoogleSignInOutcome.Success -> {
                             suspendRunCatching { GoogleAuthHelper.deleteAuthUser(user) }.onFailure { err ->
                                 _authState.update {
@@ -371,7 +431,7 @@ class CloudSyncCoordinator(
         dao.clearAccountData()
         prefsRepo.resetUserKeys()
         if (signOutAuth) {
-            GoogleAuthHelper.signOut(context)
+            GoogleAuthHelper.signOut(context.applicationContext)
         }
         _authState.value = CloudAuthUiState(isSignedIn = false)
     }
@@ -388,6 +448,12 @@ class CloudSyncCoordinator(
     }
 
     private fun stopSyncForSignedOut() {
+        synchronized(syncLifecycleLock) {
+            stopSyncForSignedOutLocked()
+        }
+    }
+
+    private fun stopSyncForSignedOutLocked() {
         activeUserId = null
         retryJob?.cancel()
         retryJob = null
@@ -402,17 +468,21 @@ class CloudSyncCoordinator(
         failedCollections.clear()
     }
 
-    private fun startSyncForUser(user: FirebaseUser) {
+    private fun startSyncForUserLocked(user: FirebaseUser) {
+        if (activeUserId == user.uid && watcherJobs.isNotEmpty()) return
         watcherJobs.forEach { it.cancel() }
         watcherJobs.clear()
         retryJob?.cancel()
+        retryJob = null
         retryAttempt = 0
         activeUserId = user.uid
 
         val mainJob = scope.launch {
             runBidirectionalMerge(user)
-            if (auth.currentUser?.uid == user.uid) {
-                launchWatchersLocked(user)
+            synchronized(syncLifecycleLock) {
+                if (activeUserId == user.uid && auth.currentUser?.uid == user.uid) {
+                    launchWatchersLocked(user)
+                }
             }
         }
         watcherJobs.add(mainJob)
@@ -1236,13 +1306,15 @@ class CloudSyncCoordinator(
     }
 
     private fun scheduleRetry(user: FirebaseUser) {
-        if (retryJob?.isActive == true) return
-        val backoffMs = (5_000L * (1L shl retryAttempt.coerceAtMost(3))).coerceAtMost(60_000L)
-        retryAttempt++
-        retryJob = scope.launch {
-            delay(backoffMs)
-            if (auth.currentUser?.uid == user.uid && failedCollections.isNotEmpty()) {
-                runBidirectionalMerge(user)
+        synchronized(syncLifecycleLock) {
+            if (activeUserId != user.uid || retryJob?.isActive == true) return
+            val backoffMs = (5_000L * (1L shl retryAttempt.coerceAtMost(3))).coerceAtMost(60_000L)
+            retryAttempt++
+            retryJob = scope.launch {
+                delay(backoffMs)
+                if (auth.currentUser?.uid == user.uid && failedCollections.isNotEmpty()) {
+                    runBidirectionalMerge(user)
+                }
             }
         }
     }
