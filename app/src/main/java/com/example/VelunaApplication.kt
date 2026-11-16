@@ -5,6 +5,7 @@ import coil.ImageLoader
 import coil.ImageLoaderFactory
 import coil.disk.DiskCache
 import coil.memory.MemoryCache
+import coil.size.Precision
 import com.example.data.cloud.CloudSyncCoordinator
 import com.example.data.cloud.CloudSyncRepository
 import com.example.data.local.UserPrefsRepository
@@ -92,6 +93,8 @@ class VelunaApplication : Application(), ImageLoaderFactory {
                     .build()
             }
             .respectCacheHeaders(false)
+            .allowHardware(true)
+            .precision(Precision.INEXACT)
             .crossfade(false)
             .build()
     }

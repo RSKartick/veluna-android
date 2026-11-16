@@ -2,7 +2,6 @@ package com.example.ui.components
 
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -24,9 +23,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.res.painterResource
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.example.R
@@ -49,13 +48,26 @@ fun ArtWashBackdrop(
         animationSpec = tween(durationMillis = 220),
         label = "art_wash_accent"
     )
+    val washBrush = remember(bg, animatedAccent) {
+        val topWash = androidx.compose.ui.graphics.lerp(bg, animatedAccent, 0.22f).copy(alpha = 0.80f)
+        Brush.verticalGradient(
+            0.0f to topWash,
+            0.48f to bg.copy(alpha = 0.90f),
+            1.0f to bg
+        )
+    }
 
-    Box(modifier = modifier.background(bg)) {
+    Box(
+        modifier = modifier
+            .graphicsLayer { }
+            .background(bg)
+    ) {
         if (!artworkUrl.isNullOrBlank()) {
             val bgRequest = remember(context, artworkUrl) {
                 ImageRequest.Builder(context)
                     .data(artworkUrl)
-                    .size(32)
+                    .size(48)
+                    .allowHardware(true)
                     .crossfade(120)
                     .build()
             }
@@ -68,8 +80,15 @@ fun ArtWashBackdrop(
                     .alpha(0.26f)
             )
         } else if (useStageFallback) {
-            Image(
-                painter = painterResource(id = R.drawable.img_veluna_stage),
+            val stageRequest = remember(context) {
+                ImageRequest.Builder(context)
+                    .data(R.drawable.img_veluna_stage)
+                    .size(240)
+                    .allowHardware(true)
+                    .build()
+            }
+            AsyncImage(
+                model = stageRequest,
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier
@@ -78,17 +97,10 @@ fun ArtWashBackdrop(
             )
         }
 
-        val topWash = androidx.compose.ui.graphics.lerp(bg, animatedAccent, 0.22f).copy(alpha = 0.80f)
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(
-                    Brush.verticalGradient(
-                        0.0f to topWash,
-                        0.48f to bg.copy(alpha = 0.90f),
-                        1.0f to bg
-                    )
-                )
+                .background(washBrush)
         )
     }
 }

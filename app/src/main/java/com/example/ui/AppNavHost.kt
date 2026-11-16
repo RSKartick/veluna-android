@@ -2,7 +2,6 @@ package com.example.ui
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
@@ -27,12 +26,16 @@ import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.hideFromAccessibility
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -67,9 +70,13 @@ import kotlinx.coroutines.flow.StateFlow
 @Stable
 class VelunaTabNavState(
     selectedTabState: MutableState<VelunaTopTab>,
+    previousTabState: MutableState<VelunaTopTab>,
     visitedMaskState: MutableIntState
 ) {
     var selectedTab: VelunaTopTab by selectedTabState
+        private set
+
+    var previousTab: VelunaTopTab by previousTabState
         private set
 
     var visitedMask: Int by visitedMaskState
@@ -81,6 +88,7 @@ class VelunaTabNavState(
             visitedMask = visitedMask or flag
         }
         if (selectedTab != tab) {
+            previousTab = selectedTab
             selectedTab = tab
         }
     }
@@ -95,9 +103,10 @@ fun rememberVelunaTabNavState(
     initialTab: VelunaTopTab = VelunaTopTab.HOME
 ): VelunaTabNavState {
     val selectedTabState = rememberSaveable { mutableStateOf(initialTab) }
+    val previousTabState = rememberSaveable { mutableStateOf(initialTab) }
     val visitedMaskState = rememberSaveable { mutableIntStateOf(1 shl initialTab.ordinal) }
-    return remember(selectedTabState, visitedMaskState) {
-        VelunaTabNavState(selectedTabState, visitedMaskState)
+    return remember(selectedTabState, previousTabState, visitedMaskState) {
+        VelunaTabNavState(selectedTabState, previousTabState, visitedMaskState)
     }
 }
 
@@ -126,27 +135,27 @@ fun VelunaNavHost(
 ) {
     val enterAnim = remember {
         slideInHorizontally(
-            animationSpec = VelunaMotion.expressiveIntOffsetSpring(),
-            initialOffsetX = { (it * 0.08f).toInt() }
-        ) + fadeIn(VelunaMotion.fastFade())
+            animationSpec = VelunaMotion.screenSlideEnterSpring(),
+            initialOffsetX = { (it * 0.16f).toInt() }
+        ) + fadeIn(VelunaMotion.screenFadeInTween())
     }
     val exitAnim = remember {
         slideOutHorizontally(
-            animationSpec = VelunaMotion.snappyIntOffsetSpring(),
-            targetOffsetX = { -(it * 0.05f).toInt() }
-        ) + fadeOut(VelunaMotion.fastFade())
+            animationSpec = VelunaMotion.screenSlideExitTween(),
+            targetOffsetX = { -(it * 0.06f).toInt() }
+        ) + fadeOut(VelunaMotion.screenFadeOutTween())
     }
     val popEnterAnim = remember {
         slideInHorizontally(
-            animationSpec = VelunaMotion.expressiveIntOffsetSpring(),
-            initialOffsetX = { -(it * 0.08f).toInt() }
-        ) + fadeIn(VelunaMotion.fastFade())
+            animationSpec = VelunaMotion.screenSlideEnterSpring(),
+            initialOffsetX = { -(it * 0.14f).toInt() }
+        ) + fadeIn(VelunaMotion.screenFadeInTween())
     }
     val popExitAnim = remember {
         slideOutHorizontally(
-            animationSpec = VelunaMotion.snappyIntOffsetSpring(),
-            targetOffsetX = { (it * 0.08f).toInt() }
-        ) + fadeOut(VelunaMotion.fastFade())
+            animationSpec = VelunaMotion.screenSlideExitTween(),
+            targetOffsetX = { (it * 0.16f).toInt() }
+        ) + fadeOut(VelunaMotion.screenFadeOutTween())
     }
 
     NavHost(
@@ -341,7 +350,7 @@ private fun TopLevelTabDeck(
 
     Box(modifier = Modifier.fillMaxSize()) {
         if (isHomeVisited) {
-            KeepAliveTabSlot(activeState = isHomeSelected) {
+            KeepAliveTabSlot(tab = VelunaTopTab.HOME, activeState = isHomeSelected, tabNavState = tabNavState) {
                 HomeTabPane(
                     navController = navController,
                     container = container,
@@ -357,7 +366,7 @@ private fun TopLevelTabDeck(
         }
 
         if (isSearchVisited) {
-            KeepAliveTabSlot(activeState = isSearchSelected) {
+            KeepAliveTabSlot(tab = VelunaTopTab.SEARCH, activeState = isSearchSelected, tabNavState = tabNavState) {
                 SearchTabPane(
                     activeState = isSearchSelected,
                     homeSearchVm = homeSearchVm,
@@ -370,7 +379,7 @@ private fun TopLevelTabDeck(
         }
 
         if (isLibraryVisited) {
-            KeepAliveTabSlot(activeState = isLibrarySelected) {
+            KeepAliveTabSlot(tab = VelunaTopTab.LIBRARY, activeState = isLibrarySelected, tabNavState = tabNavState) {
                 LibraryTabPane(
                     container = container,
                     libraryStatsVm = libraryStatsVm,
@@ -386,7 +395,7 @@ private fun TopLevelTabDeck(
         }
 
         if (isStatsVisited) {
-            KeepAliveTabSlot(activeState = isStatsSelected) {
+            KeepAliveTabSlot(tab = VelunaTopTab.STATS, activeState = isStatsSelected, tabNavState = tabNavState) {
                 StatsTabPane(
                     navController = navController,
                     container = container,
@@ -399,7 +408,7 @@ private fun TopLevelTabDeck(
         }
 
         if (isSettingsVisited) {
-            KeepAliveTabSlot(activeState = isSettingsSelected) {
+            KeepAliveTabSlot(tab = VelunaTopTab.SETTINGS, activeState = isSettingsSelected, tabNavState = tabNavState) {
                 SettingsTabPane(
                     container = container,
                     homeSearchVm = homeSearchVm,
@@ -414,24 +423,41 @@ private fun TopLevelTabDeck(
 
 @Composable
 private fun KeepAliveTabSlot(
+    tab: VelunaTopTab,
     activeState: State<Boolean>,
+    tabNavState: VelunaTabNavState,
     content: @Composable () -> Unit
 ) {
     val active = activeState.value
-    var wasActive by rememberSaveable { mutableStateOf(active) }
+    val density = LocalDensity.current
+    val slideDistancePx = remember(density) { with(density) { 22.dp.toPx() } }
     val alpha = remember { Animatable(if (active) 1f else 0f) }
+    val offsetX = remember { Animatable(0f) }
+    var initialized by remember { mutableStateOf(false) }
+
     LaunchedEffect(active) {
+        if (!initialized) {
+            initialized = true
+            alpha.snapTo(if (active) 1f else 0f)
+            offsetX.snapTo(0f)
+            return@LaunchedEffect
+        }
         if (active) {
-            if (!wasActive) {
-                alpha.snapTo(0.86f)
-                alpha.animateTo(1f, tween(durationMillis = 90))
-            } else {
-                alpha.snapTo(1f)
+            val dir = if (tab.ordinal >= tabNavState.previousTab.ordinal) 1f else -1f
+            if (alpha.value < 0.05f) {
+                offsetX.snapTo(slideDistancePx * dir)
+            }
+            coroutineScope {
+                launch { alpha.animateTo(1f, VelunaMotion.tabTransitionTween()) }
+                launch { offsetX.animateTo(0f, VelunaMotion.tabSlideSpring()) }
             }
         } else {
-            alpha.snapTo(0f)
+            val exitDir = if (tabNavState.selectedTab.ordinal >= tab.ordinal) -1f else 1f
+            coroutineScope {
+                launch { alpha.animateTo(0f, VelunaMotion.tabFadeOutTween()) }
+                launch { offsetX.animateTo(slideDistancePx * 0.55f * exitDir, VelunaMotion.tabTransitionTween()) }
+            }
         }
-        wasActive = active
     }
 
     Box(
@@ -441,13 +467,14 @@ private fun KeepAliveTabSlot(
             .layout { measurable, constraints ->
                 val placeable = measurable.measure(constraints)
                 layout(placeable.width, placeable.height) {
-                    if (activeState.value) {
+                    if (activeState.value || alpha.value > 0.005f) {
                         placeable.place(0, 0)
                     }
                 }
             }
             .graphicsLayer {
-                this.alpha = if (activeState.value) alpha.value else 0f
+                this.alpha = alpha.value
+                this.translationX = offsetX.value
             }
             .focusProperties { canFocus = active }
             .semantics {

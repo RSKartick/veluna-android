@@ -35,8 +35,11 @@ import com.example.model.HistoryGroup
 import com.example.model.SongItem
 import com.example.ui.components.SectionHeading
 import com.example.ui.components.VelunaArtwork
-import java.text.SimpleDateFormat
-import java.util.Date
+import com.example.ui.theme.rememberVelunaFlingBehavior
+import com.example.ui.theme.rememberVelunaLazyListState
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 @Composable
@@ -47,7 +50,12 @@ fun HistoryScreen(
     onTrackMore: (SongItem) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val timeFmt = remember { SimpleDateFormat("HH:mm", Locale.getDefault()) }
+    val timeFmt = remember {
+        DateTimeFormatter.ofPattern("HH:mm", Locale.getDefault())
+            .withZone(ZoneId.systemDefault())
+    }
+    val listState = rememberVelunaLazyListState()
+    val smoothFling = rememberVelunaFlingBehavior()
 
     Box(
         modifier = modifier.fillMaxSize(),
@@ -90,14 +98,20 @@ fun HistoryScreen(
                 }
             } else {
                 LazyColumn(
+                    state = listState,
+                    flingBehavior = smoothFling,
                     contentPadding = PaddingValues(bottom = 28.dp),
                     modifier = Modifier.fillMaxSize()
                 ) {
                     groups.forEach { group ->
-                        item(key = "hdr_${group.title}") {
+                        item(key = "hdr_${group.title}", contentType = "section_heading") {
                             SectionHeading(title = group.title)
                         }
-                        items(group.items, key = { "${group.title}_${it.first}_${it.second.videoId}" }) { (ts, song) ->
+                        items(
+                            items = group.items,
+                            key = { "${group.title}_${it.first}_${it.second.videoId}" },
+                            contentType = { "history_row" }
+                        ) { (ts, song) ->
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
                                 modifier = Modifier
@@ -129,7 +143,7 @@ fun HistoryScreen(
                                     )
                                 }
                                 Text(
-                                    text = timeFmt.format(Date(ts)),
+                                    text = timeFmt.format(Instant.ofEpochMilli(ts)),
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     modifier = Modifier.padding(start = 8.dp)

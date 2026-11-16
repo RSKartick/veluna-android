@@ -39,6 +39,8 @@ import com.example.ui.screens.settings.HiddenArtistsSection
 import com.example.ui.screens.settings.LyricsProvidersSection
 import com.example.ui.screens.settings.PlaybackSection
 import com.example.ui.screens.settings.ScrobblingSection
+import com.example.ui.theme.rememberVelunaFlingBehavior
+import com.example.ui.theme.rememberVelunaLazyListState
 import com.example.util.SecurityValidators
 import com.example.util.readContentUriText
 import kotlinx.coroutines.CancellationException
@@ -144,11 +146,16 @@ fun SettingsScreen(
         }
     }
 
+    val listState = rememberVelunaLazyListState()
+    val smoothFling = rememberVelunaFlingBehavior()
+
     Box(
         modifier = modifier.fillMaxSize(),
         contentAlignment = Alignment.TopCenter
     ) {
         LazyColumn(
+            state = listState,
+            flingBehavior = smoothFling,
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 28.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
             modifier = Modifier

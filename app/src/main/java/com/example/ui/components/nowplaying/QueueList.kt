@@ -1,8 +1,11 @@
 package com.example.ui.components.nowplaying
 
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
@@ -210,7 +213,15 @@ fun NowPlayingWideSidePanel(
             }
             AnimatedContent(
                 targetState = selectedTab,
-                transitionSpec = { fadeIn(VelunaMotion.fastFade()) togetherWith fadeOut(VelunaMotion.fastFade()) },
+                transitionSpec = {
+                    val dir = if (targetState >= initialState) 1 else -1
+                    (slideInHorizontally(VelunaMotion.screenSlideEnterSpring()) { dir * (it / 16) } +
+                        fadeIn(VelunaMotion.tabTransitionTween()))
+                        .togetherWith(
+                            slideOutHorizontally(tween(150)) { -dir * (it / 24) } +
+                                fadeOut(VelunaMotion.tabFadeOutTween())
+                        )
+                },
                 label = "wide_now_playing_tab"
             ) { tab ->
                 when (tab) {

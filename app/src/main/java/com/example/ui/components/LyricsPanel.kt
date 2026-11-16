@@ -64,6 +64,7 @@ import com.example.data.local.UserPrefsRepository
 import com.example.model.LyricLine
 import com.example.model.LyricWord
 import com.example.playback.PlaybackPositionState
+import com.example.ui.theme.rememberVelunaFlingBehavior
 import com.example.ui.viewmodel.LyricsUiState
 import kotlinx.coroutines.flow.StateFlow
 
@@ -230,13 +231,19 @@ fun SyncedLyricsPanel(
                     }
                 }
 
+                val smoothFling = rememberVelunaFlingBehavior()
                 LazyColumn(
                     state = listState,
+                    flingBehavior = smoothFling,
                     contentPadding = PaddingValues(horizontal = 20.dp, vertical = 24.dp),
                     verticalArrangement = Arrangement.spacedBy(16.dp),
                     modifier = Modifier.fillMaxSize()
                 ) {
-                    itemsIndexed(data.lines) { idx, line ->
+                    itemsIndexed(
+                        items = data.lines,
+                        key = { idx, line -> "${idx}_${line.timeMs ?: -1L}" },
+                        contentType = { _, _ -> "lyric_line" }
+                    ) { idx, line ->
                         val isActive = data.synced && idx == activeIndex
                         val isPast = data.synced && idx < activeIndex
                         val canSeek = data.synced && line.timeMs != null

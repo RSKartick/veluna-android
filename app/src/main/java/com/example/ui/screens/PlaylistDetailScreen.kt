@@ -43,6 +43,10 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -67,6 +71,9 @@ import com.example.ui.components.ArtWashBackdrop
 import com.example.ui.components.CreateEditPlaylistDialog
 import com.example.ui.components.TrackRow
 import com.example.ui.components.VelunaArtwork
+import com.example.ui.theme.VelunaMotion
+import com.example.ui.theme.rememberVelunaFlingBehavior
+import com.example.ui.theme.rememberVelunaLazyListState
 import com.example.ui.theme.velunaOutlinedButtonBorder
 import com.example.ui.theme.velunaOutlinedButtonColors
 import com.example.ui.theme.velunaOutlinedFieldColors
@@ -160,11 +167,26 @@ fun PlaylistDetailScreen(
         pendingCsvContent = null
     }
 
-    when {
-        state.isLoading -> DetailLoading(onBack)
-        state.page == null -> DetailError(state.error ?: stringResource(R.string.detail_playlist_not_found), onBack)
+    val phase = when {
+        state.isLoading -> 0
+        state.page == null -> 1
+        else -> 2
+    }
+    AnimatedContent(
+        targetState = phase,
+        transitionSpec = {
+            fadeIn(VelunaMotion.tabTransitionTween()) togetherWith fadeOut(VelunaMotion.tabFadeOutTween())
+        },
+        modifier = modifier.fillMaxSize(),
+        label = "playlist_detail_phase"
+    ) { currentPhase ->
+    when (currentPhase) {
+        0 -> DetailLoading(onBack)
+        1 -> DetailError(state.error ?: stringResource(R.string.detail_playlist_not_found), onBack)
         else -> {
-            val page = state.page
+            val page = state.page ?: return@AnimatedContent
+            val listState = rememberVelunaLazyListState()
+            val smoothFling = rememberVelunaFlingBehavior()
             val numericLocalId = if (page.id.startsWith(LOCAL_PLAYLIST_PREFIX)) {
                 page.id.removePrefix(LOCAL_PLAYLIST_PREFIX).toLongOrNull()
             } else null
@@ -184,17 +206,19 @@ fun PlaylistDetailScreen(
                 }
             }
 
-            Box(modifier = modifier.fillMaxSize()) {
+            Box(modifier = Modifier.fillMaxSize()) {
                 ArtWashBackdrop(
                     artworkUrl = page.thumbnail,
                     accentColor = null,
                     modifier = Modifier.fillMaxWidth().height(320.dp)
                 )
                 LazyColumn(
+                    state = listState,
+                    flingBehavior = smoothFling,
                     contentPadding = PaddingValues(bottom = 28.dp),
                     modifier = Modifier.fillMaxSize().testTag("playlist_detail_screen")
                 ) {
-                    item {
+                    item(key = "pl_topbar", contentType = "topbar") {
                         DetailTopBar(
                             onBack = onBack,
                             actions = {
@@ -277,7 +301,7 @@ fun PlaylistDetailScreen(
                         )
                     }
 
-                    item {
+                    item(key = "pl_hero", contentType = "hero") {
                         Column(
                             modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
                             horizontalAlignment = Alignment.CenterHorizontally
@@ -392,13 +416,17 @@ fun PlaylistDetailScreen(
                     }
 
                     if (displayedTracks.isEmpty()) {
-                        item {
+                        item(key = "pl_empty", contentType = "empty") {
                             Box(modifier = Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) {
                                 Text(stringResource(R.string.playlist_empty_tracks), color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                         }
                     } else {
-                        itemsIndexed(displayedTracks, key = { idx, s -> "pl_${idx}_${s.videoId}" }) { idx, song ->
+                        itemsIndexed(
+                            items = displayedTracks,
+                            key = { idx, s -> "pl_${idx}_${s.videoId}" },
+                            contentType = { _, _ -> "track" }
+                        ) { idx, song ->
                             TrackRow(
                                 song = song,
                                 isPlaying = nowPlayingId == song.videoId,
@@ -440,6 +468,7 @@ fun PlaylistDetailScreen(
                 )
             }
         }
+    }
     }
 }
 

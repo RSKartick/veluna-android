@@ -1,5 +1,13 @@
 package com.example.ui
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandHorizontally
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -34,6 +42,7 @@ import androidx.compose.material3.NavigationRailItem
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -52,6 +61,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.R
 import com.example.ui.navigation.VelunaTopTab
+import com.example.ui.theme.VelunaMotion
 import com.example.ui.theme.velunaNavRailItemColors
 
 private val NavCapsuleShape = RoundedCornerShape(30.dp)
@@ -106,18 +116,34 @@ fun VelunaBottomNavBar(
                     val icon = tabIcon(tab, selected)
                     val label = tabLabel(tab)
 
-                    val slotWeight = if (selected) 2.05f else 1f
-                    val pillColor = if (selected) {
-                        MaterialTheme.colorScheme.primaryContainer
-                    } else {
-                        Color.Transparent
-                    }
-                    val contentTint = if (selected) {
-                        MaterialTheme.colorScheme.onPrimaryContainer
-                    } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    }
-                    val iconScale = if (selected) 1.06f else 1f
+                    val slotWeight by animateFloatAsState(
+                        targetValue = if (selected) 2.05f else 1f,
+                        animationSpec = VelunaMotion.tabPillSpring(),
+                        label = "nav_pill_weight_${tab.name}"
+                    )
+                    val pillColor by animateColorAsState(
+                        targetValue = if (selected) {
+                            MaterialTheme.colorScheme.primaryContainer
+                        } else {
+                            Color.Transparent
+                        },
+                        animationSpec = tween(durationMillis = 160),
+                        label = "nav_pill_bg_${tab.name}"
+                    )
+                    val contentTint by animateColorAsState(
+                        targetValue = if (selected) {
+                            MaterialTheme.colorScheme.onPrimaryContainer
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                        animationSpec = tween(durationMillis = 160),
+                        label = "nav_pill_tint_${tab.name}"
+                    )
+                    val iconScale by animateFloatAsState(
+                        targetValue = if (selected) 1.06f else 1f,
+                        animationSpec = VelunaMotion.tabPillSpring(),
+                        label = "nav_pill_scale_${tab.name}"
+                    )
 
                     Surface(
                         color = pillColor,
@@ -154,18 +180,24 @@ fun VelunaBottomNavBar(
                                         scaleY = iconScale
                                     }
                             )
-                            if (selected) {
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(
-                                    text = label,
-                                    style = MaterialTheme.typography.labelMedium.copy(
-                                        fontWeight = FontWeight.SemiBold
-                                    ),
-                                    color = contentTint,
-                                    maxLines = 1,
-                                    softWrap = false,
-                                    overflow = TextOverflow.Ellipsis
-                                )
+                            AnimatedVisibility(
+                                visible = selected,
+                                enter = fadeIn(tween(140)) + expandHorizontally(expandFrom = Alignment.Start),
+                                exit = fadeOut(tween(100)) + shrinkHorizontally(shrinkTowards = Alignment.Start)
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = label,
+                                        style = MaterialTheme.typography.labelMedium.copy(
+                                            fontWeight = FontWeight.SemiBold
+                                        ),
+                                        color = contentTint,
+                                        maxLines = 1,
+                                        softWrap = false,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
                             }
                         }
                     }

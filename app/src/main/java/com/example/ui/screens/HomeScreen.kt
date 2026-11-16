@@ -59,6 +59,8 @@ import com.example.ui.components.SectionHeading
 import com.example.ui.components.ShortcutTile
 import com.example.ui.components.TrackRow
 import com.example.ui.components.VelunaArtwork
+import com.example.ui.theme.rememberVelunaFlingBehavior
+import com.example.ui.theme.rememberVelunaLazyListState
 import com.example.ui.theme.velunaFilterChipBorder
 import com.example.ui.theme.velunaFilterChipColors
 import com.example.ui.viewmodel.HomeUiState
@@ -99,6 +101,9 @@ fun HomeScreen(
     }
     val shortcutPairs = remember(shortcuts) { shortcuts.take(6).chunked(2) }
 
+    val listState = rememberVelunaLazyListState()
+    val smoothFling = rememberVelunaFlingBehavior()
+
     Box(modifier = modifier.fillMaxSize()) {
         if (prefs.showHeroArtworkBackdrop) {
             ArtWashBackdrop(
@@ -111,6 +116,8 @@ fun HomeScreen(
         }
 
         LazyColumn(
+            state = listState,
+            flingBehavior = smoothFling,
             contentPadding = PaddingValues(bottom = 28.dp),
             verticalArrangement = Arrangement.spacedBy(18.dp),
             modifier = Modifier
@@ -118,7 +125,7 @@ fun HomeScreen(
                 .testTag("home_screen_list")
         ) {
             // Top Greeting & Action Bar
-            item {
+            item(key = "home_header", contentType = "home_header") {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -223,14 +230,15 @@ fun HomeScreen(
 
             // Mood Filter Chips
             if (prefs.showMoodChips && homeState.homePage.chips.isNotEmpty()) {
-                item {
+                item(key = "home_mood_chips", contentType = "chips_row") {
                     val chipColors = velunaFilterChipColors()
                     val allSelected = homeState.selectedChipParams == null && homeState.moodsTitle == null
                     LazyRow(
+                        flingBehavior = smoothFling,
                         contentPadding = PaddingValues(horizontal = 16.dp),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        item {
+                        item(key = "chip_all", contentType = "chip") {
                             FilterChip(
                                 selected = allSelected,
                                 onClick = { onSelectChip(null) },
@@ -240,7 +248,11 @@ fun HomeScreen(
                                 modifier = Modifier.testTag("home_chip_all")
                             )
                         }
-                        items(homeState.homePage.chips, key = { "${it.title}_${it.params}" }) { chip ->
+                        items(
+                            items = homeState.homePage.chips,
+                            key = { "${it.title}_${it.params}" },
+                            contentType = { "chip" }
+                        ) { chip ->
                             val chipSelected = homeState.selectedChipParams == chip.params && chip.params.isNotBlank()
                             FilterChip(
                                 selected = chipSelected,
@@ -291,7 +303,7 @@ fun HomeScreen(
 
             // Jump Back In
             if (jumpBack.isNotEmpty() && homeState.moodsTitle == null && homeState.selectedChipParams == null) {
-                item {
+                item(key = "home_jump_back", contentType = "carousel_shelf") {
                     Column {
                         SectionHeading(
                             title = stringResource(R.string.home_jump_back_in),
@@ -299,14 +311,20 @@ fun HomeScreen(
                             onActionClick = onOpenHistory
                         )
                         LazyRow(
+                            flingBehavior = smoothFling,
                             contentPadding = PaddingValues(horizontal = 10.dp),
                             horizontalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
-                            items(jumpBack, key = { "jump_${it.id}" }) { item ->
+                            items(
+                                items = jumpBack,
+                                key = { "jump_${it.id}" },
+                                contentType = { "media_card" }
+                            ) { item ->
+                                val onClick = remember(item, onOpenBrowseItem) { { onOpenBrowseItem(item) } }
                                 MediaSquareCard(
                                     item = item,
                                     showPlayBadge = true,
-                                    onClick = { onOpenBrowseItem(item) }
+                                    onClick = onClick
                                 )
                             }
                         }
@@ -316,18 +334,24 @@ fun HomeScreen(
 
             // Familiar Artists (01, 02, ...)
             if (familiarArtists.isNotEmpty() && homeState.moodsTitle == null && homeState.selectedChipParams == null) {
-                item {
+                item(key = "home_familiar_artists", contentType = "artists_shelf") {
                     Column {
                         SectionHeading(title = stringResource(R.string.home_familiar_artists))
                         LazyRow(
+                            flingBehavior = smoothFling,
                             contentPadding = PaddingValues(horizontal = 10.dp),
                             horizontalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
-                            itemsIndexed(familiarArtists, key = { _, a -> "fam_${a.id}" }) { idx, artist ->
+                            itemsIndexed(
+                                items = familiarArtists,
+                                key = { _, a -> "fam_${a.id}" },
+                                contentType = { _, _ -> "familiar_artist" }
+                            ) { idx, artist ->
+                                val onClick = remember(artist, onOpenBrowseItem) { { onOpenBrowseItem(artist) } }
                                 FamiliarArtistCard(
                                     index = idx,
                                     item = artist,
-                                    onClick = { onOpenBrowseItem(artist) }
+                                    onClick = onClick
                                 )
                             }
                         }
@@ -337,7 +361,7 @@ fun HomeScreen(
 
             // Loading / Error state for remote InnerTube home feed
             if (homeState.isLoading) {
-                item {
+                item(key = "home_loading", contentType = "loading") {
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -348,7 +372,7 @@ fun HomeScreen(
                     }
                 }
             } else if (!homeState.error.isNullOrBlank() && homeState.homePage.sections.isEmpty()) {
-                item {
+                item(key = "home_error", contentType = "error") {
                     Surface(
                         color = MaterialTheme.colorScheme.surfaceContainer,
                         contentColor = MaterialTheme.colorScheme.onSurface,
@@ -421,13 +445,18 @@ fun HomeScreen(
                         contentType = { "quick_pick_song" }
                     ) { item ->
                         val song = remember(item) { item.toSongItem() }
+                        val onClick = remember(item, onOpenBrowseItem) { { onOpenBrowseItem(item) } }
+                        val onMoreClick = remember(song, onTrackMore) { { onTrackMore(song) } }
+                        val onLikeClick = remember(song, onToggleLike) {
+                            onToggleLike?.let { fn -> { fn(song) } }
+                        }
                         TrackRow(
                             song = song,
                             isPlaying = nowPlayingSong?.videoId == song.videoId,
                             isLiked = song.videoId in likedIds,
-                            onClick = { onOpenBrowseItem(item) },
-                            onMoreClick = { onTrackMore(song) },
-                            onLikeClick = onToggleLike?.let { fn -> { fn(song) } },
+                            onClick = onClick,
+                            onMoreClick = onMoreClick,
+                            onLikeClick = onLikeClick,
                             modifier = Modifier.padding(horizontal = 4.dp)
                         )
                     }
@@ -454,14 +483,20 @@ fun HomeScreen(
                                 }
                             )
                             LazyRow(
+                                flingBehavior = smoothFling,
                                 contentPadding = PaddingValues(horizontal = 10.dp),
                                 horizontalArrangement = Arrangement.spacedBy(4.dp)
                             ) {
-                                items(section.items, key = { "${section.title}_${it.id}_${it.title}" }) { item ->
+                                items(
+                                    items = section.items,
+                                    key = { "${section.title}_${it.id}_${it.title}" },
+                                    contentType = { "media_card" }
+                                ) { item ->
+                                    val onClick = remember(item, onOpenBrowseItem) { { onOpenBrowseItem(item) } }
                                     MediaSquareCard(
                                         item = item,
                                         showPlayBadge = item.kind == BrowseKind.SONG,
-                                        onClick = { onOpenBrowseItem(item) }
+                                        onClick = onClick
                                     )
                                 }
                             }

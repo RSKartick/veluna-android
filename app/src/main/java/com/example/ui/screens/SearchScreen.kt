@@ -49,13 +49,22 @@ import com.example.ui.components.MoodGridTile
 import com.example.ui.components.SectionHeading
 import com.example.ui.components.TrackRow
 import com.example.ui.components.VelunaArtwork
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.TabRowDefaults
 import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.runtime.remember
 import androidx.compose.ui.graphics.Color
+import com.example.ui.theme.VelunaMotion
+import com.example.ui.theme.rememberVelunaFlingBehavior
+import com.example.ui.theme.rememberVelunaLazyListState
 import com.example.ui.theme.velunaOutlinedFieldColors
 import com.example.ui.viewmodel.SearchUiState
+
+private enum class SearchContentMode { LOADING, RESULTS, SUGGESTIONS, DISCOVER }
 
 @Composable
 fun SearchScreen(
@@ -74,6 +83,16 @@ fun SearchScreen(
     modifier: Modifier = Modifier
 ) {
     val keyboard = LocalSoftwareKeyboardController.current
+    val smoothFling = rememberVelunaFlingBehavior()
+    val resultsListState = rememberVelunaLazyListState()
+    val suggestionsListState = rememberVelunaLazyListState()
+    val discoverListState = rememberVelunaLazyListState()
+    val contentMode = when {
+        state.isSearching -> SearchContentMode.LOADING
+        state.results != null -> SearchContentMode.RESULTS
+        state.query.isNotBlank() -> SearchContentMode.SUGGESTIONS
+        else -> SearchContentMode.DISCOVER
+    }
 
     Box(
         modifier = modifier.fillMaxSize(),
@@ -115,14 +134,24 @@ fun SearchScreen(
                     .testTag("search_input")
             )
 
-            when {
-                state.isSearching -> {
+            AnimatedContent(
+                targetState = contentMode,
+                transitionSpec = {
+                    fadeIn(VelunaMotion.tabTransitionTween()) togetherWith fadeOut(VelunaMotion.tabFadeOutTween())
+                },
+                modifier = Modifier.weight(1f),
+                label = "search_content_mode"
+            ) { mode ->
+            when (mode) {
+                SearchContentMode.LOADING -> {
                     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         CircularProgressIndicator()
                     }
                 }
 
-                state.results != null -> {
+                SearchContentMode.RESULTS -> {
+                    val results = state.results ?: return@AnimatedContent
+                    Column(modifier = Modifier.fillMaxSize()) {
                     val tabs = listOf(
                         "top" to stringResource(R.string.search_tab_top),
                         "songs" to stringResource(R.string.search_tab_songs),
@@ -157,7 +186,6 @@ fun SearchScreen(
                         }
                     }
 
-                    val results = state.results
                     val list = remember(results, state.selectedCategoryTab) {
                         when (state.selectedCategoryTab) {
                             0 -> results.top + results.songs.take(6) + results.albums.take(4) + results.artists.take(4)
@@ -178,6 +206,8 @@ fun SearchScreen(
                         }
                     } else {
                         LazyColumn(
+                            state = resultsListState,
+                            flingBehavior = smoothFling,
                             contentPadding = PaddingValues(top = 8.dp, bottom = 28.dp),
                             modifier = Modifier.fillMaxSize()
                         ) {
@@ -226,14 +256,21 @@ fun SearchScreen(
                             }
                         }
                     }
+                    }
                 }
 
-                state.query.isNotBlank() -> {
+                SearchContentMode.SUGGESTIONS -> {
                     LazyColumn(
+                        state = suggestionsListState,
+                        flingBehavior = smoothFling,
                         contentPadding = PaddingValues(bottom = 28.dp),
                         modifier = Modifier.fillMaxSize()
                     ) {
-                        items(state.suggestions.queries, key = { "sug_$it" }) { suggestion ->
+                        items(
+                            items = state.suggestions.queries,
+                            key = { "sug_$it" },
+                            contentType = { "suggestion_query" }
+                        ) { suggestion ->
                             ListItem(
                                 colors = ListItemDefaults.colors(
                                     containerColor = Color.Transparent,
@@ -259,9 +296,13 @@ fun SearchScreen(
                                     .testTag("search_suggestion_$suggestion")
                             )
                         }
-                        items(state.suggestions.items, key = { "sug_item_${it.id}" }) { item ->
+                        items(
+                            items = state.suggestions.items,
+                            key = { "sug_item_${it.id}" },
+                            contentType = { it.kind }
+                        ) { item ->
                             if (item.kind == BrowseKind.SONG) {
-                                val song = item.toSongItem()
+                                val song = remember(item) { item.toSongItem() }
                                 TrackRow(
                                     song = song,
                                     isPlaying = nowPlayingId == song.videoId,
@@ -293,8 +334,10 @@ fun SearchScreen(
                     }
                 }
 
-                else -> {
+                SearchContentMode.DISCOVER -> {
                     LazyColumn(
+                        state = discoverListState,
+                        flingBehavior = smoothFling,
                         contentPadding = PaddingValues(bottom = 28.dp),
                         verticalArrangement = Arrangement.spacedBy(10.dp),
                         modifier = Modifier.fillMaxSize()
@@ -393,6 +436,7 @@ fun SearchScreen(
                         }
                     }
                 }
+            }
             }
         }
     }

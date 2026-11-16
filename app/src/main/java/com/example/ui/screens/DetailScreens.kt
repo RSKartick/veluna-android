@@ -37,6 +37,10 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -55,6 +59,9 @@ import com.example.ui.components.MediaSquareCard
 import com.example.ui.components.SectionHeading
 import com.example.ui.components.TrackRow
 import com.example.ui.components.VelunaArtwork
+import com.example.ui.theme.VelunaMotion
+import com.example.ui.theme.rememberVelunaFlingBehavior
+import com.example.ui.theme.rememberVelunaLazyListState
 import com.example.ui.theme.velunaOutlinedButtonBorder
 import com.example.ui.theme.velunaOutlinedButtonColors
 import com.example.ui.theme.velunaPrimaryButtonColors
@@ -76,25 +83,42 @@ fun AlbumDetailScreen(
     onOpenArtist: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    when {
-        state.isLoading -> DetailLoading(onBack)
-        state.page == null -> DetailError(state.error ?: stringResource(R.string.detail_album_not_found), onBack)
+    val phase = when {
+        state.isLoading -> 0
+        state.page == null -> 1
+        else -> 2
+    }
+    AnimatedContent(
+        targetState = phase,
+        transitionSpec = {
+            fadeIn(VelunaMotion.tabTransitionTween()) togetherWith fadeOut(VelunaMotion.tabFadeOutTween())
+        },
+        modifier = modifier.fillMaxSize(),
+        label = "album_detail_phase"
+    ) { currentPhase ->
+    when (currentPhase) {
+        0 -> DetailLoading(onBack)
+        1 -> DetailError(state.error ?: stringResource(R.string.detail_album_not_found), onBack)
         else -> {
-            val album = state.page
-            Box(modifier = modifier.fillMaxSize()) {
+            val album = state.page ?: return@AnimatedContent
+            val listState = rememberVelunaLazyListState()
+            val smoothFling = rememberVelunaFlingBehavior()
+            Box(modifier = Modifier.fillMaxSize()) {
                 ArtWashBackdrop(
                     artworkUrl = album.thumbnail,
                     accentColor = null,
                     modifier = Modifier.fillMaxWidth().height(340.dp)
                 )
                 LazyColumn(
+                    state = listState,
+                    flingBehavior = smoothFling,
                     contentPadding = PaddingValues(bottom = 28.dp),
                     modifier = Modifier.fillMaxSize().testTag("album_detail_screen")
                 ) {
-                    item {
+                    item(key = "album_topbar", contentType = "topbar") {
                         DetailTopBar(onBack = onBack)
                     }
-                    item {
+                    item(key = "album_hero", contentType = "hero") {
                         Column(
                             modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
                             horizontalAlignment = Alignment.CenterHorizontally
@@ -194,7 +218,11 @@ fun AlbumDetailScreen(
                         Spacer(modifier = Modifier.height(16.dp))
                     }
 
-                    itemsIndexed(album.items, key = { idx, s -> "al_${idx}_${s.videoId}" }) { idx, song ->
+                    itemsIndexed(
+                        items = album.items,
+                        key = { idx, s -> "al_${idx}_${s.videoId}" },
+                        contentType = { _, _ -> "track" }
+                    ) { idx, song ->
                         TrackRow(
                             song = song,
                             isPlaying = nowPlayingId == song.videoId,
@@ -204,11 +232,22 @@ fun AlbumDetailScreen(
                         )
                     }
 
-                    items(album.sections, key = { "al_sec_${it.title}" }) { sec ->
+                    items(
+                        items = album.sections,
+                        key = { "al_sec_${it.title}" },
+                        contentType = { "carousel" }
+                    ) { sec ->
                         Spacer(modifier = Modifier.height(14.dp))
                         SectionHeading(title = sec.title)
-                        LazyRow(contentPadding = PaddingValues(horizontal = 10.dp)) {
-                            items(sec.items, key = { "${sec.title}_${it.id}" }) { item ->
+                        LazyRow(
+                            flingBehavior = smoothFling,
+                            contentPadding = PaddingValues(horizontal = 10.dp)
+                        ) {
+                            items(
+                                items = sec.items,
+                                key = { "${sec.title}_${it.id}" },
+                                contentType = { "media_card" }
+                            ) { item ->
                                 MediaSquareCard(item = item, onClick = { onOpenBrowseItem(item) })
                             }
                         }
@@ -216,6 +255,7 @@ fun AlbumDetailScreen(
                 }
             }
         }
+    }
     }
 }
 
@@ -233,23 +273,40 @@ fun ArtistDetailScreen(
     onOpenBrowseItem: (BrowseItem) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    when {
-        state.isLoading -> DetailLoading(onBack)
-        state.page == null -> DetailError(state.error ?: stringResource(R.string.detail_artist_not_found), onBack)
+    val phase = when {
+        state.isLoading -> 0
+        state.page == null -> 1
+        else -> 2
+    }
+    AnimatedContent(
+        targetState = phase,
+        transitionSpec = {
+            fadeIn(VelunaMotion.tabTransitionTween()) togetherWith fadeOut(VelunaMotion.tabFadeOutTween())
+        },
+        modifier = modifier.fillMaxSize(),
+        label = "artist_detail_phase"
+    ) { currentPhase ->
+    when (currentPhase) {
+        0 -> DetailLoading(onBack)
+        1 -> DetailError(state.error ?: stringResource(R.string.detail_artist_not_found), onBack)
         else -> {
-            val artist = state.page
-            Box(modifier = modifier.fillMaxSize()) {
+            val artist = state.page ?: return@AnimatedContent
+            val listState = rememberVelunaLazyListState()
+            val smoothFling = rememberVelunaFlingBehavior()
+            Box(modifier = Modifier.fillMaxSize()) {
                 ArtWashBackdrop(
                     artworkUrl = artist.thumbnail ?: artist.avatar,
                     accentColor = null,
                     modifier = Modifier.fillMaxWidth().height(320.dp)
                 )
                 LazyColumn(
+                    state = listState,
+                    flingBehavior = smoothFling,
                     contentPadding = PaddingValues(bottom = 28.dp),
                     modifier = Modifier.fillMaxSize().testTag("artist_detail_screen")
                 ) {
-                    item { DetailTopBar(onBack = onBack) }
-                    item {
+                    item(key = "artist_topbar", contentType = "topbar") { DetailTopBar(onBack = onBack) }
+                    item(key = "artist_hero", contentType = "hero") {
                         Column(
                             modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
                             horizontalAlignment = Alignment.CenterHorizontally
@@ -349,8 +406,14 @@ fun ArtistDetailScreen(
                     }
 
                     if (artist.topSongs.isNotEmpty()) {
-                        item { SectionHeading(title = stringResource(R.string.detail_top_songs)) }
-                        itemsIndexed(artist.topSongs, key = { idx, s -> "ar_${idx}_${s.videoId}" }) { idx, song ->
+                        item(key = "artist_top_hdr", contentType = "section_heading") {
+                            SectionHeading(title = stringResource(R.string.detail_top_songs))
+                        }
+                        itemsIndexed(
+                            items = artist.topSongs,
+                            key = { idx, s -> "ar_${idx}_${s.videoId}" },
+                            contentType = { _, _ -> "track" }
+                        ) { idx, song ->
                             TrackRow(
                                 song = song,
                                 isPlaying = nowPlayingId == song.videoId,
@@ -360,11 +423,22 @@ fun ArtistDetailScreen(
                         }
                     }
 
-                    items(artist.sections, key = { "ar_sec_${it.title}" }) { sec ->
+                    items(
+                        items = artist.sections,
+                        key = { "ar_sec_${it.title}" },
+                        contentType = { "carousel" }
+                    ) { sec ->
                         Spacer(modifier = Modifier.height(14.dp))
                         SectionHeading(title = sec.title)
-                        LazyRow(contentPadding = PaddingValues(horizontal = 10.dp)) {
-                            items(sec.items, key = { "${sec.title}_${it.id}" }) { item ->
+                        LazyRow(
+                            flingBehavior = smoothFling,
+                            contentPadding = PaddingValues(horizontal = 10.dp)
+                        ) {
+                            items(
+                                items = sec.items,
+                                key = { "${sec.title}_${it.id}" },
+                                contentType = { "media_card" }
+                            ) { item ->
                                 MediaSquareCard(item = item, onClick = { onOpenBrowseItem(item) })
                             }
                         }
@@ -372,6 +446,7 @@ fun ArtistDetailScreen(
                 }
             }
         }
+    }
     }
 }
 
