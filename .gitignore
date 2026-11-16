@@ -17,6 +17,17 @@ app/google-services.json
 debug.keystore
 *.jks
 *.keystore
+*.pem
+*.p12
+*.key
+keystore.properties
+.env
+.env.*
+!.env.example
+*.bak
+*.orig
+*.part
+public/assets/aistudio/
 
 # Node test tooling
 node_modules/

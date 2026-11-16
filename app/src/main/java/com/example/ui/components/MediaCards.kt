@@ -255,14 +255,14 @@ fun ShortcutTile(
 @Composable
 fun TrackRow(
     song: SongItem,
+    modifier: Modifier = Modifier,
     isPlaying: Boolean = false,
     isDownloaded: Boolean = false,
     isLiked: Boolean = song.rating == Rating.LIKE,
     trackNumber: Int? = null,
     onClick: () -> Unit,
     onMoreClick: () -> Unit,
-    onLikeClick: (() -> Unit)? = null,
-    modifier: Modifier = Modifier
+    onLikeClick: (() -> Unit)? = null
 ) {
     val rowBg = if (isPlaying) {
         MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)

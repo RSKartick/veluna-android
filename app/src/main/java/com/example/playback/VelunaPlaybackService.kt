@@ -16,6 +16,8 @@ import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import com.example.MainActivity
+import com.example.util.SecurityValidators
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
@@ -37,7 +39,7 @@ class VelunaPlaybackService : MediaSessionService() {
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(25, TimeUnit.SECONDS)
             .followRedirects(true)
-            .followSslRedirects(true)
+            .followSslRedirects(false)
             .addInterceptor { chain ->
                 val orig = chain.request()
                 val reqUrl = orig.url.toString()
@@ -47,7 +49,7 @@ class VelunaPlaybackService : MediaSessionService() {
                     ?: activeUserAgent
                 val builder = orig.newBuilder()
                     .header("User-Agent", mappedUa)
-                if (("googlevideo.com" in host || "youtube.com" in host) && mappedUa.startsWith("Mozilla/")) {
+                if (SecurityValidators.isYouTubeStreamHost(host) && mappedUa.startsWith("Mozilla/")) {
                     builder.header("Origin", "https://music.youtube.com")
                     builder.header("Referer", "https://music.youtube.com/")
                 }
@@ -197,15 +199,17 @@ class VelunaPlaybackService : MediaSessionService() {
         private val hostUserAgents = ConcurrentHashMap<String, String>()
 
         fun registerStreamHeaders(url: String, userAgent: String) {
+            if (!SecurityValidators.isSafeHttpsUrl(url, maxLength = 8192)) return
             activeUserAgent = userAgent
-            urlUserAgents[url] = userAgent
-            runCatching { java.net.URI(url).host }
-                .getOrNull()
-                ?.takeIf { it.isNotBlank() }
-                ?.let { hostUserAgents[it] = userAgent }
-            if (urlUserAgents.size > 64) {
+            if (urlUserAgents.size >= 64) {
                 urlUserAgents.clear()
-                urlUserAgents[url] = userAgent
+            }
+            urlUserAgents[url] = userAgent
+            url.toHttpUrlOrNull()?.host?.takeIf { it.isNotBlank() }?.let { host ->
+                if (hostUserAgents.size >= 64) {
+                    hostUserAgents.clear()
+                }
+                hostUserAgents[host] = userAgent
             }
         }
     }

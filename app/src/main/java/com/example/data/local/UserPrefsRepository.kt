@@ -18,6 +18,7 @@ import com.example.model.LyricsProviderInfo
 import com.example.model.TasteProfile
 import com.example.model.ThemeMode
 import com.example.model.VelunaThemePreset
+import com.example.util.SecurityValidators
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -165,25 +166,26 @@ class UserPrefsRepository(
         } ?: AudioQuality.HIGH
         val bands = p[Keys.EQ_BANDS]?.let { raw ->
             runCatching { json.decodeFromString<List<Float>>(raw) }.getOrNull()
-        }?.takeIf { it.size == 10 } ?: EqualizerPresets.presets.getValue("Flat")
+        }?.let(::sanitizeEqBands) ?: EqualizerPresets.presets.getValue("Flat")
+        val speed = p[Keys.PLAYBACK_SPEED]?.takeIf { it.isFinite() }?.coerceIn(0.5f, 2.0f) ?: 1.0f
 
         VelunaUserPrefs(
             themePreset = preset,
             themeMode = mode,
-            customAccentHex = p[Keys.CUSTOM_ACCENT]?.takeIf { it.isNotBlank() },
+            customAccentHex = p[Keys.CUSTOM_ACCENT]?.trim()?.takeIf { SecurityValidators.isValidHexColor(it) },
             adaptToArtwork = p[Keys.ADAPT_TO_ARTWORK] ?: true,
             cornerRadiusDp = (p[Keys.CORNER_RADIUS] ?: 12).coerceIn(4, 24),
             classicPlayerLayout = p[Keys.CLASSIC_PLAYER] ?: false,
             audioQuality = quality,
             autoplay = p[Keys.AUTOPLAY] ?: true,
-            playbackSpeed = (p[Keys.PLAYBACK_SPEED] ?: 1.0f).coerceIn(0.5f, 2.0f),
+            playbackSpeed = speed,
             loudnessNormalization = p[Keys.LOUDNESS_NORM] ?: true,
             hideMusicVideos = p[Keys.HIDE_VIDEOS] ?: false,
             allowMirrorFallbacks = p[Keys.ALLOW_MIRROR_FALLBACKS] ?: false,
             eqEnabled = p[Keys.EQ_ENABLED] ?: false,
-            eqPresetName = p[Keys.EQ_PRESET] ?: "Flat",
+            eqPresetName = p[Keys.EQ_PRESET]?.trim()?.take(40)?.ifBlank { "Flat" } ?: "Flat",
             eqBandsDb = bands,
-            lyricsProviderOrder = p[Keys.LYRICS_PROVIDERS] ?: "boidu,lyricsplus,lrclib,youtube,simpmusic",
+            lyricsProviderOrder = normalizeProviderOrder(p[Keys.LYRICS_PROVIDERS]),
             romanizeLyrics = p[Keys.ROMANIZE_LYRICS] ?: false,
             scrobblingEnabled = p[Keys.SCROBBLING_ENABLED] ?: false,
             lastFmUsername = p[Keys.LASTFM_USER].orEmpty(),
@@ -193,7 +195,7 @@ class UserPrefsRepository(
             listenBrainzToken = secrets.listenBrainzToken,
             showMoodChips = p[Keys.SHOW_MOOD_CHIPS] ?: true,
             showHeroArtworkBackdrop = p[Keys.SHOW_HERO_BACKDROP] ?: true,
-            userDisplayName = p[Keys.DISPLAY_NAME] ?: "Listener"
+            userDisplayName = p[Keys.DISPLAY_NAME]?.trim()?.take(80)?.ifBlank { "Listener" } ?: "Listener"
         )
     }.distinctUntilChanged()
 
@@ -268,9 +270,10 @@ class UserPrefsRepository(
     }
 
     suspend fun setCustomAccent(hex: String?) {
+        val validHex = hex?.trim()?.takeIf { SecurityValidators.isValidHexColor(it) }
         dataStore.edit {
-            if (hex.isNullOrBlank()) it.remove(Keys.CUSTOM_ACCENT)
-            else it[Keys.CUSTOM_ACCENT] = hex
+            if (validHex == null) it.remove(Keys.CUSTOM_ACCENT)
+            else it[Keys.CUSTOM_ACCENT] = validHex
         }
     }
 
@@ -295,7 +298,8 @@ class UserPrefsRepository(
     }
 
     suspend fun setPlaybackSpeed(speed: Float) {
-        dataStore.edit { it[Keys.PLAYBACK_SPEED] = speed.coerceIn(0.5f, 2.0f) }
+        val safeSpeed = if (speed.isFinite()) speed.coerceIn(0.5f, 2.0f) else 1.0f
+        dataStore.edit { it[Keys.PLAYBACK_SPEED] = safeSpeed }
     }
 
     suspend fun setLoudnessNormalization(enabled: Boolean) {
@@ -311,15 +315,16 @@ class UserPrefsRepository(
     }
 
     suspend fun setEqualizer(enabled: Boolean, presetName: String, bands: List<Float>) {
+        val safeBands = sanitizeEqBands(bands) ?: EqualizerPresets.presets.getValue("Flat")
         dataStore.edit {
             it[Keys.EQ_ENABLED] = enabled
-            it[Keys.EQ_PRESET] = presetName
-            it[Keys.EQ_BANDS] = json.encodeToString(bands)
+            it[Keys.EQ_PRESET] = presetName.trim().take(40).ifBlank { "Custom" }
+            it[Keys.EQ_BANDS] = json.encodeToString(safeBands)
         }
     }
 
     suspend fun setLyricsProvidersOrder(orderString: String) {
-        dataStore.edit { it[Keys.LYRICS_PROVIDERS] = orderString }
+        dataStore.edit { it[Keys.LYRICS_PROVIDERS] = normalizeProviderOrder(orderString) }
     }
 
     suspend fun setRomanizeLyrics(enabled: Boolean) {
@@ -362,7 +367,7 @@ class UserPrefsRepository(
     }
 
     suspend fun setDisplayName(name: String) {
-        dataStore.edit { it[Keys.DISPLAY_NAME] = name.ifBlank { "Listener" } }
+        dataStore.edit { it[Keys.DISPLAY_NAME] = name.trim().take(80).ifBlank { "Listener" } }
     }
 
     suspend fun setLastScrobbleError(message: String?) {
@@ -433,26 +438,27 @@ class UserPrefsRepository(
     }
 
     suspend fun applyBackup(backup: VelunaUserPrefs) {
+        val validHex = backup.customAccentHex?.trim()?.takeIf { SecurityValidators.isValidHexColor(it) }
+        val safeSpeed = if (backup.playbackSpeed.isFinite()) backup.playbackSpeed.coerceIn(0.5f, 2.0f) else 1.0f
+        val safeBands = sanitizeEqBands(backup.eqBandsDb) ?: EqualizerPresets.presets.getValue("Flat")
         dataStore.edit {
             it[Keys.THEME_PRESET] = backup.themePreset.id
             it[Keys.THEME_MODE] = backup.themeMode.name
-            if (backup.customAccentHex.isNullOrBlank()) it.remove(Keys.CUSTOM_ACCENT)
-            else it[Keys.CUSTOM_ACCENT] = backup.customAccentHex
+            if (validHex == null) it.remove(Keys.CUSTOM_ACCENT)
+            else it[Keys.CUSTOM_ACCENT] = validHex
             it[Keys.ADAPT_TO_ARTWORK] = backup.adaptToArtwork
             it[Keys.CORNER_RADIUS] = backup.cornerRadiusDp.coerceIn(4, 24)
             it[Keys.CLASSIC_PLAYER] = backup.classicPlayerLayout
             it[Keys.AUDIO_QUALITY] = backup.audioQuality.name
             it[Keys.AUTOPLAY] = backup.autoplay
-            it[Keys.PLAYBACK_SPEED] = backup.playbackSpeed.coerceIn(0.5f, 2.0f)
+            it[Keys.PLAYBACK_SPEED] = safeSpeed
             it[Keys.LOUDNESS_NORM] = backup.loudnessNormalization
             it[Keys.HIDE_VIDEOS] = backup.hideMusicVideos
             it[Keys.ALLOW_MIRROR_FALLBACKS] = backup.allowMirrorFallbacks
             it[Keys.EQ_ENABLED] = backup.eqEnabled
-            it[Keys.EQ_PRESET] = backup.eqPresetName
-            it[Keys.EQ_BANDS] = json.encodeToString(
-                if (backup.eqBandsDb.size == 10) backup.eqBandsDb else EqualizerPresets.presets.getValue("Flat")
-            )
-            it[Keys.LYRICS_PROVIDERS] = backup.lyricsProviderOrder
+            it[Keys.EQ_PRESET] = backup.eqPresetName.trim().take(40).ifBlank { "Flat" }
+            it[Keys.EQ_BANDS] = json.encodeToString(safeBands)
+            it[Keys.LYRICS_PROVIDERS] = normalizeProviderOrder(backup.lyricsProviderOrder)
             it[Keys.ROMANIZE_LYRICS] = backup.romanizeLyrics
             it[Keys.SHOW_MOOD_CHIPS] = backup.showMoodChips
             it[Keys.SHOW_HERO_BACKDROP] = backup.showHeroArtworkBackdrop
@@ -474,6 +480,16 @@ class UserPrefsRepository(
             "youtube" to "YouTube Music",
             "simpmusic" to "SimpMusic"
         )
+
+        fun sanitizeEqBands(raw: List<Float>): List<Float>? {
+            if (raw.size != 10) return null
+            return raw.map { band ->
+                if (band.isFinite()) band.coerceIn(-12f, 12f) else 0f
+            }
+        }
+
+        fun normalizeProviderOrder(raw: String?): String =
+            serializeProviderOrder(parseProviderOrder(raw.orEmpty()))
 
         fun parseProviderOrder(raw: String): List<LyricsProviderInfo> {
             val seen = mutableSetOf<String>()

@@ -39,6 +39,7 @@ import com.example.ui.screens.settings.HiddenArtistsSection
 import com.example.ui.screens.settings.LyricsProvidersSection
 import com.example.ui.screens.settings.PlaybackSection
 import com.example.ui.screens.settings.ScrobblingSection
+import com.example.util.SecurityValidators
 import com.example.util.readContentUriText
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -50,6 +51,7 @@ import java.io.IOException
 fun SettingsScreen(
     prefs: VelunaUserPrefs,
     blockedArtists: List<BlockedArtistEntity>,
+    modifier: Modifier = Modifier,
     tasteProfile: TasteProfile? = null,
     cloudAuthState: CloudAuthUiState = CloudAuthUiState(),
     scrobblePendingCount: Int = 0,
@@ -82,8 +84,7 @@ fun SettingsScreen(
     onUnblockArtist: (String) -> Unit,
     onBuildBackupJson: suspend () -> String,
     onRestoreBackupJson: (String) -> Unit,
-    onStatusMessage: (String) -> Unit,
-    modifier: Modifier = Modifier
+    onStatusMessage: (String) -> Unit
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -109,7 +110,12 @@ fun SettingsScreen(
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
-                    onStatusMessage(context.getString(R.string.settings_backup_export_failed, e.message ?: ""))
+                    onStatusMessage(
+                        context.getString(
+                            R.string.settings_backup_export_failed,
+                            SecurityValidators.safeUserErrorMessage(e, "Failed to export backup")
+                        )
+                    )
                 }
             }
         }
@@ -127,7 +133,12 @@ fun SettingsScreen(
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
-                    onStatusMessage(context.getString(R.string.settings_backup_restore_failed, e.message ?: ""))
+                    onStatusMessage(
+                        context.getString(
+                            R.string.settings_backup_restore_failed,
+                            SecurityValidators.safeUserErrorMessage(e, "Failed to restore backup")
+                        )
+                    )
                 }
             }
         }

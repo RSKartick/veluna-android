@@ -13,6 +13,7 @@ import com.example.model.BrowseItem
 import com.example.model.BrowseKind
 import com.example.model.PlaylistPage
 import com.example.model.SongItem
+import com.example.util.SecurityValidators
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -86,7 +87,10 @@ class DetailViewModel(
             innerTube.getAlbum(albumId).onSuccess { page ->
                 _albumState.value = AlbumDetailState(isLoading = false, page = page)
             }.onFailure { err ->
-                _albumState.value = AlbumDetailState(isLoading = false, error = err.message ?: "Failed to load album")
+                _albumState.value = AlbumDetailState(
+                    isLoading = false,
+                    error = SecurityValidators.safeUserErrorMessage(err, "Failed to load album")
+                )
             }
         }
     }
@@ -106,7 +110,10 @@ class DetailViewModel(
             innerTube.getArtist(channelId).onSuccess { page ->
                 _artistState.value = ArtistDetailState(isLoading = false, page = page)
             }.onFailure { err ->
-                _artistState.value = ArtistDetailState(isLoading = false, error = err.message ?: "Failed to load artist")
+                _artistState.value = ArtistDetailState(
+                    isLoading = false,
+                    error = SecurityValidators.safeUserErrorMessage(err, "Failed to load artist")
+                )
             }
         }
     }
@@ -128,7 +135,12 @@ class DetailViewModel(
             repository.loadPlaylistPage(playlistId).onSuccess { page ->
                 _playlistState.update { it.copy(isLoading = false, page = page, error = null) }
             }.onFailure { err ->
-                _playlistState.update { it.copy(isLoading = false, error = err.message ?: "Failed to load playlist") }
+                _playlistState.update {
+                    it.copy(
+                        isLoading = false,
+                        error = SecurityValidators.safeUserErrorMessage(err, "Failed to load playlist")
+                    )
+                }
             }
         }
     }

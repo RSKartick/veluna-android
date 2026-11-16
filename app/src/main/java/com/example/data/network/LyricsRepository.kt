@@ -7,7 +7,9 @@ import com.example.model.LyricLine
 import com.example.model.LyricWord
 import com.example.model.LyricsData
 import com.example.model.SongItem
+import com.example.util.SecurityValidators
 import com.example.util.readUtf8AtMost
+import com.example.util.suspendRunCatching
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
@@ -74,7 +76,7 @@ class LyricsRepository(
 
         var plainFallback: LyricsData? = null
         for (pid in providers) {
-            val rawResult = runCatching { fetchFromProvider(pid, song) }.getOrNull() ?: continue
+            val rawResult = suspendRunCatching { fetchFromProvider(pid, song) }.getOrNull() ?: continue
             val validated = LyricsTimingValidator.validateAndNormalize(rawResult, effectiveDurationMs)
             if (validated.synced && validated.lines.isNotEmpty()) {
                 val enriched = enrichRomanization(validated)
@@ -275,8 +277,11 @@ class LyricsRepository(
     }
 
     private fun fetchSimpMusic(song: SongItem): LyricsData? {
-        if (song.isLocal) return null
-        val url = "https://api-lyrics.simpmusic.org/v1/${song.videoId}"
+        if (song.isLocal || !SecurityValidators.isValidYouTubeId(song.videoId)) return null
+        val url = "https://api-lyrics.simpmusic.org/v1".toHttpUrl().newBuilder()
+            .addPathSegment(song.videoId)
+            .build()
+            .toString()
         val obj = executeJson(url) as? JsonObject ?: return null
         val data = obj["data"]?.jsonArray?.firstOrNull()?.jsonObject ?: return null
         val synced = data["syncedLyrics"]?.jsonPrimitive?.contentOrNull
@@ -295,6 +300,7 @@ class LyricsRepository(
     }
 
     private fun executeJson(url: String): kotlinx.serialization.json.JsonElement? {
+        if (!SecurityValidators.isSafeHttpsUrl(url)) return null
         val req = Request.Builder()
             .url(url)
             .header("User-Agent", "Veluna-Android/1.0")

@@ -36,10 +36,12 @@
             </intent-filter>
         </activity>
 
+        <!-- MediaSessionService must be exported so Android Auto / Wear OS / system media controllers can bind; Media3 enforces controller verification via MediaSession.Callback -->
         <service
             android:name=".playback.VelunaPlaybackService"
             android:exported="true"
-            android:foregroundServiceType="mediaPlayback">
+            android:foregroundServiceType="mediaPlayback"
+            tools:ignore="ExportedService">
             <intent-filter>
                 <action android:name="androidx.media3.session.MediaSessionService" />
             </intent-filter>

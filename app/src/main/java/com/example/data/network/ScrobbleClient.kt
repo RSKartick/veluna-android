@@ -9,7 +9,9 @@ import com.example.data.local.UserPrefsRepository
 import com.example.data.local.VelunaDao
 import com.example.data.local.VelunaUserPrefs
 import com.example.model.SongItem
+import com.example.util.SecurityValidators
 import com.example.util.readUtf8AtMost
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -265,10 +267,15 @@ class ScrobbleClient(
                     resp.body?.readUtf8AtMost(MAX_SCROBBLE_RESPONSE_BYTES).orEmpty()
                 )
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: IOException) {
-            ScrobbleSubmitResult.Failure(retryable = true, reason = e.localizedMessage ?: "Network error")
-        } catch (e: Exception) {
-            ScrobbleSubmitResult.Failure(retryable = false, reason = e.localizedMessage ?: "ListenBrainz error")
+            ScrobbleSubmitResult.Failure(
+                retryable = true,
+                reason = SecurityValidators.safeUserErrorMessage(e, "Network error")
+            )
+        } catch (_: Exception) {
+            ScrobbleSubmitResult.Failure(retryable = false, reason = "ListenBrainz request failed")
         }
     }
 
@@ -310,10 +317,15 @@ class ScrobbleClient(
                     resp.body?.readUtf8AtMost(MAX_SCROBBLE_RESPONSE_BYTES).orEmpty()
                 )
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: IOException) {
-            ScrobbleSubmitResult.Failure(retryable = true, reason = e.localizedMessage ?: "Network error")
-        } catch (e: Exception) {
-            ScrobbleSubmitResult.Failure(retryable = false, reason = e.localizedMessage ?: "Last.fm error")
+            ScrobbleSubmitResult.Failure(
+                retryable = true,
+                reason = SecurityValidators.safeUserErrorMessage(e, "Network error")
+            )
+        } catch (_: Exception) {
+            ScrobbleSubmitResult.Failure(retryable = false, reason = "Last.fm request failed")
         }
     }
 

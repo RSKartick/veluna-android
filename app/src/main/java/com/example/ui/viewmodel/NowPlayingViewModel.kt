@@ -13,6 +13,7 @@ import com.example.model.EqualizerPresets
 import com.example.model.LyricsData
 import com.example.model.SongItem
 import com.example.playback.PlayerController
+import com.example.util.SecurityValidators
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -153,7 +154,7 @@ class NowPlayingViewModel(
             }.onFailure { err ->
                 _commentsState.value = CommentsUiState(
                     isLoading = false,
-                    error = err.message ?: "Failed to load comments",
+                    error = SecurityValidators.safeUserErrorMessage(err, "Failed to load comments"),
                     videoId = song.videoId
                 )
             }

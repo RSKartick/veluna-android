@@ -73,6 +73,7 @@ fun HomeScreen(
     familiarArtists: List<BrowseItem>,
     nowPlayingSong: SongItem?,
     artworkAccent: Color?,
+    modifier: Modifier = Modifier,
     likedIds: Set<String> = emptySet(),
     cloudAuthState: CloudAuthUiState = CloudAuthUiState(),
     onSignInWithGoogle: () -> Unit = {},
@@ -83,8 +84,7 @@ fun HomeScreen(
     onTrackMore: (SongItem) -> Unit,
     onToggleLike: ((SongItem) -> Unit)? = null,
     onOpenHistory: () -> Unit,
-    onOpenEditHome: () -> Unit,
-    modifier: Modifier = Modifier
+    onOpenEditHome: () -> Unit
 ) {
     val currentHour = remember { LocalTime.now().hour }
     val prefix = when (currentHour) {

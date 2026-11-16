@@ -73,6 +73,7 @@ import com.example.ui.theme.velunaOutlinedFieldColors
 import com.example.ui.theme.velunaPrimaryButtonColors
 import com.example.ui.viewmodel.PlaylistDetailState
 import com.example.ui.viewmodel.PlaylistSortMode
+import com.example.util.SecurityValidators
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -93,10 +94,10 @@ fun PlaylistDetailScreen(
     onRemoveDuplicates: (Long) -> Unit,
     onDeletePlaylist: (Long) -> Unit,
     onExportM3u: () -> Pair<String, String>?,
-    onExportCsv: () -> Pair<String, String>? = { null },
     onPinShortcut: (BrowseItem) -> Unit,
     onStatusMessage: (String) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onExportCsv: () -> Pair<String, String>? = { null }
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -123,7 +124,12 @@ fun PlaylistDetailScreen(
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
-                    onStatusMessage(context.getString(R.string.playlist_export_failed, e.message ?: ""))
+                    onStatusMessage(
+                        context.getString(
+                            R.string.playlist_export_failed,
+                            SecurityValidators.safeUserErrorMessage(e, "Failed to write file")
+                        )
+                    )
                 }
             }
         }
@@ -142,7 +148,12 @@ fun PlaylistDetailScreen(
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
-                    onStatusMessage(context.getString(R.string.playlist_export_failed, e.message ?: ""))
+                    onStatusMessage(
+                        context.getString(
+                            R.string.playlist_export_failed,
+                            SecurityValidators.safeUserErrorMessage(e, "Failed to write file")
+                        )
+                    )
                 }
             }
         }

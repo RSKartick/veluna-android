@@ -18,6 +18,7 @@ import com.example.model.PlaylistPage
 import com.example.model.SearchResults
 import com.example.model.SearchSuggestions
 import com.example.model.SongItem
+import com.example.util.SecurityValidators
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -27,6 +28,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
 object InnerTubeParsers {
 
@@ -67,9 +69,20 @@ object InnerTubeParsers {
     private fun JsonElement?.arrOrNull(): JsonArray? = this as? JsonArray
 
     fun upgradeThumbnailUrl(url: String?, targetPx: Int = 720): String? {
-        if (url.isNullOrBlank()) return url
-        val normalized = if (url.startsWith("//")) "https:$url" else url
-        if ("googleusercontent.com" in normalized || "ggpht.com" in normalized) {
+        val raw = url?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        val withScheme = when {
+            raw.startsWith("//") -> "https:$raw"
+            raw.startsWith("http://", ignoreCase = true) -> "https://" + raw.drop(7)
+            else -> raw
+        }
+        val parsed = withScheme.toHttpUrlOrNull() ?: return null
+        if (!parsed.isHttps || parsed.host.isBlank()) return null
+        val host = parsed.host
+        val normalized = parsed.toString()
+
+        if (SecurityValidators.isHostOrSubdomain(host, "googleusercontent.com") ||
+            SecurityValidators.isHostOrSubdomain(host, "ggpht.com")
+        ) {
             return when {
                 Regex("""=w\d+-h\d+[^?#]*""").containsMatchIn(normalized) ->
                     normalized.replace(Regex("""=w\d+-h\d+[^?#]*"""), "=w$targetPx-h$targetPx-l95-rj")
@@ -78,12 +91,12 @@ object InnerTubeParsers {
                 else -> normalized
             }
         }
-        if ("ytimg.com/vi/" in normalized) {
+        if (SecurityValidators.isHostOrSubdomain(host, "ytimg.com") && "/vi/" in parsed.encodedPath) {
             return normalized
                 .replace("/default.jpg", "/hqdefault.jpg")
                 .replace("/mqdefault.jpg", "/hqdefault.jpg")
         }
-        return normalized
+        return SecurityValidators.sanitizeHttpsUrl(normalized, 2048)
     }
 
     private fun lastThumbnail(node: JsonElement?): String? {

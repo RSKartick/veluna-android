@@ -11,7 +11,9 @@ import com.example.model.ResolvedStream
 import com.example.model.SearchResults
 import com.example.model.SearchSuggestions
 import com.example.model.SongItem
+import com.example.util.SecurityValidators
 import com.example.util.readUtf8AtMost
+import com.example.util.suspendRunCatching
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -36,6 +38,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonObject
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -164,7 +167,7 @@ class InnerTubeClient(
         withTimeoutOrNull(timeoutMs) {
             visitorMutex.withLock {
                 cachedVisitorData?.let { return@withLock it }
-                runCatching {
+                suspendRunCatching {
                     val req = Request.Builder()
                         .url("https://music.youtube.com/sw.js_data")
                         .header("User-Agent", webRemix.userAgent)
@@ -233,7 +236,7 @@ class InnerTubeClient(
         }
     }
 
-    suspend fun getHome(params: String? = null): Result<HomePage> = runCatching {
+    suspend fun getHome(params: String? = null): Result<HomePage> = suspendRunCatching {
         val fields = buildMap<String, JsonElement> {
             put("browseId", JsonPrimitive("FEmusic_home"))
             if (!params.isNullOrBlank()) put("params", JsonPrimitive(params))
@@ -242,12 +245,12 @@ class InnerTubeClient(
         InnerTubeParsers.parseHome(root)
     }
 
-    suspend fun getMoodsAndGenres(): Result<List<MoodSection>> = runCatching {
+    suspend fun getMoodsAndGenres(): Result<List<MoodSection>> = suspendRunCatching {
         val root = post("browse", webRemix, mapOf("browseId" to JsonPrimitive("FEmusic_moods_and_genres")))
         InnerTubeParsers.parseMoods(root)
     }
 
-    suspend fun getMoodCategory(params: String): Result<HomePage> = runCatching {
+    suspend fun getMoodCategory(params: String): Result<HomePage> = suspendRunCatching {
         val root = post(
             "browse",
             webRemix,
@@ -259,12 +262,12 @@ class InnerTubeClient(
         InnerTubeParsers.parseHome(root)
     }
 
-    suspend fun searchAll(query: String): Result<SearchResults> = runCatching {
+    suspend fun searchAll(query: String): Result<SearchResults> = suspendRunCatching {
         val root = post("search", webRemix, mapOf("query" to JsonPrimitive(query)))
         InnerTubeParsers.parseSearchAll(root)
     }
 
-    suspend fun searchSongs(query: String): Result<List<SongItem>> = runCatching {
+    suspend fun searchSongs(query: String): Result<List<SongItem>> = suspendRunCatching {
         val root = post(
             "search",
             webRemix,
@@ -276,7 +279,7 @@ class InnerTubeClient(
         InnerTubeParsers.parseSearchSongs(root)
     }
 
-    suspend fun searchVideos(query: String): Result<List<SongItem>> = runCatching {
+    suspend fun searchVideos(query: String): Result<List<SongItem>> = suspendRunCatching {
         val root = post(
             "search",
             webRemix,
@@ -288,7 +291,7 @@ class InnerTubeClient(
         InnerTubeParsers.parseSearchSongs(root)
     }
 
-    suspend fun searchSuggestions(input: String): Result<SearchSuggestions> = runCatching {
+    suspend fun searchSuggestions(input: String): Result<SearchSuggestions> = suspendRunCatching {
         val root = post(
             "music/get_search_suggestions",
             webRemix,
@@ -297,17 +300,20 @@ class InnerTubeClient(
         InnerTubeParsers.parseSearchSuggestions(root)
     }
 
-    suspend fun getAlbum(browseId: String): Result<AlbumPage> = runCatching {
+    suspend fun getAlbum(browseId: String): Result<AlbumPage> = suspendRunCatching {
+        require(SecurityValidators.isValidPlaylistId(browseId)) { "Invalid album identifier" }
         val root = post("browse", webRemix, mapOf("browseId" to JsonPrimitive(browseId)))
         InnerTubeParsers.parseAlbum(browseId, root)
     }
 
-    suspend fun getArtist(channelId: String): Result<ArtistPage> = runCatching {
+    suspend fun getArtist(channelId: String): Result<ArtistPage> = suspendRunCatching {
+        require(SecurityValidators.isValidPlaylistId(channelId)) { "Invalid artist identifier" }
         val root = post("browse", webRemix, mapOf("browseId" to JsonPrimitive(channelId)))
         InnerTubeParsers.parseArtist(channelId, root)
     }
 
-    suspend fun getPlaylist(browseId: String): Result<PlaylistPage> = runCatching {
+    suspend fun getPlaylist(browseId: String): Result<PlaylistPage> = suspendRunCatching {
+        require(SecurityValidators.isValidPlaylistId(browseId)) { "Invalid playlist identifier" }
         val id = if (browseId.startsWith("PL") || browseId.startsWith("RD") || browseId.startsWith("OLAK")) {
             "VL$browseId"
         } else {
@@ -321,11 +327,13 @@ class InnerTubeClient(
         videoId: String?,
         playlistId: String? = null,
         params: String? = null
-    ): Result<List<SongItem>> = runCatching {
-        val effectivePlaylistId = playlistId ?: videoId?.let { "RDAMVM$it" }
+    ): Result<List<SongItem>> = suspendRunCatching {
+        val safeVideoId = videoId?.takeIf { SecurityValidators.isValidYouTubeId(it) }
+        val safePlaylistId = playlistId?.takeIf { SecurityValidators.isValidPlaylistId(it) }
+        val effectivePlaylistId = safePlaylistId ?: safeVideoId?.let { "RDAMVM$it" }
         val effectiveParams = params ?: if (effectivePlaylistId?.startsWith("RD") == true) "wAEB" else null
         val fields = buildMap<String, JsonElement> {
-            videoId?.let { put("videoId", JsonPrimitive(it)) }
+            safeVideoId?.let { put("videoId", JsonPrimitive(it)) }
             effectivePlaylistId?.let { put("playlistId", JsonPrimitive(it)) }
             effectiveParams?.let { put("params", JsonPrimitive(it)) }
             put("isAudioOnly", JsonPrimitive(true))
@@ -334,25 +342,26 @@ class InnerTubeClient(
         }
         val root = post("next", webRemix, fields, useFastClient = true)
         val parsed = InnerTubeParsers.parseNext(root).first
-        if (parsed.size > 1 || videoId.isNullOrBlank()) {
-            return@runCatching parsed
+        if (parsed.size > 1 || safeVideoId == null) {
+            return@suspendRunCatching parsed
         }
         // Fallback try generic RD mix playlist when RDAMVM is thin
-        if (effectivePlaylistId != "RD$videoId") {
+        if (effectivePlaylistId != "RD$safeVideoId") {
             val altFields = mapOf(
-                "videoId" to JsonPrimitive(videoId),
-                "playlistId" to JsonPrimitive("RD$videoId"),
+                "videoId" to JsonPrimitive(safeVideoId),
+                "playlistId" to JsonPrimitive("RD$safeVideoId"),
                 "isAudioOnly" to JsonPrimitive(true),
                 "enablePersistentPlaylistPanel" to JsonPrimitive(true)
             )
-            val altRoot = runCatching { post("next", webRemix, altFields, useFastClient = true) }.getOrNull()
+            val altRoot = suspendRunCatching { post("next", webRemix, altFields, useFastClient = true) }.getOrNull()
             val altSongs = altRoot?.let { InnerTubeParsers.parseNext(it).first }.orEmpty()
-            if (altSongs.size > parsed.size) return@runCatching altSongs
+            if (altSongs.size > parsed.size) return@suspendRunCatching altSongs
         }
         parsed
     }
 
-    suspend fun getYouTubeLyrics(videoId: String): Result<Pair<List<com.example.model.LyricLine>, String?>> = runCatching {
+    suspend fun getYouTubeLyrics(videoId: String): Result<Pair<List<com.example.model.LyricLine>, String?>> = suspendRunCatching {
+        require(SecurityValidators.isValidYouTubeId(videoId)) { "Invalid video identifier" }
         val nextRoot = post(
             "next",
             webRemix,
@@ -360,25 +369,26 @@ class InnerTubeClient(
             useFastClient = true
         )
         val (_, lyricsBrowseId) = InnerTubeParsers.parseNext(nextRoot)
-        if (lyricsBrowseId == null) return@runCatching emptyList<com.example.model.LyricLine>() to null
+        if (lyricsBrowseId == null) return@suspendRunCatching emptyList<com.example.model.LyricLine>() to null
 
         val timedRoot = post("browse", iosMusic, mapOf("browseId" to JsonPrimitive(lyricsBrowseId)), useFastClient = true)
         val timed = InnerTubeParsers.parseTimedLyrics(timedRoot)
-        if (timed.isNotEmpty()) return@runCatching timed to null
+        if (timed.isNotEmpty()) return@suspendRunCatching timed to null
 
         val plainRoot = post("browse", webRemix, mapOf("browseId" to JsonPrimitive(lyricsBrowseId)), useFastClient = true)
         val plain = InnerTubeParsers.parsePlainLyrics(plainRoot)
         emptyList<com.example.model.LyricLine>() to plain
     }
 
-    suspend fun getComments(videoId: String): Result<CommentsPage> = runCatching {
+    suspend fun getComments(videoId: String): Result<CommentsPage> = suspendRunCatching {
+        require(SecurityValidators.isValidYouTubeId(videoId)) { "Invalid video identifier" }
         val tabsRoot = post(
             "next",
             webRemix,
             mapOf("videoId" to JsonPrimitive(videoId), "isAudioOnly" to JsonPrimitive(true))
         )
         val token = InnerTubeParsers.parseCommentsToken(tabsRoot)
-            ?: return@runCatching CommentsPage(disabled = true)
+            ?: return@suspendRunCatching CommentsPage(disabled = true)
         val pageRoot = post("next", webRemix, mapOf("continuation" to JsonPrimitive(token)))
         InnerTubeParsers.parseCommentsPage(pageRoot)
     }
@@ -387,14 +397,15 @@ class InnerTubeClient(
         videoId: String,
         quality: AudioQuality,
         allowMirrorFallbacks: Boolean = false
-    ): Result<ResolvedStream> = runCatching {
+    ): Result<ResolvedStream> = suspendRunCatching {
+        require(SecurityValidators.isValidYouTubeId(videoId)) { "Invalid video identifier" }
         val candidates = resolveStreamCandidates(videoId, quality, allowMirrorFallbacks).getOrElse { emptyList() }
         val chosen = candidates.firstOrNull { !it.isHls } ?: candidates.firstOrNull()
         chosen ?: if (allowMirrorFallbacks) {
             resolveMirrorStreamCandidates(videoId, quality).firstOrNull()
-                ?: throw IllegalStateException("No playable stream found for $videoId")
+                ?: throw IllegalStateException("Unable to resolve audio stream")
         } else {
-            throw IllegalStateException("No playable stream found for $videoId")
+            throw IllegalStateException("Unable to resolve audio stream")
         }
     }
 
@@ -404,6 +415,9 @@ class InnerTubeClient(
         allowMirrorFallbacks: Boolean = false
     ): Result<List<ResolvedStream>> =
         withContext(Dispatchers.IO) {
+            if (!SecurityValidators.isValidYouTubeId(videoId)) {
+                return@withContext Result.failure(IllegalArgumentException("Invalid video identifier"))
+            }
             val cacheKey = streamCacheKey(videoId, quality, allowMirrorFallbacks)
             val now = System.currentTimeMillis()
             synchronized(cacheLock) {
@@ -412,7 +426,7 @@ class InnerTubeClient(
                 }
             }
 
-            runCatching {
+            suspendRunCatching {
                 val clients = listOf(androidVr, iosMusic, androidTestsuite, androidCreator, visionOs)
                 val out = mutableListOf<ResolvedStream>()
                 val seenUrls = hashSetOf<String>()
@@ -425,7 +439,7 @@ class InnerTubeClient(
 
                     val jobs = clients.map { client ->
                         async {
-                            val res = runCatching { fetchClientStreams(videoId, quality, client) }
+                            val res = suspendRunCatching { fetchClientStreams(videoId, quality, client) }
                             channel.trySend(false to res)
                             if (activeInner.decrementAndGet() <= 0) {
                                 innerExhausted.complete(Unit)
@@ -437,7 +451,7 @@ class InnerTubeClient(
                     // or after 650ms if InnerTube is stalling on the user's network.
                     val mirrorJob = if (allowMirrorFallbacks) async {
                         withTimeoutOrNull(650L) { innerExhausted.await() }
-                        val mirrors = runCatching { resolveMirrorStreamCandidates(videoId, quality) }
+                        val mirrors = suspendRunCatching { resolveMirrorStreamCandidates(videoId, quality) }
                         channel.trySend(true to mirrors)
                     } else {
                         null
@@ -471,7 +485,7 @@ class InnerTubeClient(
                 }
 
                 if (out.isEmpty()) {
-                    throw (lastError ?: IllegalStateException("No playable stream found for $videoId"))
+                    throw (lastError ?: IllegalStateException("Unable to resolve audio stream"))
                 }
 
                 val sorted = out.sortedBy { if (it.isHls) 1 else 0 }
@@ -516,7 +530,9 @@ class InnerTubeClient(
 
         val audioCandidates = (adaptive + formats).mapNotNull { el ->
             val f = el.jsonObject
-            val url = f["url"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+            val url = f["url"]?.jsonPrimitive?.contentOrNull
+                ?.takeIf { SecurityValidators.isSafeHttpsUrl(it, MAX_STREAM_URL_LENGTH) }
+                ?: return@mapNotNull null
             val mime = f["mimeType"]?.jsonPrimitive?.contentOrNull.orEmpty()
             if (!mime.startsWith("audio/")) return@mapNotNull null
             val bitrate = f["bitrate"]?.jsonPrimitive?.contentOrNull?.toIntOrNull()
@@ -562,6 +578,7 @@ class InnerTubeClient(
         }
 
         val hlsUrl = streamingData["hlsManifestUrl"]?.jsonPrimitive?.contentOrNull
+            ?.takeIf { SecurityValidators.isSafeHttpsUrl(it, MAX_STREAM_URL_LENGTH) }
         if (!hlsUrl.isNullOrBlank()) {
             out.add(
                 ResolvedStream(
@@ -582,6 +599,7 @@ class InnerTubeClient(
 
     suspend fun resolveMirrorStreamCandidates(videoId: String, quality: AudioQuality): List<ResolvedStream> =
         withContext(Dispatchers.IO) {
+            if (!SecurityValidators.isValidYouTubeId(videoId)) return@withContext emptyList()
             val mirrorUa = "Veluna-Android/1.0"
             val pipedHosts = listOf(
                 "https://pipedapi.kavin.rocks",
@@ -649,10 +667,17 @@ class InnerTubeClient(
         quality: AudioQuality,
         mirrorUa: String
     ): List<ResolvedStream> {
+        if (!SecurityValidators.isValidYouTubeId(videoId)) return emptyList()
+        val requestUrl = host.toHttpUrlOrNull()
+            ?.newBuilder()
+            ?.addPathSegment("streams")
+            ?.addPathSegment(videoId)
+            ?.build()
+            ?: return emptyList()
         val mirrors = mutableListOf<ResolvedStream>()
         runCatching {
             val req = Request.Builder()
-                .url("$host/streams/$videoId")
+                .url(requestUrl)
                 .header("User-Agent", mirrorUa)
                 .build()
             fastHttpClient.newCall(req).execute().use { resp ->
@@ -663,7 +688,9 @@ class InnerTubeClient(
                 val streams = root["audioStreams"]?.jsonArray.orEmpty()
                 val parsed = streams.mapNotNull { el ->
                     val o = el.jsonObject
-                    val u = o["url"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                    val u = o["url"]?.jsonPrimitive?.contentOrNull
+                        ?.takeIf { SecurityValidators.isSafeHttpsUrl(it, MAX_STREAM_URL_LENGTH) }
+                        ?: return@mapNotNull null
                     val mime = o["mimeType"]?.jsonPrimitive?.contentOrNull ?: "audio/mp4"
                     val bps = o["bitrate"]?.jsonPrimitive?.intOrNull ?: 128000
                     Triple(u, mime, bps)
@@ -683,6 +710,7 @@ class InnerTubeClient(
                     )
                 }
                 val hls = root["hls"]?.jsonPrimitive?.contentOrNull
+                    ?.takeIf { SecurityValidators.isSafeHttpsUrl(it, MAX_STREAM_URL_LENGTH) }
                 if (!hls.isNullOrBlank()) {
                     mirrors.add(
                         ResolvedStream(
@@ -707,10 +735,17 @@ class InnerTubeClient(
         quality: AudioQuality,
         mirrorUa: String
     ): List<ResolvedStream> {
+        if (!SecurityValidators.isValidYouTubeId(videoId)) return emptyList()
+        val requestUrl = host.toHttpUrlOrNull()
+            ?.newBuilder()
+            ?.addPathSegments("api/v1/videos")
+            ?.addPathSegment(videoId)
+            ?.build()
+            ?: return emptyList()
         val mirrors = mutableListOf<ResolvedStream>()
         runCatching {
             val req = Request.Builder()
-                .url("$host/api/v1/videos/$videoId")
+                .url(requestUrl)
                 .header("User-Agent", mirrorUa)
                 .build()
             fastHttpClient.newCall(req).execute().use { resp ->
@@ -721,7 +756,9 @@ class InnerTubeClient(
                 val adaptive = root["adaptiveFormats"]?.jsonArray.orEmpty()
                 val parsed = adaptive.mapNotNull { el ->
                     val o = el.jsonObject
-                    val u = o["url"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                    val u = o["url"]?.jsonPrimitive?.contentOrNull
+                        ?.takeIf { SecurityValidators.isSafeHttpsUrl(it, MAX_STREAM_URL_LENGTH) }
+                        ?: return@mapNotNull null
                     val type = o["type"]?.jsonPrimitive?.contentOrNull.orEmpty()
                     if (!type.startsWith("audio/")) return@mapNotNull null
                     val bps = o["bitrate"]?.jsonPrimitive?.contentOrNull?.toIntOrNull()
@@ -767,6 +804,7 @@ class InnerTubeClient(
         private const val MAX_VISITOR_RESPONSE_BYTES = 1024L * 1024L
         private const val MAX_INNERTUBE_RESPONSE_BYTES = 24L * 1024L * 1024L
         private const val MAX_MIRROR_RESPONSE_BYTES = 8L * 1024L * 1024L
+        private const val MAX_STREAM_URL_LENGTH = 8192
 
         private const val STREAM_CACHE_TTL_MS = 20L * 60L * 1000L
 

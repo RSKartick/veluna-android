@@ -128,11 +128,24 @@ class BackupAndCsvTest {
     @Test
     fun csvExport_makesFormulaLikeMetadataInert() {
         val csv = VelunaRepository.formatPlaylistAsCsv(
-            listOf(SongItem(videoId = "abc123", title = "=HYPERLINK(\"https://example.com\")", artists = "  +SUM(1,1)"))
+            listOf(
+                SongItem(
+                    videoId = "abc123",
+                    title = "=HYPERLINK(\"https://example.com\")",
+                    artists = "  +SUM(1,1)"
+                ),
+                SongItem(
+                    videoId = "def456",
+                    title = "\t=CMD()",
+                    artists = "\r@SUM(1)"
+                )
+            )
         )
 
         assertThat(csv).contains("'=HYPERLINK")
         assertThat(csv).contains("'  +SUM")
+        assertThat(csv).contains("'\t=CMD()")
+        assertThat(csv).contains("'\r@SUM(1)")
     }
 
     @Test
@@ -172,14 +185,16 @@ class BackupAndCsvTest {
             VelunaUserPrefs(
                 cornerRadiusDp = 999,
                 playbackSpeed = 9.0f,
+                customAccentHex = "not-a-hex;drop",
                 lastFmApiKey = "leaked_in_hand_edited_file"
             )
         )
         assertThat(clamped.cornerRadiusDp).isEqualTo(24)
         assertThat(clamped.playbackSpeed).isEqualTo(2.0f)
+        assertThat(clamped.customAccentHex).isNull()
         assertThat(clamped.lastFmApiKey).isEmpty()
 
-        // v1 backup still imports cleanly
+        // v1 backup still imports cleanly and strips unsafe file:// URLs
         val v1Json = """
             {
               "version": 1,
@@ -193,12 +208,12 @@ class BackupAndCsvTest {
                   "title": "V1 Imported",
                   "description": "From v1",
                   "tracks": [
-                    { "videoId": "v1_trk", "title": "Old Gold", "artists": "Classic" }
+                    { "videoId": "v1_trk", "title": "Old Gold", "artists": "Classic", "thumbnail": "file:///data/local/tmp/leak.png" }
                   ]
                 }
               ],
               "likedSongs": [
-                { "videoId": "v1_like", "title": "V1 Like", "artists": "Artist" }
+                { "videoId": "v1_like", "title": "V1 Like", "artists": "Artist", "thumbnail": "http://insecure.example/cover.png" }
               ],
               "blockedArtists": ["Spam Artist"]
             }
@@ -210,6 +225,8 @@ class BackupAndCsvTest {
         val restoredPrefs = prefsRepo.prefsFlow.first()
         assertThat(restoredPrefs.cornerRadiusDp).isEqualTo(4)
         assertThat(restoredPrefs.playbackSpeed).isEqualTo(0.5f)
+        val likedAfterRestore = repo.likedSongsFlow.first()
+        assertThat(likedAfterRestore.find { it.videoId == "v1_like" }?.thumbnail).isNull()
     }
 
     @Test
