@@ -27,7 +27,6 @@ keystore.properties
 *.bak
 *.orig
 *.part
-public/assets/aistudio/
 
 # Node test tooling
 node_modules/

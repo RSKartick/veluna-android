@@ -1,10 +1,7 @@
 {
-  "firestore": [
-    {
-      "database": "ai-studio-android-velunaan-764f20a5-2f85-4f22-8d07-a258e3d52516",
-      "rules": "firestore.rules"
-    }
-  ],
+  "firestore": {
+    "rules": "firestore.rules"
+  },
   "emulators": {
     "firestore": {
       "host": "127.0.0.1",

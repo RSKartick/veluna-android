@@ -6,7 +6,7 @@ Native Android music streaming and offline library app built with Kotlin, Jetpac
 
 ## Download & Install (Android 8.0+ / API 26+)
 
-Signed, R8-minified release builds are published on **GitHub Releases** from `v*` version tags:
+Signed, R8-minified release builds (`com.veluna.music`) are published on **GitHub Releases** from `v*` version tags:
 
 - **[Browse Releases](../../releases)** and download **`veluna-android.apk`** from the tagged release assets.
 
@@ -19,8 +19,6 @@ apksigner verify --print-certs veluna-android.apk
 ```
 
 Compare the printed `Signer #1 certificate SHA-256 digest` against the release certificate SHA-256 published in the corresponding GitHub Release / `RELEASE_CERT_SHA256` repository variable. See [`RELEASE.md`](RELEASE.md) for full verification and signing details.
-
-> **Important Upgrade Notice (Package ID `com.aistudio.veluna.mxkrtq`)**: If you previously installed an older pre-release APK signed with the public debug keystore, Android still allows updates signed with that old key under the same package ID. Before upgrading to a signed release APK, **export a Backup v2 JSON in Settings, uninstall the older APK completely, and install the new release APK cleanly**.
 
 ## Features
 
@@ -89,19 +87,14 @@ Veluna communicates with the following external services depending on features y
 - **Android SDK** (`compileSdk 36`, `minSdk 26`, `targetSdk 36`)
 - **Node.js 20+** and **Firebase CLI** (for Firestore security rules emulator tests)
 - A Firebase project config at `app/google-services.json` (gitignored):
-  1. Create a Firebase project and register Android app `com.aistudio.veluna.mxkrtq` with your debug/release SHA-1 & SHA-256 certificate fingerprints.
+  1. Create a Firebase project and register Android app `com.veluna.music` with your release/debug SHA-1 & SHA-256 certificate fingerprints.
   2. Enable **Authentication → Google** and **Cloud Firestore**.
   3. Download `google-services.json` into `app/google-services.json`.
-
-> **Note on `metadata.json`**: Keep the root `metadata.json` file intact—it is required by the AI Studio Build platform to identify and host the project.
 
 ### Build Commands
 
 ```bash
-# Debug APK (uses local gitignored debug.keystore if present)
-gradle :app:assembleDebug
-
-# Release APK (requires RELEASE_KEYSTORE_* environment variables; R8 minified)
+# Signed Release APK (requires RELEASE_KEYSTORE_* environment variables; R8 minified, non-debuggable)
 gradle :app:assembleRelease
 
 # Android Lint (HardcodedText is enforced as an error)

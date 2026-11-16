@@ -13,7 +13,7 @@ android {
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.aistudio.veluna.mxkrtq"
+        applicationId = "com.veluna.music"
         minSdk = 26
         targetSdk = 36
         versionCode = (project.findProperty("velunaVersionCode") as? String)?.toIntOrNull() ?: 1
@@ -43,6 +43,7 @@ android {
 
     buildTypes {
         release {
+            isDebuggable = false
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(

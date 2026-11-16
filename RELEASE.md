@@ -10,14 +10,14 @@ The workflow in [`.github/workflows/release-apk.yml`](.github/workflows/release-
    - Installs Node dependencies (`npm ci`).
    - Starts local Firebase Firestore and Auth emulators and runs:
      - `node --test firestore.test.js`
-     - `gradle :app:testDebugUnitTest --stacktrace` (includes Firestore rules tests, merge engine, scrobbling, Backup v2 & CSV export, `SecretVault`, preferences coverage, and Room 1→2 migration tests).
+     - `gradle :app:testDebugUnitTest :app:lintDebug :app:compileReleaseKotlin --stacktrace`
    - Fork pull requests only execute the `test` job and never receive signing or Firebase credentials.
 2. **`build-release`** *(runs only on tag pushes matching `v*` after `test` passes)*:
    - Fails fast if any required secret or variable is empty.
    - Materializes the release keystore and `app/google-services.json` exclusively in the runner workspace/temp directory (never committed to git).
-   - Runs `gradle :app:assembleRelease` (`isMinifyEnabled = true`, `isShrinkResources = true`) with `velunaVersionCode = 100 + GITHUB_RUN_NUMBER` and `velunaVersionName = <tag without leading 'v'>`.
-   - Verifies the resulting APK certificate SHA-256 fingerprint using `apksigner verify --print-certs` against `RELEASE_CERT_SHA256` (failing the build on mismatch).
-   - Publishes an immutable GitHub Release for that tag with `veluna-android.apk`.
+   - Runs `gradle :app:assembleRelease` (`isDebuggable = false`, `isMinifyEnabled = true`, `isShrinkResources = true`) with `velunaVersionCode = 100 + GITHUB_RUN_NUMBER` and `velunaVersionName = <tag without leading 'v'>`.
+   - Verifies with `aapt2` that the APK is not debuggable and verifies the signing certificate SHA-256 fingerprint using `apksigner verify --print-certs` against `RELEASE_CERT_SHA256` (failing the build on mismatch).
+   - Publishes the signed GitHub Release for that tag with `veluna-android.apk`.
 
 ## 2. Required GitHub Secrets & Variables
 
@@ -70,14 +70,10 @@ If you need to generate a fresh release keystore or rotate a compromised key:
    keytool -list -v -keystore veluna-release.jks -alias veluna-release
    ```
 3. **Update Firebase & Google Cloud OAuth**:
-   - Add the new SHA-1 and SHA-256 fingerprints to your Android app (`com.aistudio.veluna.mxkrtq`) in Firebase Console and create/update the corresponding Android OAuth client in Google Cloud Console.
-   - Restrict the Firebase API key to `com.aistudio.veluna.mxkrtq` and the new release certificate fingerprint.
+   - Add the new SHA-1 and SHA-256 fingerprints to your Android app (`com.veluna.music`) in Firebase Console and create/update the corresponding Android OAuth client in Google Cloud Console.
+   - Restrict the Firebase API key in Google Cloud Console to Android app `com.veluna.music` and your release certificate SHA-1 fingerprint.
    - Download the updated `google-services.json`.
 4. **Update GitHub Secrets & Variable**:
    - Encode the new keystore (`base64 -w0 veluna-release.jks`) into `ANDROID_RELEASE_KEYSTORE_BASE64`, along with `RELEASE_KEYSTORE_PASSWORD`, `RELEASE_KEY_ALIAS`, `RELEASE_KEY_PASSWORD`, and `GOOGLE_SERVICES_JSON`.
    - Update repository variable `RELEASE_CERT_SHA256` to the new SHA-256 hex digest.
 5. **Remove old fingerprints** in Firebase / Google Cloud once legacy builds are retired, and announce the rotation in the release notes.
-
-## 6. Legacy Pre-Release Key Notice
-
-Veluna retains `applicationId = "com.aistudio.veluna.mxkrtq"` (`namespace = "com.example"`). Any prior APK installed from an earlier debug-signed build shares that package ID and could still accept updates signed by the old public debug key. Maintainers must keep an upgrade warning in release notes instructing users on older pre-release builds to **export a Backup v2 JSON, uninstall the old build, and fresh-install the signed release APK**.

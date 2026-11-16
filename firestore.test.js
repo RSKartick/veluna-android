@@ -10,7 +10,7 @@ const PAST_TS = () => new Date(Date.now() - 2000);
 const serverTimestamp = () => PAST_TS();
 
 let testEnv;
-const PROJECT_ID = process.env.GCP_PROJECT || "demo-no-project";
+const PROJECT_ID = process.env.GCP_PROJECT || "veluna-ci-test";
 const ALICE_UID = "alice_uid_123";
 const BOB_UID = "bob_uid_456";
 

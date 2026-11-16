@@ -35,15 +35,15 @@ abstract class FirestoreEmulatorTestBase {
     open fun setUpFirebase() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val resId = context.resources.getIdentifier("firestore_database_id", "string", context.packageName)
-        databaseId = if (resId != 0) context.getString(resId) else "demo-database"
+        databaseId = if (resId != 0) context.getString(resId) else "veluna-test-db"
 
         val app = if (FirebaseApp.getApps(context).isEmpty()) {
             val newApp = FirebaseApp.initializeApp(
                 context,
                 FirebaseOptions.Builder()
-                    .setApplicationId("com.aistudio.veluna.mxkrtq")
+                    .setApplicationId("com.veluna.music")
                     .setProjectId(PROJECT_ID)
-                    .setApiKey("fake-api-key-for-emulator")
+                    .setApiKey("veluna-local-emulator-key")
                     .build()
             )
             val newFirestore = FirebaseFirestore.getInstance(newApp, databaseId)
@@ -92,7 +92,7 @@ abstract class FirestoreEmulatorTestBase {
         const val EMULATOR_HOST = "127.0.0.1"
         const val FIRESTORE_PORT = 8085
         const val AUTH_PORT = 9099
-        const val PROJECT_ID = "demo-no-project"
+        const val PROJECT_ID = "veluna-ci-test"
         const val DEFAULT_PASSWORD = "password123"
         const val AUTH_TIMEOUT_MS = 5000L
     }
