@@ -13,6 +13,7 @@ import com.google.firebase.firestore.FirebaseFirestoreException
 import com.google.firebase.firestore.FieldValue
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.fail
 import org.junit.Test
