@@ -603,7 +603,7 @@ class CloudSyncCoordinator(
             !localTaste.onboardingCompleted &&
             cloudProfile.onboardingCompleted
 
-        if (shouldAdoptCloudPrefs && cloudProfile != null) {
+        if (shouldAdoptCloudPrefs) {
             VelunaThemePreset.entries.find { it.id == cloudProfile.themePreset }
                 ?.let { prefsRepo.setThemePreset(it) }
             runCatching { ThemeMode.valueOf(cloudProfile.themeMode) }.getOrNull()

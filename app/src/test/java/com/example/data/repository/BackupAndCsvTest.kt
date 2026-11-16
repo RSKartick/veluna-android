@@ -27,6 +27,10 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import java.io.File
+import java.time.LocalDate
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 import java.util.UUID
 
 @RunWith(RobolectricTestRunner::class)
@@ -246,5 +250,39 @@ class BackupAndCsvTest {
         val allStats = repo.computeStats(StatsRange.ALL)
         assertThat(allStats.totalSecs).isEqualTo(1120L)
         assertThat(allStats.totalPlays).isEqualTo(2)
+    }
+
+    @Test
+    fun computeStats_allRangeDailySeriesIsChronologicalAndEndsToday() = runBlocking {
+        val zone = ZoneId.systemDefault()
+        val dayFmt = DateTimeFormatter.ofPattern("yyyy-MM-dd", Locale.US)
+        val today = LocalDate.now(zone)
+        val sixtyDaysAgo = today.minusDays(60)
+
+        val dao = db.velunaDao()
+        dao.insertListen(
+            com.example.data.local.ListenEntity(
+                videoId = "old60",
+                playedAt = sixtyDaysAgo.atTime(12, 0).atZone(zone).toInstant().toEpochMilli(),
+                secs = 1000L
+            )
+        )
+        dao.insertListen(
+            com.example.data.local.ListenEntity(
+                videoId = "today1",
+                playedAt = today.atTime(12, 0).atZone(zone).toInstant().toEpochMilli(),
+                secs = 300L
+            )
+        )
+
+        val allStats = repo.computeStats(StatsRange.ALL)
+        val keys = allStats.dailySeries.map { it.dateKey }
+
+        assertThat(keys).hasSize(61)
+        assertThat(keys.zipWithNext().all { (a, b) -> a < b }).isTrue()
+        assertThat(keys.first()).isEqualTo(sixtyDaysAgo.format(dayFmt))
+        assertThat(keys.last()).isEqualTo(today.format(dayFmt))
+        assertThat(allStats.dailySeries.first().secs).isEqualTo(1000L)
+        assertThat(allStats.dailySeries.last().secs).isEqualTo(300L)
     }
 }

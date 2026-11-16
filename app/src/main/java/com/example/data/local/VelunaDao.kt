@@ -304,6 +304,9 @@ interface VelunaDao {
     @Query("DELETE FROM lyrics_cache WHERE pinned = 0")
     suspend fun clearUnpinnedLyricsCache()
 
+    @Query("DELETE FROM lyrics_cache WHERE videoId = :videoId")
+    suspend fun deleteLyricsCache(videoId: String)
+
     // --- Sync Tombstones ---
     @Query("SELECT * FROM sync_tombstones WHERE entityType = :entityType")
     suspend fun getTombstonesByType(entityType: String): List<SyncTombstoneEntity>

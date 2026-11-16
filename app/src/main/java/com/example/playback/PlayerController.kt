@@ -112,7 +112,7 @@ class PlayerController(
 
     private var currentPrefs = VelunaUserPrefs()
     private var mediaController: MediaController? = null
-    private val controllerReady = CompletableDeferred<MediaController>()
+    @Volatile private var controllerReady = CompletableDeferred<MediaController>()
     private var currentListenId: Long? = null
     private var recordedListenVideoId: String? = null
     private var currentTrackStartedAtSecs: Long = 0L
@@ -127,6 +127,8 @@ class PlayerController(
 
     private var tickerJob: Job? = null
     @Volatile private var positionUiActive = false
+    @Volatile private var pendingSeekTargetMs: Long? = null
+    @Volatile private var pendingSeekUntilNanos: Long = 0L
     private var sleepJob: Job? = null
     private var resolveJob: Job? = null
     private var prefetchJob: Job? = null
@@ -164,18 +166,42 @@ class PlayerController(
                 }
             }
         }
+        VelunaPlaybackService.onSkipNextRequested = { scope.launch { skipNext() } }
+        VelunaPlaybackService.onSkipPreviousRequested = { scope.launch { skipPrevious() } }
+        VelunaPlaybackService.canSkipNextProvider = { canSkipNextNow() }
+        VelunaPlaybackService.canSkipPreviousProvider = { _state.value.queue.isNotEmpty() }
         connectService()
     }
 
+    private fun canSkipNextNow(): Boolean {
+        val cur = _state.value
+        if (cur.queue.isEmpty()) return false
+        return (cur.shuffle && cur.queue.size > 1) ||
+            (cur.currentIndex + 1 in cur.queue.indices) ||
+            (cur.repeatMode == RepeatMode.ALL) ||
+            (currentPrefs.autoplay && cur.nowPlaying != null && !cur.nowPlaying.isLocal)
+    }
+
     private fun connectService() {
+        if (controllerReady.isCompleted && mediaController == null) {
+            controllerReady = CompletableDeferred()
+        }
+        val deferred = controllerReady
         val token = SessionToken(context, ComponentName(context, VelunaPlaybackService::class.java))
         val future = MediaController.Builder(context, token).buildAsync()
         future.addListener(
             {
-                val controller = runCatching { future.get() }.getOrNull() ?: return@addListener
+                val controllerResult = runCatching { future.get() }
+                val controller = controllerResult.getOrNull()
+                if (controller == null) {
+                    deferred.completeExceptionally(
+                        controllerResult.exceptionOrNull() ?: IllegalStateException("MediaController unavailable")
+                    )
+                    return@addListener
+                }
                 mediaController = controller
-                if (!controllerReady.isCompleted) {
-                    controllerReady.complete(controller)
+                if (!deferred.isCompleted) {
+                    deferred.complete(controller)
                 }
                 controller.playbackParameters = PlaybackParameters(currentPrefs.playbackSpeed)
                 controller.addListener(playerListener)
@@ -270,7 +296,20 @@ class PlayerController(
                         val stepMs = if (positionUiActive) 250L else 500L
                         val ctrl = mediaController
                         if (ctrl != null) {
-                            val pos = ctrl.currentPosition.coerceAtLeast(0L)
+                            val rawPos = ctrl.currentPosition.coerceAtLeast(0L)
+                            val pendingTarget = pendingSeekTargetMs
+                            val pos = if (pendingTarget != null) {
+                                if (System.nanoTime() < pendingSeekUntilNanos &&
+                                    kotlin.math.abs(rawPos - pendingTarget) > 1500L
+                                ) {
+                                    pendingTarget
+                                } else {
+                                    pendingSeekTargetMs = null
+                                    rawPos
+                                }
+                            } else {
+                                rawPos
+                            }
                             val dur = ctrl.duration.takeIf { it > 0 } ?: _positionState.value.durationMs
                             val curPosState = _positionState.value
                             if (curPosState.positionMs != pos || curPosState.durationMs != dur) {
@@ -342,7 +381,27 @@ class PlayerController(
         sourceName: String? = null,
         openPlayer: Boolean = true
     ) {
+        playQueueInternal(
+            items = items,
+            startIndex = startIndex,
+            sourceName = sourceName,
+            openPlayer = openPlayer,
+            triggerAutoplay = true,
+            cancelRadio = true
+        )
+    }
+
+    private fun playQueueInternal(
+        items: List<SongItem>,
+        startIndex: Int,
+        sourceName: String?,
+        openPlayer: Boolean,
+        triggerAutoplay: Boolean,
+        cancelRadio: Boolean
+    ) {
         if (items.isEmpty()) return
+        if (cancelRadio) radioJob?.cancel()
+        autoplayJob?.cancel()
         val safeIdx = startIndex.coerceIn(0, items.lastIndex)
         _state.update {
             it.copy(
@@ -354,7 +413,7 @@ class PlayerController(
             )
         }
         playIndex(safeIdx)
-        if (currentPrefs.autoplay && items.size == 1 && !items[0].isLocal) {
+        if (triggerAutoplay && currentPrefs.autoplay && items.size == 1 && !items[0].isLocal) {
             fetchAutoplayContinuation(items[0])
         }
     }
@@ -399,8 +458,16 @@ class PlayerController(
             playIndex(newIdx)
         } else if (updated.isEmpty()) {
             finalizeCurrentTrackOutcome()
+            resolveJob?.cancel()
+            prefetchJob?.cancel()
+            autoplayJob?.cancel()
+            radioJob?.cancel()
+            currentListenId = null
+            recordedListenVideoId = null
+            currentCandidateSong = null
+            pendingSeekTargetMs = null
             mediaController?.stop()
-            _state.update { it.copy(nowPlaying = null, isPlaying = false) }
+            _state.update { it.copy(nowPlaying = null, isPlaying = false, isBuffering = false) }
             _positionState.value = PlaybackPositionState()
         }
     }
@@ -411,8 +478,16 @@ class PlayerController(
         if (active != null) {
             _state.update { it.copy(queue = listOf(active), currentIndex = 0) }
         } else {
+            resolveJob?.cancel()
+            prefetchJob?.cancel()
+            autoplayJob?.cancel()
+            radioJob?.cancel()
+            currentListenId = null
+            recordedListenVideoId = null
+            currentCandidateSong = null
+            pendingSeekTargetMs = null
             mediaController?.stop()
-            _state.update { it.copy(queue = emptyList(), currentIndex = -1, nowPlaying = null) }
+            _state.update { it.copy(queue = emptyList(), currentIndex = -1, nowPlaying = null, isBuffering = false) }
             _positionState.value = PlaybackPositionState()
         }
     }
@@ -429,6 +504,8 @@ class PlayerController(
 
     fun seekTo(positionMs: Long) {
         val clamped = positionMs.coerceAtLeast(0L)
+        pendingSeekTargetMs = clamped
+        pendingSeekUntilNanos = System.nanoTime() + 750_000_000L
         mediaController?.seekTo(clamped)
         _positionState.update { it.copy(positionMs = clamped) }
     }
@@ -470,10 +547,16 @@ class PlayerController(
         val cur = _state.value
         when {
             cur.repeatMode == RepeatMode.ONE -> {
+                finalizeCurrentTrackOutcome()
+                currentListenId = null
+                recordedListenVideoId = null
                 seekTo(0L)
                 mediaController?.play()
+                cur.nowPlaying?.let { repeatedSong ->
+                    scope.launch { recordListenStart(repeatedSong) }
+                }
             }
-            cur.currentIndex + 1 in cur.queue.indices -> {
+            (cur.shuffle && cur.queue.size > 1) || (cur.currentIndex + 1 in cur.queue.indices) -> {
                 skipNext()
             }
             cur.repeatMode == RepeatMode.ALL && cur.queue.isNotEmpty() -> {
@@ -551,13 +634,21 @@ class PlayerController(
 
     fun startRadio(song: SongItem) {
         if (song.isLocal) return
+        autoplayJob?.cancel()
         radioJob?.cancel()
         val cur = _state.value
         val alreadyPlayingThisSong = cur.nowPlaying?.videoId == song.videoId && cur.currentIndex in cur.queue.indices
 
         if (!alreadyPlayingThisSong) {
             // Start playing the seed track immediately without blocking on the radio mix network call
-            playQueue(listOf(song), 0, "${song.title} Radio")
+            playQueueInternal(
+                items = listOf(song),
+                startIndex = 0,
+                sourceName = "${song.title} Radio",
+                openPlayer = true,
+                triggerAutoplay = false,
+                cancelRadio = false
+            )
         } else {
             _state.update { it.copy(sourceName = "${song.title} Radio") }
         }
@@ -587,6 +678,8 @@ class PlayerController(
                     .take(20)
                     .map { it.copy(autoplay = true) }
             }
+
+            if (_state.value.nowPlaying?.videoId != song.videoId) return@launch
 
             if (finalTracks.isNotEmpty()) {
                 _state.update { st ->
@@ -621,6 +714,7 @@ class PlayerController(
         }
         currentListenId = null
         recordedListenVideoId = null
+        pendingSeekTargetMs = null
         resolveJob?.cancel()
         prefetchJob?.cancel()
 
@@ -755,7 +849,24 @@ class PlayerController(
         loudnessDb: Double?,
         mimeTypeOverride: String?
     ) {
-        val ctrl = mediaController ?: withTimeoutOrNull(5000L) { controllerReady.await() } ?: return
+        val ctrl = mediaController ?: run {
+            if (controllerReady.isCompleted) {
+                connectService()
+            }
+            withTimeoutOrNull(5000L) {
+                runCatching { controllerReady.await() }.getOrNull()
+            }
+        }
+        if (ctrl == null) {
+            _state.update {
+                it.copy(
+                    isBuffering = false,
+                    isPlaying = false,
+                    errorMessage = "Audio playback service unavailable. Please try again."
+                )
+            }
+            return
+        }
         recordListenStart(song)
         val metadata = MediaMetadata.Builder()
             .setTitle(song.title)

@@ -21,6 +21,7 @@ import com.example.model.StatsSummary
 import com.example.model.ThemeMode
 import com.example.model.VelunaThemePreset
 import com.example.util.SecurityValidators
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -101,6 +102,8 @@ class LibraryStatsViewModel(
     val lastScrobbleError: StateFlow<String?> = prefsRepo.lastScrobbleErrorFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
 
+    private var statsJob: Job? = null
+
     init {
         refreshStats(StatsRange.MONTH)
     }
@@ -115,7 +118,8 @@ class LibraryStatsViewModel(
 
     fun refreshStats(range: StatsRange = _statsState.value.range) {
         val showSpinner = _statsState.value.isLoading || _statsState.value.summary.range != range
-        viewModelScope.launch {
+        statsJob?.cancel()
+        statsJob = viewModelScope.launch {
             if (showSpinner) {
                 _statsState.update { it.copy(range = range, isLoading = true) }
             } else {

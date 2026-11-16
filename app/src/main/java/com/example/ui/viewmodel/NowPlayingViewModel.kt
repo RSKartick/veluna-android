@@ -14,6 +14,7 @@ import com.example.model.LyricsData
 import com.example.model.SongItem
 import com.example.playback.PlayerController
 import com.example.util.SecurityValidators
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -55,6 +56,11 @@ class NowPlayingViewModel(
     private val _commentsState = MutableStateFlow(CommentsUiState())
     val commentsState: StateFlow<CommentsUiState> = _commentsState.asStateFlow()
 
+    private var lyricsJob: Job? = null
+    private var commentsJob: Job? = null
+    private var pendingEqBands: MutableList<Float>? = null
+    private var eqEditRevision: Long = 0L
+
     init {
         viewModelScope.launch {
             playerController.state
@@ -62,9 +68,12 @@ class NowPlayingViewModel(
                 .distinctUntilChanged { a, b -> a?.videoId == b?.videoId }
                 .collect { song ->
                     if (song == null) {
+                        lyricsJob?.cancel()
+                        commentsJob?.cancel()
                         _lyricsState.value = LyricsUiState()
                         _commentsState.value = CommentsUiState()
                     } else {
+                        commentsJob?.cancel()
                         loadLyrics(song, forceProviderId = null)
                         _commentsState.value = CommentsUiState(videoId = song.videoId)
                     }
@@ -94,7 +103,8 @@ class NowPlayingViewModel(
     }
 
     fun loadLyrics(song: SongItem, forceProviderId: String? = null) {
-        viewModelScope.launch {
+        lyricsJob?.cancel()
+        lyricsJob = viewModelScope.launch {
             _lyricsState.value = LyricsUiState(isLoading = true, videoId = song.videoId)
             val durMs = playerController.positionState.value.durationMs.takeIf { it > 0L }
                 ?: (song.durationSeconds * 1000L)
@@ -104,7 +114,9 @@ class NowPlayingViewModel(
                 forceProviderId = forceProviderId,
                 trackDurationMs = durMs
             )
-            _lyricsState.value = LyricsUiState(isLoading = false, data = result, videoId = song.videoId)
+            if (_lyricsState.value.videoId == song.videoId) {
+                _lyricsState.value = LyricsUiState(isLoading = false, data = result, videoId = song.videoId)
+            }
         }
     }
 
@@ -116,19 +128,24 @@ class NowPlayingViewModel(
         viewModelScope.launch {
             val updated = lyricsRepo.updateOffset(vid, newOffset)
             if (updated != null) {
-                _lyricsState.update { it.copy(data = updated) }
+                _lyricsState.update { st ->
+                    if (st.videoId == vid) st.copy(data = updated) else st
+                }
             }
         }
     }
 
     fun resetPinnedLyrics() {
         val song = playerController.state.value.nowPlaying ?: return
-        viewModelScope.launch {
-            _lyricsState.update { it.copy(isLoading = true) }
+        lyricsJob?.cancel()
+        lyricsJob = viewModelScope.launch {
+            _lyricsState.value = LyricsUiState(isLoading = true, data = _lyricsState.value.data, videoId = song.videoId)
             val durMs = playerController.positionState.value.durationMs.takeIf { it > 0L }
                 ?: (song.durationSeconds * 1000L)
             val result = lyricsRepo.clearPinnedSource(song, prefs.value.lyricsProviderOrder, durMs)
-            _lyricsState.value = LyricsUiState(isLoading = false, data = result, videoId = song.videoId)
+            if (_lyricsState.value.videoId == song.videoId) {
+                _lyricsState.value = LyricsUiState(isLoading = false, data = result, videoId = song.videoId)
+            }
         }
     }
 
@@ -138,6 +155,7 @@ class NowPlayingViewModel(
 
     fun loadCommentsIfNeeded(song: SongItem) {
         if (song.isLocal) {
+            commentsJob?.cancel()
             _commentsState.value = CommentsUiState(
                 isLoading = false,
                 page = CommentsPage(disabled = true),
@@ -146,40 +164,62 @@ class NowPlayingViewModel(
             return
         }
         val cur = _commentsState.value
-        if (cur.videoId == song.videoId && cur.page != null) return
-        viewModelScope.launch {
+        if (cur.videoId == song.videoId && (cur.page != null || cur.isLoading)) return
+        commentsJob?.cancel()
+        commentsJob = viewModelScope.launch {
             _commentsState.value = CommentsUiState(isLoading = true, videoId = song.videoId)
             innerTube.getComments(song.videoId).onSuccess { page ->
-                _commentsState.value = CommentsUiState(isLoading = false, page = page, videoId = song.videoId)
+                if (_commentsState.value.videoId == song.videoId) {
+                    _commentsState.value = CommentsUiState(isLoading = false, page = page, videoId = song.videoId)
+                }
             }.onFailure { err ->
-                _commentsState.value = CommentsUiState(
-                    isLoading = false,
-                    error = SecurityValidators.safeUserErrorMessage(err, "Failed to load comments"),
-                    videoId = song.videoId
-                )
+                if (_commentsState.value.videoId == song.videoId) {
+                    _commentsState.value = CommentsUiState(
+                        isLoading = false,
+                        error = SecurityValidators.safeUserErrorMessage(err, "Failed to load comments"),
+                        videoId = song.videoId
+                    )
+                }
             }
         }
     }
 
     fun setEqEnabled(enabled: Boolean) {
+        val bands = pendingEqBands?.toList() ?: prefs.value.eqBandsDb
+        val preset = if (pendingEqBands != null) "Custom" else prefs.value.eqPresetName
+        val rev = ++eqEditRevision
         viewModelScope.launch {
-            prefsRepo.setEqualizer(enabled, prefs.value.eqPresetName, prefs.value.eqBandsDb)
+            prefsRepo.setEqualizer(enabled, preset, bands)
+            if (eqEditRevision == rev) {
+                pendingEqBands = null
+            }
         }
     }
 
     fun applyEqPreset(name: String) {
         val bands = EqualizerPresets.presets[name] ?: return
+        pendingEqBands = bands.toMutableList()
+        val rev = ++eqEditRevision
         viewModelScope.launch {
             prefsRepo.setEqualizer(true, name, bands)
+            if (eqEditRevision == rev) {
+                pendingEqBands = null
+            }
         }
     }
 
     fun setEqBand(index: Int, db: Float) {
-        val current = prefs.value.eqBandsDb.toMutableList()
+        val current = pendingEqBands ?: prefs.value.eqBandsDb.toMutableList()
         if (index !in current.indices) return
         current[index] = db.coerceIn(-12f, 12f)
+        pendingEqBands = current
+        val snapshot = current.toList()
+        val rev = ++eqEditRevision
         viewModelScope.launch {
-            prefsRepo.setEqualizer(true, "Custom", current)
+            prefsRepo.setEqualizer(true, "Custom", snapshot)
+            if (eqEditRevision == rev) {
+                pendingEqBands = null
+            }
         }
     }
 

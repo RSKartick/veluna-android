@@ -14,6 +14,7 @@ import com.example.model.BrowseKind
 import com.example.model.PlaylistPage
 import com.example.model.SongItem
 import com.example.util.SecurityValidators
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -71,26 +72,42 @@ class DetailViewModel(
     private var currentArtistId: String? = null
     private var currentPlaylistId: String? = null
 
+    private var albumJob: Job? = null
+    private var artistJob: Job? = null
+    private var playlistJob: Job? = null
+
+    private val albumSavedFlows = mutableMapOf<String, StateFlow<Boolean>>()
+    private val artistFollowedFlows = mutableMapOf<String, StateFlow<Boolean>>()
+
     fun observeIsAlbumSaved(albumId: String): StateFlow<Boolean> =
-        repository.observeIsAlbumSaved(albumId)
-            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+        albumSavedFlows.getOrPut(albumId) {
+            repository.observeIsAlbumSaved(albumId)
+                .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+        }
 
     fun observeIsArtistFollowed(channelId: String): StateFlow<Boolean> =
-        repository.observeIsArtistFollowed(channelId)
-            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+        artistFollowedFlows.getOrPut(channelId) {
+            repository.observeIsArtistFollowed(channelId)
+                .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+        }
 
     fun loadAlbum(albumId: String, force: Boolean = false) {
         if (!force && currentAlbumId == albumId && _albumState.value.page != null) return
         currentAlbumId = albumId
-        viewModelScope.launch {
+        albumJob?.cancel()
+        albumJob = viewModelScope.launch {
             _albumState.value = AlbumDetailState(isLoading = true)
             innerTube.getAlbum(albumId).onSuccess { page ->
-                _albumState.value = AlbumDetailState(isLoading = false, page = page)
+                if (currentAlbumId == albumId) {
+                    _albumState.value = AlbumDetailState(isLoading = false, page = page)
+                }
             }.onFailure { err ->
-                _albumState.value = AlbumDetailState(
-                    isLoading = false,
-                    error = SecurityValidators.safeUserErrorMessage(err, "Failed to load album")
-                )
+                if (currentAlbumId == albumId) {
+                    _albumState.value = AlbumDetailState(
+                        isLoading = false,
+                        error = SecurityValidators.safeUserErrorMessage(err, "Failed to load album")
+                    )
+                }
             }
         }
     }
@@ -105,15 +122,20 @@ class DetailViewModel(
     fun loadArtist(channelId: String, force: Boolean = false) {
         if (!force && currentArtistId == channelId && _artistState.value.page != null) return
         currentArtistId = channelId
-        viewModelScope.launch {
+        artistJob?.cancel()
+        artistJob = viewModelScope.launch {
             _artistState.value = ArtistDetailState(isLoading = true)
             innerTube.getArtist(channelId).onSuccess { page ->
-                _artistState.value = ArtistDetailState(isLoading = false, page = page)
+                if (currentArtistId == channelId) {
+                    _artistState.value = ArtistDetailState(isLoading = false, page = page)
+                }
             }.onFailure { err ->
-                _artistState.value = ArtistDetailState(
-                    isLoading = false,
-                    error = SecurityValidators.safeUserErrorMessage(err, "Failed to load artist")
-                )
+                if (currentArtistId == channelId) {
+                    _artistState.value = ArtistDetailState(
+                        isLoading = false,
+                        error = SecurityValidators.safeUserErrorMessage(err, "Failed to load artist")
+                    )
+                }
             }
         }
     }
@@ -128,18 +150,28 @@ class DetailViewModel(
     }
 
     fun loadPlaylist(playlistId: String, force: Boolean = false) {
-        if (!force && currentPlaylistId == playlistId && _playlistState.value.page != null) return
+        val switchingPlaylist = currentPlaylistId != playlistId
+        if (!force && !switchingPlaylist && _playlistState.value.page != null) return
         currentPlaylistId = playlistId
-        viewModelScope.launch {
-            _playlistState.update { it.copy(isLoading = true, error = null) }
+        playlistJob?.cancel()
+        playlistJob = viewModelScope.launch {
+            if (switchingPlaylist) {
+                _playlistState.value = PlaylistDetailState(isLoading = true)
+            } else {
+                _playlistState.update { it.copy(isLoading = true, error = null) }
+            }
             repository.loadPlaylistPage(playlistId).onSuccess { page ->
-                _playlistState.update { it.copy(isLoading = false, page = page, error = null) }
+                if (currentPlaylistId == playlistId) {
+                    _playlistState.update { it.copy(isLoading = false, page = page, error = null) }
+                }
             }.onFailure { err ->
-                _playlistState.update {
-                    it.copy(
-                        isLoading = false,
-                        error = SecurityValidators.safeUserErrorMessage(err, "Failed to load playlist")
-                    )
+                if (currentPlaylistId == playlistId) {
+                    _playlistState.update {
+                        it.copy(
+                            isLoading = false,
+                            error = SecurityValidators.safeUserErrorMessage(err, "Failed to load playlist")
+                        )
+                    }
                 }
             }
         }

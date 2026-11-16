@@ -42,9 +42,15 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.listSaver
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -65,6 +71,8 @@ import com.example.ui.theme.velunaFilterChipColors
 import com.example.ui.theme.velunaInputChipColors
 import com.example.ui.theme.velunaOutlinedFieldColors
 import com.example.ui.viewmodel.OnboardingSearchUiState
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -81,14 +89,45 @@ fun TasteOnboardingScreen(
         BackHandler { onSkip() }
     }
 
-    val selectedGenres = remember(initialProfile) {
-        mutableStateListOf<String>().apply { initialProfile?.selectedGenres?.let { addAll(it) } }
+    val seedListSaver = remember {
+        listSaver<SnapshotStateList<TasteSeed>, String>(
+            save = { list -> list.map { seed -> Json.encodeToString(seed) } },
+            restore = { saved ->
+                mutableStateListOf<TasteSeed>().apply {
+                    saved.mapNotNull { raw -> runCatching { Json.decodeFromString<TasteSeed>(raw) }.getOrNull() }
+                        .let { addAll(it) }
+                }
+            }
+        )
     }
-    val selectedArtists = remember(initialProfile) {
-        mutableStateListOf<TasteSeed>().apply { initialProfile?.seedArtists?.let { addAll(it) } }
+    val stringListSaver = remember {
+        listSaver<SnapshotStateList<String>, String>(
+            save = { it.toList() },
+            restore = { saved -> mutableStateListOf<String>().apply { addAll(saved) } }
+        )
     }
-    val selectedSongs = remember(initialProfile) {
-        mutableStateListOf<TasteSeed>().apply { initialProfile?.seedSongs?.let { addAll(it) } }
+
+    val selectedGenres = rememberSaveable(saver = stringListSaver) {
+        mutableStateListOf<String>()
+    }
+    val selectedArtists = rememberSaveable(saver = seedListSaver) {
+        mutableStateListOf<TasteSeed>()
+    }
+    val selectedSongs = rememberSaveable(saver = seedListSaver) {
+        mutableStateListOf<TasteSeed>()
+    }
+    var hasHydrated by rememberSaveable { mutableStateOf(false) }
+
+    LaunchedEffect(initialProfile) {
+        if (!hasHydrated && initialProfile != null) {
+            selectedGenres.clear()
+            selectedGenres.addAll(initialProfile.selectedGenres)
+            selectedArtists.clear()
+            selectedArtists.addAll(initialProfile.seedArtists)
+            selectedSongs.clear()
+            selectedSongs.addAll(initialProfile.seedSongs)
+            hasHydrated = true
+        }
     }
 
     val totalSelected = selectedGenres.size + selectedArtists.size + selectedSongs.size
@@ -192,7 +231,10 @@ fun TasteOnboardingScreen(
                                     selectedArtists.forEach { artist ->
                                         InputChip(
                                             selected = true,
-                                            onClick = { selectedArtists.removeAll { it.id == artist.id } },
+                                            onClick = {
+                                                hasHydrated = true
+                                                selectedArtists.removeAll { it.id == artist.id }
+                                            },
                                             colors = chipColors,
                                             border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary),
                                             label = { Text(artist.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
@@ -202,7 +244,10 @@ fun TasteOnboardingScreen(
                                     selectedSongs.forEach { song ->
                                         InputChip(
                                             selected = true,
-                                            onClick = { selectedSongs.removeAll { it.id == song.id } },
+                                            onClick = {
+                                                hasHydrated = true
+                                                selectedSongs.removeAll { it.id == song.id }
+                                            },
                                             colors = chipColors,
                                             border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary),
                                             label = { Text(song.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
@@ -232,6 +277,7 @@ fun TasteOnboardingScreen(
                                                 .width(96.dp)
                                                 .clip(MaterialTheme.shapes.medium)
                                                 .clickable {
+                                                    hasHydrated = true
                                                     if (picked) selectedArtists.removeAll { it.id == artist.id }
                                                     else selectedArtists.add(TasteSeed(artist.id, artist.title, artist.subtitle, artist.thumbnail))
                                                 }
@@ -294,6 +340,7 @@ fun TasteOnboardingScreen(
                                     .heightIn(min = 56.dp)
                                     .clip(MaterialTheme.shapes.medium)
                                     .clickable {
+                                        hasHydrated = true
                                         if (picked) selectedSongs.removeAll { it.id == song.id }
                                         else selectedSongs.add(TasteSeed(song.id, song.title, song.subtitle, song.thumbnail))
                                     }
@@ -357,6 +404,7 @@ fun TasteOnboardingScreen(
                                         FilterChip(
                                             selected = selected,
                                             onClick = {
+                                                hasHydrated = true
                                                 if (selected) selectedGenres.remove(genre.id) else selectedGenres.add(genre.id)
                                             },
                                             colors = filterChipColors,

@@ -7,6 +7,7 @@ import android.media.audiofx.LoudnessEnhancer
 import androidx.annotation.OptIn
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
+import androidx.media3.common.ForwardingPlayer
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultDataSource
@@ -90,7 +91,52 @@ class VelunaPlaybackService : MediaSessionService() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
-        mediaSession = MediaSession.Builder(this, player)
+        val sessionPlayer = object : ForwardingPlayer(player) {
+            override fun getAvailableCommands(): Player.Commands {
+                val builder = super.getAvailableCommands().buildUpon()
+                if (canSkipNextProvider()) {
+                    builder.add(COMMAND_SEEK_TO_NEXT)
+                    builder.add(COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
+                }
+                if (canSkipPreviousProvider()) {
+                    builder.add(COMMAND_SEEK_TO_PREVIOUS)
+                    builder.add(COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
+                }
+                return builder.build()
+            }
+
+            override fun isCommandAvailable(command: Int): Boolean = when (command) {
+                COMMAND_SEEK_TO_NEXT, COMMAND_SEEK_TO_NEXT_MEDIA_ITEM ->
+                    canSkipNextProvider() || super.isCommandAvailable(command)
+                COMMAND_SEEK_TO_PREVIOUS, COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM ->
+                    canSkipPreviousProvider() || super.isCommandAvailable(command)
+                else -> super.isCommandAvailable(command)
+            }
+
+            override fun hasNextMediaItem(): Boolean =
+                canSkipNextProvider() || super.hasNextMediaItem()
+
+            override fun hasPreviousMediaItem(): Boolean =
+                canSkipPreviousProvider() || super.hasPreviousMediaItem()
+
+            override fun seekToNext() {
+                onSkipNextRequested?.invoke() ?: super.seekToNext()
+            }
+
+            override fun seekToNextMediaItem() {
+                onSkipNextRequested?.invoke() ?: super.seekToNextMediaItem()
+            }
+
+            override fun seekToPrevious() {
+                onSkipPreviousRequested?.invoke() ?: super.seekToPrevious()
+            }
+
+            override fun seekToPreviousMediaItem() {
+                onSkipPreviousRequested?.invoke() ?: super.seekToPreviousMediaItem()
+            }
+        }
+
+        mediaSession = MediaSession.Builder(this, sessionPlayer)
             .setSessionActivity(pendingIntent)
             .build()
 
@@ -186,10 +232,22 @@ class VelunaPlaybackService : MediaSessionService() {
     companion object {
         @Volatile
         var instance: VelunaPlaybackService? = null
+        @Volatile
         var lastEqEnabled: Boolean = false
+        @Volatile
         var lastEqBands: List<Float> = List(10) { 0f }
+        @Volatile
         var lastLoudnessDb: Double? = null
+        @Volatile
         var loudnessNormEnabled: Boolean = true
+        @Volatile
+        var onSkipNextRequested: (() -> Unit)? = null
+        @Volatile
+        var onSkipPreviousRequested: (() -> Unit)? = null
+        @Volatile
+        var canSkipNextProvider: () -> Boolean = { false }
+        @Volatile
+        var canSkipPreviousProvider: () -> Boolean = { true }
 
         @Volatile
         var activeUserAgent: String =

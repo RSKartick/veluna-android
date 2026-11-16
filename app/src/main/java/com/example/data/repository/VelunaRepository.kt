@@ -63,6 +63,7 @@ import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import java.time.temporal.ChronoUnit
 import java.util.Locale
 
 @Serializable
@@ -909,28 +910,31 @@ class VelunaRepository(
         val dayFmt = DateTimeFormatter.ofPattern("yyyy-MM-dd", Locale.US)
         val labelFmt = DateTimeFormatter.ofPattern("MMM d", Locale.US)
 
-        val dailyMap = linkedMapOf<String, Long>()
-        val targetDays = daysCount ?: 30
         val today = LocalDate.now(zone)
-        for (i in (targetDays - 1) downTo 0) {
-            val d = today.minusDays(i.toLong())
-            dailyMap[d.format(dayFmt)] = 0L
-        }
-
+        val secsByDay = mutableMapOf<String, Long>()
         val heatmap = LongArray(7 * 24)
         inWindow.forEach { l ->
             val zdt = Instant.ofEpochMilli(l.playedAt).atZone(zone)
             val key = zdt.toLocalDate().format(dayFmt)
-            if (key in dailyMap || daysCount == null) {
-                dailyMap[key] = (dailyMap[key] ?: 0L) + l.secs
-            }
+            secsByDay[key] = (secsByDay[key] ?: 0L) + l.secs
             val dow = zdt.dayOfWeek.value % 7
             heatmap[dow * 24 + zdt.hour] += l.secs
         }
 
-        val dailySeries = dailyMap.entries.toList().takeLast(if (targetDays > 90) 90 else targetDays).map { (key, secs) ->
-            val d = runCatching { LocalDate.parse(key, dayFmt) }.getOrNull()
-            DailyListening(dateKey = key, label = d?.format(labelFmt) ?: key, secs = secs)
+        val targetDays = daysCount ?: run {
+            val oldest = inWindow.minOfOrNull { it.playedAt }
+                ?.let { Instant.ofEpochMilli(it).atZone(zone).toLocalDate() }
+            if (oldest != null) {
+                (ChronoUnit.DAYS.between(oldest, today).toInt().coerceAtLeast(0) + 1).coerceIn(30, 90)
+            } else {
+                30
+            }
+        }
+        val effectiveDays = targetDays.coerceIn(1, 90)
+        val dailySeries = ((effectiveDays - 1) downTo 0).map { offset ->
+            val d = today.minusDays(offset.toLong())
+            val key = d.format(dayFmt)
+            DailyListening(dateKey = key, label = d.format(labelFmt), secs = secsByDay[key] ?: 0L)
         }
 
         val topAggRows = dao.topSongsSince(sinceMs, 100)

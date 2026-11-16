@@ -149,7 +149,7 @@ class LyricsRepository(
         providerOrderRaw: String,
         trackDurationMs: Long = song.durationSeconds * 1000L
     ): LyricsData? = withContext(Dispatchers.IO) {
-        dao.clearUnpinnedLyricsCache()
+        dao.deleteLyricsCache(song.videoId)
         getLyrics(song, providerOrderRaw, forceProviderId = null, trackDurationMs = trackDurationMs)
     }
 

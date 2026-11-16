@@ -97,7 +97,14 @@ class HomeSearchViewModel(
         val blockedSet = blocked.map { it.name.lowercase() }.toHashSet()
         groups.flatMap { it.items }
             .map { it.second }
-            .filter { song -> song.artists.lowercase() !in blockedSet }
+            .filter { song ->
+                val full = song.artists.trim().lowercase()
+                if (full in blockedSet) return@filter false
+                song.artists.split(",")
+                    .map { it.trim().lowercase() }
+                    .filter { it.isNotEmpty() }
+                    .none { it in blockedSet }
+            }
             .distinctBy { it.videoId }
             .take(12)
             .map { song ->
@@ -141,6 +148,8 @@ class HomeSearchViewModel(
             .take(10)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
+    private var homeJob: Job? = null
+    private var searchJob: Job? = null
     private var suggestJob: Job? = null
     private var onboardingSearchJob: Job? = null
 
@@ -150,7 +159,8 @@ class HomeSearchViewModel(
     }
 
     fun loadHome(params: String?) {
-        viewModelScope.launch {
+        homeJob?.cancel()
+        homeJob = viewModelScope.launch {
             _homeState.update {
                 it.copy(isLoading = true, error = null, selectedChipParams = params, moodsTitle = null)
             }
@@ -196,7 +206,8 @@ class HomeSearchViewModel(
     }
 
     fun openMoodTile(tile: MoodTile) {
-        viewModelScope.launch {
+        homeJob?.cancel()
+        homeJob = viewModelScope.launch {
             _homeState.update { it.copy(isLoading = true, error = null, moodsTitle = tile.title) }
             innerTube.getMoodCategory(tile.params).onSuccess { page ->
                 _homeState.update { it.copy(isLoading = false, homePage = page) }
@@ -285,7 +296,10 @@ class HomeSearchViewModel(
         _searchState.update { it.copy(query = q) }
         suggestJob?.cancel()
         if (q.isBlank()) {
-            _searchState.update { it.copy(suggestions = SearchSuggestions(), results = null, error = null) }
+            searchJob?.cancel()
+            _searchState.update {
+                it.copy(isSearching = false, suggestions = SearchSuggestions(), results = null, error = null)
+            }
             return
         }
         suggestJob = viewModelScope.launch {
@@ -300,8 +314,9 @@ class HomeSearchViewModel(
         val q = (queryOverride ?: _searchState.value.query).trim()
         if (q.isBlank()) return
         suggestJob?.cancel()
+        searchJob?.cancel()
         _searchState.update { it.copy(query = q, isSearching = true, error = null) }
-        viewModelScope.launch {
+        searchJob = viewModelScope.launch {
             repository.recordSearchQuery(q)
             innerTube.searchAll(q).onSuccess { res ->
                 _searchState.update {
@@ -323,7 +338,11 @@ class HomeSearchViewModel(
     }
 
     fun clearSearchResults() {
-        _searchState.update { it.copy(query = "", results = null, suggestions = SearchSuggestions(), error = null) }
+        suggestJob?.cancel()
+        searchJob?.cancel()
+        _searchState.update {
+            it.copy(query = "", isSearching = false, results = null, suggestions = SearchSuggestions(), error = null)
+        }
     }
 
     fun removeSearchHistoryItem(query: String) {
