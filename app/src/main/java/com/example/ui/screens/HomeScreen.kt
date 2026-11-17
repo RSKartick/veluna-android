@@ -248,11 +248,11 @@ fun HomeScreen(
                                 modifier = Modifier.testTag("home_chip_all")
                             )
                         }
-                        items(
+                        itemsIndexed(
                             items = homeState.homePage.chips,
-                            key = { "${it.title}_${it.params}" },
-                            contentType = { "chip" }
-                        ) { chip ->
+                            key = { idx, chip -> "chip_${idx}_${chip.title}_${chip.params}" },
+                            contentType = { _, _ -> "chip" }
+                        ) { _, chip ->
                             val chipSelected = homeState.selectedChipParams == chip.params && chip.params.isNotBlank()
                             FilterChip(
                                 selected = chipSelected,
@@ -315,11 +315,11 @@ fun HomeScreen(
                             contentPadding = PaddingValues(horizontal = 10.dp),
                             horizontalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
-                            items(
+                            itemsIndexed(
                                 items = jumpBack,
-                                key = { "jump_${it.id}" },
-                                contentType = { "media_card" }
-                            ) { item ->
+                                key = { idx, item -> "jump_${idx}_${item.id}" },
+                                contentType = { _, _ -> "media_card" }
+                            ) { _, item ->
                                 val onClick = remember(item, onOpenBrowseItem) { { onOpenBrowseItem(item) } }
                                 MediaSquareCard(
                                     item = item,
@@ -344,7 +344,7 @@ fun HomeScreen(
                         ) {
                             itemsIndexed(
                                 items = familiarArtists,
-                                key = { _, a -> "fam_${a.id}" },
+                                key = { idx, a -> "fam_${idx}_${a.id}" },
                                 contentType = { _, _ -> "familiar_artist" }
                             ) { idx, artist ->
                                 val onClick = remember(artist, onOpenBrowseItem) { { onOpenBrowseItem(artist) } }
@@ -439,11 +439,11 @@ fun HomeScreen(
                             }
                         )
                     }
-                    items(
+                    itemsIndexed(
                         items = quickPicks,
-                        key = { item -> "qp_${secIdx}_${section.title}_${item.id}" },
-                        contentType = { "quick_pick_song" }
-                    ) { item ->
+                        key = { idx, item -> "qp_${secIdx}_${idx}_${item.id}" },
+                        contentType = { _, _ -> "quick_pick_song" }
+                    ) { _, item ->
                         val song = remember(item) { item.toSongItem() }
                         val onClick = remember(item, onOpenBrowseItem) { { onOpenBrowseItem(item) } }
                         val onMoreClick = remember(song, onTrackMore) { { onTrackMore(song) } }
@@ -487,11 +487,11 @@ fun HomeScreen(
                                 contentPadding = PaddingValues(horizontal = 10.dp),
                                 horizontalArrangement = Arrangement.spacedBy(4.dp)
                             ) {
-                                items(
+                                itemsIndexed(
                                     items = section.items,
-                                    key = { "${section.title}_${it.id}_${it.title}" },
-                                    contentType = { "media_card" }
-                                ) { item ->
+                                    key = { itemIdx, item -> "${secIdx}_${itemIdx}_${item.kind}_${item.id}" },
+                                    contentType = { _, _ -> "media_card" }
+                                ) { _, item ->
                                     val onClick = remember(item, onOpenBrowseItem) { { onOpenBrowseItem(item) } }
                                     MediaSquareCard(
                                         item = item,

@@ -4,6 +4,7 @@ import android.app.PendingIntent
 import android.content.Intent
 import android.media.audiofx.Equalizer
 import android.media.audiofx.LoudnessEnhancer
+import android.os.Process
 import androidx.annotation.OptIn
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
@@ -16,6 +17,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
+import androidx.media3.session.SessionResult
 import com.example.MainActivity
 import com.example.util.SecurityValidators
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
@@ -138,9 +140,35 @@ class VelunaPlaybackService : MediaSessionService() {
 
         mediaSession = MediaSession.Builder(this, sessionPlayer)
             .setSessionActivity(pendingIntent)
+            .setCallback(VelunaMediaSessionCallback())
             .build()
 
         attachAudioEffects(player.audioSessionId)
+    }
+
+    @OptIn(UnstableApi::class)
+    private inner class VelunaMediaSessionCallback : MediaSession.Callback {
+        override fun onConnect(
+            session: MediaSession,
+            controller: MediaSession.ControllerInfo
+        ): MediaSession.ConnectionResult {
+            if (!isControllerAuthorized(session, controller)) {
+                return MediaSession.ConnectionResult.reject()
+            }
+            return MediaSession.ConnectionResult.AcceptedResultBuilder(session).build()
+        }
+
+        override fun onPlayerCommandRequest(
+            session: MediaSession,
+            controller: MediaSession.ControllerInfo,
+            playerCommand: Int
+        ): Int {
+            return if (isControllerAuthorized(session, controller)) {
+                SessionResult.RESULT_SUCCESS
+            } else {
+                SessionResult.RESULT_ERROR_PERMISSION_DENIED
+            }
+        }
     }
 
     @OptIn(UnstableApi::class)
@@ -255,6 +283,18 @@ class VelunaPlaybackService : MediaSessionService() {
 
         private val urlUserAgents = ConcurrentHashMap<String, String>()
         private val hostUserAgents = ConcurrentHashMap<String, String>()
+
+        @OptIn(UnstableApi::class)
+        internal fun isControllerAuthorized(
+            session: MediaSession,
+            controller: MediaSession.ControllerInfo
+        ): Boolean {
+            return controller.uid == Process.myUid() ||
+                controller.isTrusted ||
+                session.isMediaNotificationController(controller) ||
+                session.isAutoCompanionController(controller) ||
+                session.isAutomotiveController(controller)
+        }
 
         fun registerStreamHeaders(url: String, userAgent: String) {
             if (!SecurityValidators.isSafeHttpsUrl(url, maxLength = 8192)) return

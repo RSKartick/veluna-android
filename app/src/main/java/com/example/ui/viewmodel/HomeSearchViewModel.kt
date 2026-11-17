@@ -293,7 +293,8 @@ class HomeSearchViewModel(
     }
 
     fun onQueryChange(q: String) {
-        _searchState.update { it.copy(query = q) }
+        if (q == _searchState.value.query) return
+        _searchState.update { it.copy(query = q, results = null, error = null) }
         suggestJob?.cancel()
         if (q.isBlank()) {
             searchJob?.cancel()
@@ -315,7 +316,7 @@ class HomeSearchViewModel(
         if (q.isBlank()) return
         suggestJob?.cancel()
         searchJob?.cancel()
-        _searchState.update { it.copy(query = q, isSearching = true, error = null) }
+        _searchState.update { it.copy(query = q, isSearching = true, results = null, error = null) }
         searchJob = viewModelScope.launch {
             repository.recordSearchQuery(q)
             innerTube.searchAll(q).onSuccess { res ->

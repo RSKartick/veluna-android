@@ -7,6 +7,10 @@ import android.util.Base64
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.File
+import java.io.FileOutputStream
+import java.io.IOException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.security.KeyStore
 import java.security.SecureRandom
 import javax.crypto.Cipher
@@ -14,6 +18,11 @@ import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
+
+class SecretVaultCorruptionException(
+    message: String,
+    cause: Throwable? = null
+) : RuntimeException(message, cause)
 
 interface VaultCipher {
     fun encrypt(plaintext: ByteArray): ByteArray
@@ -24,8 +33,6 @@ interface VaultCipher {
 class AndroidKeyStoreVaultCipher(
     private val keyAlias: String = DEFAULT_KEY_ALIAS
 ) : VaultCipher {
-
-    private val random = SecureRandom()
 
     private fun getOrCreateKey(): SecretKey {
         val ks = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
@@ -47,15 +54,19 @@ class AndroidKeyStoreVaultCipher(
     }
 
     override fun encrypt(plaintext: ByteArray): ByteArray {
-        val iv = ByteArray(GCM_IV_LENGTH).also { random.nextBytes(it) }
         val cipher = Cipher.getInstance(AES_GCM_TRANSFORMATION)
-        cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey(), GCMParameterSpec(GCM_TAG_BITS, iv))
+        // Android Keystore requires provider-generated IV when setRandomizedEncryptionRequired(true)
+        cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey())
+        val iv = cipher.iv
+        require(iv != null && iv.size == GCM_IV_LENGTH) {
+            "Android Keystore failed to generate a valid 12-byte GCM IV"
+        }
         val ciphertext = cipher.doFinal(plaintext)
         return iv + ciphertext
     }
 
     override fun decrypt(ciphertextWithIv: ByteArray): ByteArray {
-        require(ciphertextWithIv.size > GCM_IV_LENGTH) { "Invalid encrypted payload" }
+        require(ciphertextWithIv.size > GCM_IV_LENGTH + GCM_TAG_BYTES) { "Invalid encrypted payload" }
         val iv = ciphertextWithIv.copyOfRange(0, GCM_IV_LENGTH)
         val ciphertext = ciphertextWithIv.copyOfRange(GCM_IV_LENGTH, ciphertextWithIv.size)
         val cipher = Cipher.getInstance(AES_GCM_TRANSFORMATION)
@@ -78,6 +89,7 @@ class AndroidKeyStoreVaultCipher(
         private const val AES_GCM_TRANSFORMATION = "AES/GCM/NoPadding"
         private const val GCM_IV_LENGTH = 12
         private const val GCM_TAG_BITS = 128
+        private const val GCM_TAG_BYTES = GCM_TAG_BITS / 8
     }
 }
 
@@ -101,7 +113,7 @@ class InMemoryAesGcmVaultCipher(
 
     override fun decrypt(ciphertextWithIv: ByteArray): ByteArray {
         val key = keySpec ?: throw IllegalStateException("Vault key was wiped")
-        require(ciphertextWithIv.size > 12) { "Invalid encrypted payload" }
+        require(ciphertextWithIv.size > 12 + 16) { "Invalid encrypted payload" }
         val iv = ciphertextWithIv.copyOfRange(0, 12)
         val ciphertext = ciphertextWithIv.copyOfRange(12, ciphertextWithIv.size)
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
@@ -182,31 +194,60 @@ class SecretVault(
 
     private fun readMapLocked(): Map<String, String> {
         if (!storageFile.exists()) return emptyMap()
-        return runCatching {
-            val encoded = storageFile.readText(Charsets.UTF_8).trim()
-            if (encoded.isEmpty()) return emptyMap()
+        val encoded = try {
+            storageFile.readText(Charsets.UTF_8).trim()
+        } catch (t: Throwable) {
+            throw SecretVaultCorruptionException("Failed to read secret vault payload", t)
+        }
+        if (encoded.isEmpty()) {
+            throw SecretVaultCorruptionException("Secret vault file is empty or truncated")
+        }
+        return try {
             val payload = Base64.decode(encoded, Base64.NO_WRAP)
             val plainJson = cipher.decrypt(payload).toString(Charsets.UTF_8)
             json.decodeFromString<Map<String, String>>(plainJson)
-        }.getOrElse {
-            emptyMap()
+        } catch (t: Throwable) {
+            throw SecretVaultCorruptionException("Failed to decrypt or decode secret vault payload", t)
         }
     }
 
     private fun writeMapLocked(map: Map<String, String>) {
         if (map.isEmpty()) {
-            if (storageFile.exists()) storageFile.delete()
+            if (storageFile.exists() && !storageFile.delete()) {
+                throw IOException("Failed to remove empty secret vault file")
+            }
             return
         }
         storageFile.parentFile?.mkdirs()
         val plainBytes = json.encodeToString(map).toByteArray(Charsets.UTF_8)
         val encrypted = cipher.encrypt(plainBytes)
-        val encoded = Base64.encodeToString(encrypted, Base64.NO_WRAP)
+        val encodedBytes = Base64.encodeToString(encrypted, Base64.NO_WRAP).toByteArray(Charsets.UTF_8)
         val tmp = File(storageFile.parentFile, "$VAULT_FILENAME.tmp")
-        tmp.writeText(encoded, Charsets.UTF_8)
-        if (!tmp.renameTo(storageFile)) {
-            storageFile.writeText(encoded, Charsets.UTF_8)
-            tmp.delete()
+        try {
+            FileOutputStream(tmp).use { out ->
+                out.write(encodedBytes)
+                out.flush()
+                out.fd.sync()
+            }
+            if (!tmp.renameTo(storageFile)) {
+                try {
+                    Files.move(
+                        tmp.toPath(),
+                        storageFile.toPath(),
+                        StandardCopyOption.REPLACE_EXISTING,
+                        StandardCopyOption.ATOMIC_MOVE
+                    )
+                } catch (_: UnsupportedOperationException) {
+                    Files.move(
+                        tmp.toPath(),
+                        storageFile.toPath(),
+                        StandardCopyOption.REPLACE_EXISTING
+                    )
+                }
+            }
+        } catch (t: Throwable) {
+            runCatching { if (tmp.exists()) tmp.delete() }
+            throw t
         }
     }
 

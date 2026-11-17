@@ -61,7 +61,7 @@ class TasteEngine(
         songs: List<TasteSeed>
     ) = withContext(Dispatchers.IO) {
         val now = System.currentTimeMillis()
-        prefsRepo.updateTasteProfile { current ->
+        prefsRepo.updateTasteProfile(touchProfileTimestamp = true) { current ->
             val genreWeights = current.genreWeights.toMutableMap()
             genres.forEach { g ->
                 genreWeights[g] = ((genreWeights[g] ?: 0f) + 5.0f).coerceAtMost(25f)
@@ -112,11 +112,26 @@ class TasteEngine(
                 )
             }
 
+            val existingArtistsById = current.seedArtists.associateBy { it.id }
+            val existingSongsById = current.seedSongs.associateBy { it.id }
+            val stampedArtists = artists.distinctBy { it.id }.map { seed ->
+                val ts = seed.updatedAtMs.takeIf { it > 0L }
+                    ?: existingArtistsById[seed.id]?.updatedAtMs?.takeIf { it > 0L }
+                    ?: now
+                seed.copy(updatedAtMs = ts)
+            }
+            val stampedSongs = songs.distinctBy { it.id }.map { seed ->
+                val ts = seed.updatedAtMs.takeIf { it > 0L }
+                    ?: existingSongsById[seed.id]?.updatedAtMs?.takeIf { it > 0L }
+                    ?: now
+                seed.copy(updatedAtMs = ts)
+            }
+
             current.copy(
                 onboardingCompleted = true,
                 selectedGenres = genres.distinct(),
-                seedArtists = artists.distinctBy { it.id },
-                seedSongs = songs.distinctBy { it.id },
+                seedArtists = stampedArtists,
+                seedSongs = stampedSongs,
                 genreWeights = genreWeights,
                 artistSignals = trimArtists(artistSignals),
                 trackSignals = trimTracks(trackSignals)

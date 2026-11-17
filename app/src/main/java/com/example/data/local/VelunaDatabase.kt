@@ -23,9 +23,10 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         BlockedArtistEntity::class,
         LyricsCacheEntity::class,
         SyncTombstoneEntity::class,
+        SyncBaselineEntity::class,
         PendingScrobbleEntity::class
     ],
-    version = 2,
+    version = 3,
     exportSchema = true
 )
 abstract class VelunaDatabase : RoomDatabase() {
@@ -67,6 +68,35 @@ abstract class VelunaDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_2_3: Migration = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `local_playlists` ADD COLUMN `cloudKey` TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE `local_playlists` ADD COLUMN `syncRevision` INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("UPDATE `local_playlists` SET `cloudKey` = 'pl_local_' || `id` WHERE `cloudKey` = ''")
+                db.execSQL(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS `index_local_playlists_cloudKey`
+                    ON `local_playlists` (`cloudKey`)
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `sync_baselines` (
+                        `userId` TEXT NOT NULL,
+                        `entityType` TEXT NOT NULL,
+                        `entityKey` TEXT NOT NULL,
+                        `revision` INTEGER NOT NULL,
+                        `signature` TEXT NOT NULL,
+                        `clientUpdatedAt` INTEGER NOT NULL,
+                        `deleted` INTEGER NOT NULL,
+                        `updatedAt` INTEGER NOT NULL,
+                        PRIMARY KEY(`userId`, `entityType`, `entityKey`)
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+
         @Volatile
         private var INSTANCE: VelunaDatabase? = null
 
@@ -77,7 +107,7 @@ abstract class VelunaDatabase : RoomDatabase() {
                     VelunaDatabase::class.java,
                     "veluna.db"
                 )
-                    .addMigrations(MIGRATION_1_2)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                     .build()
                     .also { INSTANCE = it }
             }

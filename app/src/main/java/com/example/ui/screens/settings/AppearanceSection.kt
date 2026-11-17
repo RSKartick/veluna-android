@@ -22,6 +22,10 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -56,6 +60,7 @@ internal fun AppearanceSection(
     onSetClassicPlayerLayout: (Boolean) -> Unit,
     onSetCornerRadius: (Int) -> Unit
 ) {
+    var sliderRadius by remember(prefs.cornerRadiusDp) { mutableFloatStateOf(prefs.cornerRadiusDp.toFloat()) }
     SettingsCard(title = stringResource(R.string.settings_card_appearance)) {
         Surface(
             color = MaterialTheme.colorScheme.background,
@@ -79,7 +84,7 @@ internal fun AppearanceSection(
                         overflow = TextOverflow.Ellipsis
                     )
                     Text(
-                        text = "Corner radius ${prefs.cornerRadiusDp}dp • ${prefs.themeMode.label}",
+                        text = "Corner radius ${sliderRadius.roundToInt()}dp • ${prefs.themeMode.label}",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
@@ -200,13 +205,19 @@ internal fun AppearanceSection(
         )
 
         Text(
-            text = stringResource(R.string.settings_corner_radius, prefs.cornerRadiusDp),
+            text = stringResource(R.string.settings_corner_radius, sliderRadius.roundToInt()),
             style = MaterialTheme.typography.labelLarge,
             color = MaterialTheme.colorScheme.onSurface
         )
         Slider(
-            value = prefs.cornerRadiusDp.toFloat(),
-            onValueChange = { onSetCornerRadius(it.roundToInt()) },
+            value = sliderRadius,
+            onValueChange = { sliderRadius = it },
+            onValueChangeFinished = {
+                val target = sliderRadius.roundToInt()
+                if (target != prefs.cornerRadiusDp) {
+                    onSetCornerRadius(target)
+                }
+            },
             valueRange = 4f..24f,
             colors = velunaSliderColors(),
             modifier = Modifier

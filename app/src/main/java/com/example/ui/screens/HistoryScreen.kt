@@ -13,7 +13,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.MoreVert
@@ -103,15 +103,15 @@ fun HistoryScreen(
                     contentPadding = PaddingValues(bottom = 28.dp),
                     modifier = Modifier.fillMaxSize()
                 ) {
-                    groups.forEach { group ->
-                        item(key = "hdr_${group.title}", contentType = "section_heading") {
+                    groups.forEachIndexed { groupIdx, group ->
+                        item(key = "hdr_${groupIdx}_${group.title}", contentType = "section_heading") {
                             SectionHeading(title = group.title)
                         }
-                        items(
+                        itemsIndexed(
                             items = group.items,
-                            key = { "${group.title}_${it.first}_${it.second.videoId}" },
-                            contentType = { "history_row" }
-                        ) { (ts, song) ->
+                            key = { idx, pair -> "${groupIdx}_${idx}_${pair.first}_${pair.second.videoId}" },
+                            contentType = { _, _ -> "history_row" }
+                        ) { _, (ts, song) ->
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
                                 modifier = Modifier

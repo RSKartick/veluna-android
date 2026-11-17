@@ -21,14 +21,19 @@ data class ListenSongEntity(
     val songJson: String
 )
 
-@Entity(tableName = "local_playlists")
+@Entity(
+    tableName = "local_playlists",
+    indices = [Index(value = ["cloudKey"], unique = true)]
+)
 data class LocalPlaylistEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val cloudKey: String = "",
     val title: String,
     val description: String = "",
     val coverUri: String? = null,
     val createdAt: Long = System.currentTimeMillis(),
-    val updatedAt: Long = System.currentTimeMillis()
+    val updatedAt: Long = System.currentTimeMillis(),
+    val syncRevision: Long = 0L
 )
 
 @Entity(
@@ -140,6 +145,21 @@ data class SyncTombstoneEntity(
     val entityKey: String,
     val clientUpdatedAt: Long,
     val deletedAt: Long = System.currentTimeMillis()
+)
+
+@Entity(
+    tableName = "sync_baselines",
+    primaryKeys = ["userId", "entityType", "entityKey"]
+)
+data class SyncBaselineEntity(
+    val userId: String,
+    val entityType: String,
+    val entityKey: String,
+    val revision: Long = 0L,
+    val signature: String = "",
+    val clientUpdatedAt: Long = 0L,
+    val deleted: Boolean = false,
+    val updatedAt: Long = System.currentTimeMillis()
 )
 
 @Entity(

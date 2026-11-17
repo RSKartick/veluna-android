@@ -309,7 +309,8 @@ data class TasteSeed(
     val id: String,
     val name: String,
     val subtitle: String? = null,
-    val thumbnail: String? = null
+    val thumbnail: String? = null,
+    val updatedAtMs: Long = 0L
 )
 
 @Serializable

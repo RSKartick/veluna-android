@@ -13,14 +13,16 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.NorthWest
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -53,18 +55,21 @@ import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.material3.ListItemDefaults
+import androidx.compose.material3.Surface
 import androidx.compose.material3.TabRowDefaults
 import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.runtime.remember
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.style.TextAlign
 import com.example.ui.theme.VelunaMotion
 import com.example.ui.theme.rememberVelunaFlingBehavior
 import com.example.ui.theme.rememberVelunaLazyListState
 import com.example.ui.theme.velunaOutlinedFieldColors
 import com.example.ui.viewmodel.SearchUiState
 
-private enum class SearchContentMode { LOADING, RESULTS, SUGGESTIONS, DISCOVER }
+private enum class SearchContentMode { LOADING, RESULTS, ERROR, SUGGESTIONS, DISCOVER }
 
 @Composable
 fun SearchScreen(
@@ -90,6 +95,7 @@ fun SearchScreen(
     val contentMode = when {
         state.isSearching -> SearchContentMode.LOADING
         state.results != null -> SearchContentMode.RESULTS
+        !state.error.isNullOrBlank() && state.query.isNotBlank() -> SearchContentMode.ERROR
         state.query.isNotBlank() -> SearchContentMode.SUGGESTIONS
         else -> SearchContentMode.DISCOVER
     }
@@ -211,11 +217,11 @@ fun SearchScreen(
                             contentPadding = PaddingValues(top = 8.dp, bottom = 28.dp),
                             modifier = Modifier.fillMaxSize()
                         ) {
-                            items(
+                            itemsIndexed(
                                 items = list,
-                                key = { "${it.kind}_${it.id}_${it.title}" },
-                                contentType = { it.kind }
-                            ) { item ->
+                                key = { idx, item -> "${idx}_${item.kind}_${item.id}" },
+                                contentType = { _, item -> item.kind }
+                            ) { _, item ->
                                 if (item.kind == BrowseKind.SONG) {
                                     val song = remember(item) { item.toSongItem() }
                                     TrackRow(
@@ -259,6 +265,49 @@ fun SearchScreen(
                     }
                 }
 
+                SearchContentMode.ERROR -> {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(24.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Surface(
+                            color = MaterialTheme.colorScheme.surfaceContainer,
+                            contentColor = MaterialTheme.colorScheme.onSurface,
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                            shape = MaterialTheme.shapes.medium,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(20.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Text(
+                                    text = stringResource(R.string.search_error_title),
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    text = state.error.orEmpty(),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    textAlign = TextAlign.Center
+                                )
+                                Button(
+                                    onClick = { onSubmitSearch(null) },
+                                    modifier = Modifier.testTag("search_retry_btn")
+                                ) {
+                                    Icon(Icons.Rounded.Refresh, contentDescription = null)
+                                    Spacer(modifier = Modifier.size(6.dp))
+                                    Text(stringResource(R.string.action_retry), maxLines = 1, softWrap = false)
+                                }
+                            }
+                        }
+                    }
+                }
+
                 SearchContentMode.SUGGESTIONS -> {
                     LazyColumn(
                         state = suggestionsListState,
@@ -266,11 +315,11 @@ fun SearchScreen(
                         contentPadding = PaddingValues(bottom = 28.dp),
                         modifier = Modifier.fillMaxSize()
                     ) {
-                        items(
+                        itemsIndexed(
                             items = state.suggestions.queries,
-                            key = { "sug_$it" },
-                            contentType = { "suggestion_query" }
-                        ) { suggestion ->
+                            key = { idx, q -> "sug_${idx}_$q" },
+                            contentType = { _, _ -> "suggestion_query" }
+                        ) { _, suggestion ->
                             ListItem(
                                 colors = ListItemDefaults.colors(
                                     containerColor = Color.Transparent,
@@ -296,11 +345,11 @@ fun SearchScreen(
                                     .testTag("search_suggestion_$suggestion")
                             )
                         }
-                        items(
+                        itemsIndexed(
                             items = state.suggestions.items,
-                            key = { "sug_item_${it.id}" },
-                            contentType = { it.kind }
-                        ) { item ->
+                            key = { idx, item -> "sug_item_${idx}_${item.kind}_${item.id}" },
+                            contentType = { _, item -> item.kind }
+                        ) { _, item ->
                             if (item.kind == BrowseKind.SONG) {
                                 val song = remember(item) { item.toSongItem() }
                                 TrackRow(

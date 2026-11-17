@@ -195,4 +195,36 @@ class ViewModelsRegressionTest {
         assertThat(savedPrefs.eqBandsDb[4]).isEqualTo(-3f)
         assertThat(savedPrefs.eqBandsDb[9]).isEqualTo(4f)
     }
+
+    @Test
+    fun detailViewModel_removeTrackFromLocalPlaylist_updatesLoadedTracks(): Unit = runBlocking {
+        val plId = repo.createPlaylist("Workout", "")
+        repo.addTrackToPlaylist(plId, SongItem(videoId = "trk1", title = "One", artists = "Artist"))
+        repo.addTrackToPlaylist(plId, SongItem(videoId = "trk2", title = "Two", artists = "Artist"))
+
+        val vm = DetailViewModel(innerTube, repo)
+        vm.loadPlaylist("$LOCAL_PLAYLIST_PREFIX$plId", force = true)
+        val initial = vm.playlistState.first { !it.isLoading && it.page != null }
+        assertThat(initial.page!!.items.map { it.videoId }).containsExactly("trk1", "trk2").inOrder()
+
+        vm.removeTrackFromLocalPlaylist(plId, "trk1")
+        val updated = vm.playlistState.first { !it.isLoading && it.page?.items?.size == 1 }
+        assertThat(updated.page!!.items.map { it.videoId }).containsExactly("trk2")
+    }
+
+    @Test
+    fun homeSearchViewModel_failedSearchSetsErrorAndEditingQueryClearsIt() = runBlocking {
+        val vm = HomeSearchViewModel(innerTube, repo, prefsRepo)
+        vm.submitSearch("nonexistent query")
+
+        val failedState = vm.searchState.first { !it.isSearching && it.error != null }
+        assertThat(failedState.results).isNull()
+        assertThat(failedState.query).isEqualTo("nonexistent query")
+
+        vm.onQueryChange("new query")
+        val editedState = vm.searchState.value
+        assertThat(editedState.error).isNull()
+        assertThat(editedState.results).isNull()
+        assertThat(editedState.query).isEqualTo("new query")
+    }
 }

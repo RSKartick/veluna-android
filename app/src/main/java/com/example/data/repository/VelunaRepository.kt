@@ -327,14 +327,65 @@ class VelunaRepository(
         )
     }
 
-    suspend fun updatePlaylist(playlistId: Long, title: String, description: String, coverUri: String?) {
-        dao.updatePlaylist(playlistId, title.trim(), description.trim(), coverUri, System.currentTimeMillis())
-    }
+    suspend fun updatePlaylist(playlistId: Long, title: String, description: String, coverUri: String?) =
+        withContext(Dispatchers.IO) {
+            val previousCover = dao.getPlaylistById(playlistId)?.coverUri
+            val persistedCover = persistPlaylistCoverIfNeeded(playlistId, coverUri)
+            dao.updatePlaylist(playlistId, title.trim(), description.trim(), persistedCover, System.currentTimeMillis())
+            if (previousCover != null && previousCover != persistedCover) {
+                deleteManagedPlaylistCover(previousCover)
+            }
+        }
 
-    suspend fun deletePlaylist(playlistId: Long) {
+    suspend fun deletePlaylist(playlistId: Long) = withContext(Dispatchers.IO) {
+        val cover = dao.getPlaylistById(playlistId)?.coverUri
         dao.clearPlaylistTracks(playlistId)
         dao.deletePlaylist(playlistId)
         dao.deleteShortcut("$LOCAL_PLAYLIST_PREFIX$playlistId")
+        if (cover != null) deleteManagedPlaylistCover(cover)
+    }
+
+    private fun persistPlaylistCoverIfNeeded(playlistId: Long, rawUri: String?): String? {
+        val trimmed = rawUri?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        val parsed = runCatching { trimmed.toUri() }.getOrNull() ?: return trimmed
+        if (parsed.scheme != "content") return trimmed
+        return runCatching {
+            val coversDir = File(context.filesDir, "playlist_covers").apply { mkdirs() }
+            val outFile = File(coversDir, "pl_${playlistId}_${System.currentTimeMillis()}.jpg")
+            var copied = 0L
+            context.contentResolver.openInputStream(parsed)?.use { input ->
+                outFile.outputStream().use { output ->
+                    val buf = ByteArray(8192)
+                    while (true) {
+                        val read = input.read(buf)
+                        if (read <= 0) break
+                        copied += read
+                        if (copied > MAX_COVER_BYTES) {
+                            throw IllegalStateException("Cover image exceeds maximum size")
+                        }
+                        output.write(buf, 0, read)
+                    }
+                }
+            } ?: return trimmed
+            if (copied == 0L) {
+                outFile.delete()
+                return trimmed
+            }
+            Uri.fromFile(outFile).toString()
+        }.getOrElse { trimmed }
+    }
+
+    private fun deleteManagedPlaylistCover(coverUri: String) {
+        runCatching {
+            val parsed = coverUri.toUri()
+            if (parsed.scheme == "file") {
+                val coversDir = File(context.filesDir, "playlist_covers").canonicalFile
+                val targetFile = parsed.path?.let { File(it).canonicalFile }
+                if (targetFile != null && targetFile.path.startsWith(coversDir.path + File.separator)) {
+                    targetFile.delete()
+                }
+            }
+        }
     }
 
     suspend fun addTrackToPlaylist(playlistId: Long, song: SongItem, skipDuplicates: Boolean = true): Boolean {
@@ -1130,7 +1181,8 @@ class VelunaRepository(
         }
 
         fun parseCsvOrM3uQueries(text: String): List<String> {
-            val lines = text.lines().map { it.trim() }.filter { it.isNotEmpty() }
+            val normalized = text.removePrefix("\uFEFF")
+            val lines = normalized.lines().map { it.trim() }.filter { it.isNotEmpty() }
             if (lines.isEmpty()) return emptyList()
 
             if (lines.first().startsWith("#EXTM3U")) {

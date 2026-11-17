@@ -131,6 +131,7 @@ class PlayerController(
     @Volatile private var pendingSeekUntilNanos: Long = 0L
     private var sleepJob: Job? = null
     private var resolveJob: Job? = null
+    private var fallbackResolveJob: Job? = null
     private var prefetchJob: Job? = null
     private var autoplayJob: Job? = null
     private var radioJob: Job? = null
@@ -242,15 +243,20 @@ class PlayerController(
                 innerTube.invalidateStreamCache(song.videoId)
                 val nextIdx = activeCandidateIndex + 1
                 if (nextIdx in activeCandidates.indices) {
-                    scope.launch {
-                        tryCandidateStream(song, nextIdx)
+                    fallbackResolveJob?.cancel()
+                    fallbackResolveJob = scope.launch {
+                        if (currentCandidateSong?.videoId == song.videoId) {
+                            tryCandidateStream(song, nextIdx)
+                        }
                     }
                     return
                 }
                 if (!triedMirrorsForCurrent && currentPrefs.allowMirrorFallbacks) {
                     triedMirrorsForCurrent = true
-                    scope.launch {
+                    fallbackResolveJob?.cancel()
+                    fallbackResolveJob = scope.launch {
                         val mirrors = innerTube.resolveMirrorStreamCandidates(song.videoId, currentPrefs.audioQuality)
+                        if (currentCandidateSong?.videoId != song.videoId) return@launch
                         if (mirrors.isNotEmpty()) {
                             val start = activeCandidates.size
                             activeCandidates = activeCandidates + mirrors
@@ -459,6 +465,7 @@ class PlayerController(
         } else if (updated.isEmpty()) {
             finalizeCurrentTrackOutcome()
             resolveJob?.cancel()
+            fallbackResolveJob?.cancel()
             prefetchJob?.cancel()
             autoplayJob?.cancel()
             radioJob?.cancel()
@@ -479,6 +486,7 @@ class PlayerController(
             _state.update { it.copy(queue = listOf(active), currentIndex = 0) }
         } else {
             resolveJob?.cancel()
+            fallbackResolveJob?.cancel()
             prefetchJob?.cancel()
             autoplayJob?.cancel()
             radioJob?.cancel()
@@ -716,6 +724,7 @@ class PlayerController(
         recordedListenVideoId = null
         pendingSeekTargetMs = null
         resolveJob?.cancel()
+        fallbackResolveJob?.cancel()
         prefetchJob?.cancel()
 
         resolveJob = scope.launch {
@@ -814,6 +823,7 @@ class PlayerController(
     }
 
     private suspend fun tryCandidateStream(song: SongItem, idx: Int) {
+        if (currentCandidateSong?.videoId != song.videoId) return
         val candidate = activeCandidates.getOrNull(idx) ?: return
         if (!SecurityValidators.isSafeHttpsUrl(candidate.url, maxLength = 8192)) {
             val nextIdx = idx + 1
@@ -933,12 +943,20 @@ class PlayerController(
                     .map { it.copy(autoplay = true) }
             }
             if (fresh.isNotEmpty()) {
-                val startNextIdx = _state.value.queue.size
-                _state.update { it.copy(queue = it.queue + fresh) }
-                if (playImmediately) {
-                    playIndex(startNextIdx)
-                } else {
-                    prefetchNextInQueue()
+                var addedStartIdx = -1
+                _state.update { st ->
+                    val currentIds = st.queue.asSequence().map { it.videoId }.toHashSet()
+                    val deduped = fresh.filter { it.videoId !in currentIds }
+                    if (deduped.isEmpty()) return@update st
+                    addedStartIdx = st.queue.size
+                    st.copy(queue = st.queue + deduped)
+                }
+                if (addedStartIdx >= 0) {
+                    if (playImmediately) {
+                        playIndex(addedStartIdx)
+                    } else {
+                        prefetchNextInQueue()
+                    }
                 }
             }
         }
@@ -1067,6 +1085,7 @@ class PlayerController(
                     }
                     partFile = null
 
+                    val previousDownload = dao.getDownload(song.videoId)?.let { resolveSafeDownloadFile(it.filePath) }
                     dao.upsertDownload(
                         DownloadedTrackEntity(
                             videoId = song.videoId,
@@ -1077,6 +1096,9 @@ class PlayerController(
                             songJson = repository.encodeSong(song)
                         )
                     )
+                    if (previousDownload != null && previousDownload.canonicalPath != outFile.canonicalPath) {
+                        runCatching { previousDownload.delete() }
+                    }
 
                     _downloads.update { map ->
                         map[song.videoId]?.let { progress ->
@@ -1100,6 +1122,17 @@ class PlayerController(
                 }
             } finally {
                 partFile?.let { tmp -> runCatching { if (tmp.exists()) tmp.delete() } }
+            }
+        }
+    }
+
+    fun dismissDownloadStatus(videoId: String) {
+        _downloads.update { current ->
+            val entry = current[videoId]
+            if (entry != null && entry.status != DownloadStatus.DOWNLOADING) {
+                current - videoId
+            } else {
+                current
             }
         }
     }

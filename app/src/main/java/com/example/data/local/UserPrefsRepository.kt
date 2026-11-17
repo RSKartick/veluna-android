@@ -12,6 +12,7 @@ import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.example.data.security.SecretVault
+import com.example.data.security.SecretVaultCorruptionException
 import com.example.model.AudioQuality
 import com.example.model.EqualizerPresets
 import com.example.model.LyricsProviderInfo
@@ -22,6 +23,8 @@ import com.example.util.SecurityValidators
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
@@ -82,6 +85,8 @@ class UserPrefsRepository(
 
     private val vaultLoaded = AtomicBoolean(false)
     private val vaultState = MutableStateFlow(VaultSecretsSnapshot())
+    private val _vaultCorrupted = MutableStateFlow(false)
+    val vaultCorruptedFlow: StateFlow<Boolean> = _vaultCorrupted.asStateFlow()
 
     private object Keys {
         val THEME_PRESET = stringPreferencesKey("theme_preset")
@@ -116,6 +121,7 @@ class UserPrefsRepository(
         val LAST_SCROBBLE_ERROR = stringPreferencesKey("last_scrobble_error")
         val LOCAL_LIKES_SCRUBBED = booleanPreferencesKey("local_likes_scrubbed")
         val PLAYLIST_TRACKS_V2_MIGRATED = booleanPreferencesKey("playlist_tracks_v2_migrated")
+        val PREFS_UPDATED_AT = longPreferencesKey("prefs_updated_at")
 
         // Legacy DataStore keys (removed during migration, never written back)
         val LEGACY_CROSSFADE_SECS = intPreferencesKey("crossfade_secs")
@@ -129,13 +135,20 @@ class UserPrefsRepository(
     }
 
     private fun readVaultSnapshot(): VaultSecretsSnapshot {
-        val all = secretVault.getAll()
-        return VaultSecretsSnapshot(
-            lastFmApiKey = all[SecretVault.KEY_LASTFM_KEY].orEmpty(),
-            lastFmApiSecret = all[SecretVault.KEY_LASTFM_SECRET].orEmpty(),
-            lastFmSessionKey = all[SecretVault.KEY_LASTFM_SESSION].orEmpty(),
-            listenBrainzToken = all[SecretVault.KEY_LISTENBRAINZ_TOKEN].orEmpty()
-        )
+        return try {
+            val all = secretVault.getAll()
+            _vaultCorrupted.value = false
+            VaultSecretsSnapshot(
+                lastFmApiKey = all[SecretVault.KEY_LASTFM_KEY].orEmpty(),
+                lastFmApiSecret = all[SecretVault.KEY_LASTFM_SECRET].orEmpty(),
+                lastFmSessionKey = all[SecretVault.KEY_LASTFM_SESSION].orEmpty(),
+                listenBrainzToken = all[SecretVault.KEY_LISTENBRAINZ_TOKEN].orEmpty()
+            )
+        } catch (_: SecretVaultCorruptionException) {
+            // Preserve the unreadable file on disk rather than wiping or returning spoofed empty state silently.
+            _vaultCorrupted.value = true
+            VaultSecretsSnapshot()
+        }
     }
 
     fun refreshVaultSecrets() {
@@ -215,22 +228,24 @@ class UserPrefsRepository(
         .distinctUntilChanged()
 
     suspend fun migrateSecretsAndPruneLegacyKeys() {
+        val current = dataStore.data.first()
+        if (current[Keys.SECRETS_MIGRATED] != true) {
+            val migrated = buildMap {
+                current[Keys.LEGACY_LASTFM_KEY]?.takeIf { it.isNotBlank() }?.let { put(SecretVault.KEY_LASTFM_KEY, it) }
+                current[Keys.LEGACY_LASTFM_SECRET]?.takeIf { it.isNotBlank() }?.let { put(SecretVault.KEY_LASTFM_SECRET, it) }
+                current[Keys.LEGACY_LASTFM_SESSION]?.takeIf { it.isNotBlank() }?.let { put(SecretVault.KEY_LASTFM_SESSION, it) }
+                current[Keys.LEGACY_LISTENBRAINZ_TOKEN]?.takeIf { it.isNotBlank() }?.let { put(SecretVault.KEY_LISTENBRAINZ_TOKEN, it) }
+            }
+            if (migrated.isNotEmpty()) {
+                // Persist to SecretVault BEFORE marking migrated or deleting legacy keys.
+                secretVault.putAll(migrated)
+            }
+        }
+
         dataStore.edit { p ->
             p.remove(Keys.LEGACY_CROSSFADE_SECS)
             p.remove(Keys.LEGACY_TRANSLATE_LYRICS)
-
-            if (p[Keys.SECRETS_MIGRATED] != true) {
-                val migrated = buildMap {
-                    p[Keys.LEGACY_LASTFM_KEY]?.takeIf { it.isNotBlank() }?.let { put(SecretVault.KEY_LASTFM_KEY, it) }
-                    p[Keys.LEGACY_LASTFM_SECRET]?.takeIf { it.isNotBlank() }?.let { put(SecretVault.KEY_LASTFM_SECRET, it) }
-                    p[Keys.LEGACY_LASTFM_SESSION]?.takeIf { it.isNotBlank() }?.let { put(SecretVault.KEY_LASTFM_SESSION, it) }
-                    p[Keys.LEGACY_LISTENBRAINZ_TOKEN]?.takeIf { it.isNotBlank() }?.let { put(SecretVault.KEY_LISTENBRAINZ_TOKEN, it) }
-                }
-                if (migrated.isNotEmpty()) {
-                    secretVault.putAll(migrated)
-                }
-                p[Keys.SECRETS_MIGRATED] = true
-            }
+            p[Keys.SECRETS_MIGRATED] = true
             p.remove(Keys.LEGACY_LASTFM_KEY)
             p.remove(Keys.LEGACY_LASTFM_SECRET)
             p.remove(Keys.LEGACY_LASTFM_SESSION)
@@ -239,14 +254,22 @@ class UserPrefsRepository(
         refreshVaultSecrets()
     }
 
-    suspend fun saveTasteProfile(profile: TasteProfile) {
+    suspend fun saveTasteProfile(profile: TasteProfile, touchProfileTimestamp: Boolean = false) {
+        val now = System.currentTimeMillis()
         dataStore.edit { p ->
             p[Keys.ONBOARDING_COMPLETED] = profile.onboardingCompleted
             p[Keys.TASTE_PROFILE_JSON] = json.encodeToString(profile)
+            if (touchProfileTimestamp) {
+                p[Keys.PREFS_UPDATED_AT] = now
+            }
         }
     }
 
-    suspend fun updateTasteProfile(transform: (TasteProfile) -> TasteProfile) {
+    suspend fun updateTasteProfile(
+        touchProfileTimestamp: Boolean = false,
+        transform: (TasteProfile) -> TasteProfile
+    ) {
+        val now = System.currentTimeMillis()
         dataStore.edit { p ->
             val raw = p[Keys.TASTE_PROFILE_JSON]
             val current = (if (!raw.isNullOrBlank()) runCatching { json.decodeFromString<TasteProfile>(raw) }.getOrNull() else null)
@@ -254,35 +277,56 @@ class UserPrefsRepository(
             val updated = transform(current)
             p[Keys.ONBOARDING_COMPLETED] = updated.onboardingCompleted
             p[Keys.TASTE_PROFILE_JSON] = json.encodeToString(updated)
+            if (touchProfileTimestamp || updated.selectedGenres != current.selectedGenres || updated.onboardingCompleted != current.onboardingCompleted) {
+                p[Keys.PREFS_UPDATED_AT] = now
+            }
         }
     }
 
     suspend fun setOnboardingCompleted(completed: Boolean) {
-        updateTasteProfile { it.copy(onboardingCompleted = completed) }
+        updateTasteProfile(touchProfileTimestamp = true) { it.copy(onboardingCompleted = completed) }
     }
 
     suspend fun setThemePreset(preset: VelunaThemePreset) {
-        dataStore.edit { it[Keys.THEME_PRESET] = preset.id }
+        val now = System.currentTimeMillis()
+        dataStore.edit {
+            it[Keys.THEME_PRESET] = preset.id
+            it[Keys.PREFS_UPDATED_AT] = now
+        }
     }
 
     suspend fun setThemeMode(mode: ThemeMode) {
-        dataStore.edit { it[Keys.THEME_MODE] = mode.name }
+        val now = System.currentTimeMillis()
+        dataStore.edit {
+            it[Keys.THEME_MODE] = mode.name
+            it[Keys.PREFS_UPDATED_AT] = now
+        }
     }
 
     suspend fun setCustomAccent(hex: String?) {
         val validHex = hex?.trim()?.takeIf { SecurityValidators.isValidHexColor(it) }
+        val now = System.currentTimeMillis()
         dataStore.edit {
             if (validHex == null) it.remove(Keys.CUSTOM_ACCENT)
             else it[Keys.CUSTOM_ACCENT] = validHex
+            it[Keys.PREFS_UPDATED_AT] = now
         }
     }
 
     suspend fun setAdaptToArtwork(enabled: Boolean) {
-        dataStore.edit { it[Keys.ADAPT_TO_ARTWORK] = enabled }
+        val now = System.currentTimeMillis()
+        dataStore.edit {
+            it[Keys.ADAPT_TO_ARTWORK] = enabled
+            it[Keys.PREFS_UPDATED_AT] = now
+        }
     }
 
     suspend fun setCornerRadius(dp: Int) {
-        dataStore.edit { it[Keys.CORNER_RADIUS] = dp.coerceIn(4, 24) }
+        val now = System.currentTimeMillis()
+        dataStore.edit {
+            it[Keys.CORNER_RADIUS] = dp.coerceIn(4, 24)
+            it[Keys.PREFS_UPDATED_AT] = now
+        }
     }
 
     suspend fun setClassicPlayerLayout(enabled: Boolean) {
@@ -290,11 +334,19 @@ class UserPrefsRepository(
     }
 
     suspend fun setAudioQuality(quality: AudioQuality) {
-        dataStore.edit { it[Keys.AUDIO_QUALITY] = quality.name }
+        val now = System.currentTimeMillis()
+        dataStore.edit {
+            it[Keys.AUDIO_QUALITY] = quality.name
+            it[Keys.PREFS_UPDATED_AT] = now
+        }
     }
 
     suspend fun setAutoplay(enabled: Boolean) {
-        dataStore.edit { it[Keys.AUTOPLAY] = enabled }
+        val now = System.currentTimeMillis()
+        dataStore.edit {
+            it[Keys.AUTOPLAY] = enabled
+            it[Keys.PREFS_UPDATED_AT] = now
+        }
     }
 
     suspend fun setPlaybackSpeed(speed: Float) {
@@ -303,11 +355,19 @@ class UserPrefsRepository(
     }
 
     suspend fun setLoudnessNormalization(enabled: Boolean) {
-        dataStore.edit { it[Keys.LOUDNESS_NORM] = enabled }
+        val now = System.currentTimeMillis()
+        dataStore.edit {
+            it[Keys.LOUDNESS_NORM] = enabled
+            it[Keys.PREFS_UPDATED_AT] = now
+        }
     }
 
     suspend fun setHideMusicVideos(enabled: Boolean) {
-        dataStore.edit { it[Keys.HIDE_VIDEOS] = enabled }
+        val now = System.currentTimeMillis()
+        dataStore.edit {
+            it[Keys.HIDE_VIDEOS] = enabled
+            it[Keys.PREFS_UPDATED_AT] = now
+        }
     }
 
     suspend fun setAllowMirrorFallbacks(enabled: Boolean) {
@@ -366,8 +426,46 @@ class UserPrefsRepository(
         dataStore.edit { it[Keys.SHOW_HERO_BACKDROP] = show }
     }
 
-    suspend fun setDisplayName(name: String) {
-        dataStore.edit { it[Keys.DISPLAY_NAME] = name.trim().take(80).ifBlank { "Listener" } }
+    suspend fun setDisplayName(name: String, updatedAtMs: Long = System.currentTimeMillis()) {
+        dataStore.edit {
+            it[Keys.DISPLAY_NAME] = name.trim().take(80).ifBlank { "Listener" }
+            it[Keys.PREFS_UPDATED_AT] = updatedAtMs.coerceAtLeast(0L)
+        }
+    }
+
+    suspend fun getPrefsUpdatedAt(): Long = dataStore.data.first()[Keys.PREFS_UPDATED_AT] ?: 0L
+
+    suspend fun setPrefsUpdatedAt(epochMs: Long) {
+        dataStore.edit { it[Keys.PREFS_UPDATED_AT] = epochMs.coerceAtLeast(0L) }
+    }
+
+    suspend fun applyCloudProfilePrefs(
+        displayName: String,
+        themePreset: VelunaThemePreset?,
+        themeMode: ThemeMode?,
+        customAccentHex: String?,
+        adaptToArtwork: Boolean,
+        cornerRadiusDp: Int,
+        audioQuality: AudioQuality?,
+        autoplay: Boolean,
+        loudnessNormalization: Boolean,
+        hideMusicVideos: Boolean,
+        prefsUpdatedAtMs: Long
+    ) {
+        val validHex = customAccentHex?.trim()?.takeIf { SecurityValidators.isValidHexColor(it) }
+        dataStore.edit { p ->
+            p[Keys.DISPLAY_NAME] = displayName.trim().take(80).ifBlank { "Listener" }
+            themePreset?.let { p[Keys.THEME_PRESET] = it.id }
+            themeMode?.let { p[Keys.THEME_MODE] = it.name }
+            if (validHex == null) p.remove(Keys.CUSTOM_ACCENT) else p[Keys.CUSTOM_ACCENT] = validHex
+            p[Keys.ADAPT_TO_ARTWORK] = adaptToArtwork
+            p[Keys.CORNER_RADIUS] = cornerRadiusDp.coerceIn(4, 24)
+            audioQuality?.let { p[Keys.AUDIO_QUALITY] = it.name }
+            p[Keys.AUTOPLAY] = autoplay
+            p[Keys.LOUDNESS_NORM] = loudnessNormalization
+            p[Keys.HIDE_VIDEOS] = hideMusicVideos
+            p[Keys.PREFS_UPDATED_AT] = prefsUpdatedAtMs.coerceAtLeast(0L)
+        }
     }
 
     suspend fun setLastScrobbleError(message: String?) {
@@ -414,6 +512,7 @@ class UserPrefsRepository(
      */
     suspend fun resetUserKeys() {
         secretVault.wipeAll()
+        _vaultCorrupted.value = false
         refreshVaultSecrets()
         dataStore.edit { p ->
             p.remove(Keys.DISPLAY_NAME)
@@ -426,6 +525,7 @@ class UserPrefsRepository(
             p.remove(Keys.LAST_SCROBBLE_ERROR)
             p.remove(Keys.LOCAL_LIKES_SCRUBBED)
             p.remove(Keys.PLAYLIST_TRACKS_V2_MIGRATED)
+            p.remove(Keys.PREFS_UPDATED_AT)
             p.remove(Keys.watermarkKey(WATERMARK_LIKED))
             p.remove(Keys.watermarkKey(WATERMARK_PLAYLISTS))
             p.remove(Keys.watermarkKey(WATERMARK_SEEDS))
@@ -441,6 +541,7 @@ class UserPrefsRepository(
         val validHex = backup.customAccentHex?.trim()?.takeIf { SecurityValidators.isValidHexColor(it) }
         val safeSpeed = if (backup.playbackSpeed.isFinite()) backup.playbackSpeed.coerceIn(0.5f, 2.0f) else 1.0f
         val safeBands = sanitizeEqBands(backup.eqBandsDb) ?: EqualizerPresets.presets.getValue("Flat")
+        val now = System.currentTimeMillis()
         dataStore.edit {
             it[Keys.THEME_PRESET] = backup.themePreset.id
             it[Keys.THEME_MODE] = backup.themeMode.name
@@ -463,6 +564,7 @@ class UserPrefsRepository(
             it[Keys.SHOW_MOOD_CHIPS] = backup.showMoodChips
             it[Keys.SHOW_HERO_BACKDROP] = backup.showHeroArtworkBackdrop
             it[Keys.DISPLAY_NAME] = backup.userDisplayName.trim().ifBlank { "Listener" }.take(80)
+            it[Keys.PREFS_UPDATED_AT] = now
             // Never restore scrobbling secrets or legacy keys from JSON backups.
         }
     }

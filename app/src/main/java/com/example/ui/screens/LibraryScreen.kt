@@ -18,7 +18,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
@@ -87,7 +86,9 @@ fun LibraryScreen(
     onImportLocalFolder: (Uri) -> Unit,
     onRemoveLocalTrack: (String) -> Unit,
     onDeleteDownload: (String) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onRetryDownload: (DownloadProgress) -> Unit = {},
+    onDismissDownloadStatus: (String) -> Unit = {}
 ) {
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
     val smoothFling = rememberVelunaFlingBehavior()
@@ -199,11 +200,11 @@ fun LibraryScreen(
                             contentPadding = PaddingValues(bottom = 28.dp),
                             modifier = Modifier.fillMaxSize()
                         ) {
-                            items(
+                            itemsIndexed(
                                 items = playlists,
-                                key = { it.id },
-                                contentType = { "playlist_row" }
-                            ) { pl ->
+                                key = { idx, pl -> "pl_${idx}_${pl.id}" },
+                                contentType = { _, _ -> "playlist_row" }
+                            ) { _, pl ->
                                 ListItem(
                                     colors = ListItemDefaults.colors(
                                         containerColor = Color.Transparent,
@@ -252,7 +253,7 @@ fun LibraryScreen(
                                 }
                                 itemsIndexed(
                                     items = likedSongs,
-                                    key = { _, song -> "liked_${song.videoId}" },
+                                    key = { idx, song -> "liked_${idx}_${song.videoId}" },
                                     contentType = { _, _ -> "track" }
                                 ) { idx, song ->
                                     TrackRow(
@@ -280,11 +281,11 @@ fun LibraryScreen(
                                 contentPadding = PaddingValues(bottom = 28.dp),
                                 modifier = Modifier.fillMaxSize()
                             ) {
-                                items(
+                                itemsIndexed(
                                     items = savedAlbums,
-                                    key = { it.id },
-                                    contentType = { "album_row" }
-                                ) { al ->
+                                    key = { idx, al -> "al_${idx}_${al.id}" },
+                                    contentType = { _, _ -> "album_row" }
+                                ) { _, al ->
                                     ListItem(
                                         colors = ListItemDefaults.colors(
                                             containerColor = Color.Transparent,
@@ -323,11 +324,11 @@ fun LibraryScreen(
                                 contentPadding = PaddingValues(bottom = 28.dp),
                                 modifier = Modifier.fillMaxSize()
                             ) {
-                                items(
+                                itemsIndexed(
                                     items = followedArtists,
-                                    key = { it.id },
-                                    contentType = { "artist_row" }
-                                ) { ar ->
+                                    key = { idx, ar -> "ar_${idx}_${ar.id}" },
+                                    contentType = { _, _ -> "artist_row" }
+                                ) { _, ar ->
                                     ListItem(
                                         colors = ListItemDefaults.colors(
                                             containerColor = Color.Transparent,
@@ -360,7 +361,9 @@ fun LibraryScreen(
                         nowPlayingId = nowPlayingId,
                         onPlaySongs = onPlaySongs,
                         onTrackMore = onTrackMore,
-                        onDeleteDownload = onDeleteDownload
+                        onDeleteDownload = onDeleteDownload,
+                        onRetryDownload = onRetryDownload,
+                        onDismissDownloadStatus = onDismissDownloadStatus
                     )
 
                     else -> LibraryLocalMusicTab(

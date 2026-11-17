@@ -232,22 +232,22 @@ fun AlbumDetailScreen(
                         )
                     }
 
-                    items(
+                    itemsIndexed(
                         items = album.sections,
-                        key = { "al_sec_${it.title}" },
-                        contentType = { "carousel" }
-                    ) { sec ->
+                        key = { secIdx, sec -> "al_sec_${secIdx}_${sec.title}" },
+                        contentType = { _, _ -> "carousel" }
+                    ) { secIdx, sec ->
                         Spacer(modifier = Modifier.height(14.dp))
                         SectionHeading(title = sec.title)
                         LazyRow(
                             flingBehavior = smoothFling,
                             contentPadding = PaddingValues(horizontal = 10.dp)
                         ) {
-                            items(
+                            itemsIndexed(
                                 items = sec.items,
-                                key = { "${sec.title}_${it.id}" },
-                                contentType = { "media_card" }
-                            ) { item ->
+                                key = { itemIdx, item -> "al_${secIdx}_${itemIdx}_${item.id}" },
+                                contentType = { _, _ -> "media_card" }
+                            ) { _, item ->
                                 MediaSquareCard(item = item, onClick = { onOpenBrowseItem(item) })
                             }
                         }
@@ -423,22 +423,22 @@ fun ArtistDetailScreen(
                         }
                     }
 
-                    items(
+                    itemsIndexed(
                         items = artist.sections,
-                        key = { "ar_sec_${it.title}" },
-                        contentType = { "carousel" }
-                    ) { sec ->
+                        key = { secIdx, sec -> "ar_sec_${secIdx}_${sec.title}" },
+                        contentType = { _, _ -> "carousel" }
+                    ) { secIdx, sec ->
                         Spacer(modifier = Modifier.height(14.dp))
                         SectionHeading(title = sec.title)
                         LazyRow(
                             flingBehavior = smoothFling,
                             contentPadding = PaddingValues(horizontal = 10.dp)
                         ) {
-                            items(
+                            itemsIndexed(
                                 items = sec.items,
-                                key = { "${sec.title}_${it.id}" },
-                                contentType = { "media_card" }
-                            ) { item ->
+                                key = { itemIdx, item -> "ar_${secIdx}_${itemIdx}_${item.id}" },
+                                contentType = { _, _ -> "media_card" }
+                            ) { _, item ->
                                 MediaSquareCard(item = item, onClick = { onOpenBrowseItem(item) })
                             }
                         }

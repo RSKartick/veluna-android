@@ -74,8 +74,8 @@ class VelunaApplication : Application(), ImageLoaderFactory {
         container = VelunaAppContainer(this)
         container.scrobbleClient.registerConnectivityFlush(this)
         appScope.launch {
-            container.prefsRepository.migrateSecretsAndPruneLegacyKeys()
-            container.scrobbleClient.flushPendingScrobbles()
+            runCatching { container.prefsRepository.migrateSecretsAndPruneLegacyKeys() }
+            runCatching { container.scrobbleClient.flushPendingScrobbles() }
         }
     }
 

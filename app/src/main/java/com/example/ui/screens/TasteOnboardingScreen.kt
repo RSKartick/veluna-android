@@ -279,7 +279,7 @@ fun TasteOnboardingScreen(
                                                 .clickable {
                                                     hasHydrated = true
                                                     if (picked) selectedArtists.removeAll { it.id == artist.id }
-                                                    else selectedArtists.add(TasteSeed(artist.id, artist.title, artist.subtitle, artist.thumbnail))
+                                                    else selectedArtists.add(TasteSeed(artist.id, artist.title, artist.subtitle, artist.thumbnail, updatedAtMs = System.currentTimeMillis()))
                                                 }
                                                 .padding(4.dp)
                                                 .testTag("onboarding_artist_${artist.id}")
@@ -342,7 +342,7 @@ fun TasteOnboardingScreen(
                                     .clickable {
                                         hasHydrated = true
                                         if (picked) selectedSongs.removeAll { it.id == song.id }
-                                        else selectedSongs.add(TasteSeed(song.id, song.title, song.subtitle, song.thumbnail))
+                                        else selectedSongs.add(TasteSeed(song.id, song.title, song.subtitle, song.thumbnail, updatedAtMs = System.currentTimeMillis()))
                                     }
                                     .testTag("onboarding_song_${song.id}")
                             ) {

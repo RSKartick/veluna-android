@@ -276,6 +276,7 @@ fun VelunaNavHost(
                 onTrackMore = onTrackMore,
                 onEditLocalPlaylist = detailVm::updateLocalPlaylistDetails,
                 onRemoveDuplicates = onRemoveDuplicates,
+                onRemoveLocalTrack = detailVm::removeTrackFromLocalPlaylist,
                 onDeletePlaylist = onDeletePlaylist,
                 onExportM3u = detailVm::exportM3uText,
                 onExportCsv = detailVm::exportCsvText,
@@ -614,6 +615,18 @@ private fun LibraryTabPane(
         derivedStateOf { playbackState.value.nowPlaying?.videoId }
     }
     val onToggleLike = remember(container) { { song: SongItem -> container.playerController.toggleLike(song) } }
+    val onRetryDownload = remember(container) {
+        { prog: DownloadProgress ->
+            container.playerController.downloadTrack(
+                SongItem(
+                    videoId = prog.videoId,
+                    title = prog.title,
+                    artists = prog.artists,
+                    thumbnail = prog.thumbnail
+                )
+            )
+        }
+    }
 
     LibraryScreen(
         playlists = playlists,
@@ -633,7 +646,9 @@ private fun LibraryTabPane(
         onImportLocalFiles = libraryStatsVm::importLocalFiles,
         onImportLocalFolder = libraryStatsVm::importLocalFolder,
         onRemoveLocalTrack = libraryStatsVm::removeLocalTrack,
-        onDeleteDownload = container.playerController::deleteDownload
+        onDeleteDownload = container.playerController::deleteDownload,
+        onRetryDownload = onRetryDownload,
+        onDismissDownloadStatus = container.playerController::dismissDownloadStatus
     )
 }
 

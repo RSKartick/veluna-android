@@ -17,14 +17,15 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AudioFile
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.CreateNewFolder
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Shuffle
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
@@ -61,7 +62,9 @@ internal fun LibraryDownloadsTab(
     nowPlayingId: String?,
     onPlaySongs: (List<SongItem>, Int, String) -> Unit,
     onTrackMore: (SongItem) -> Unit,
-    onDeleteDownload: (String) -> Unit
+    onDeleteDownload: (String) -> Unit,
+    onRetryDownload: (DownloadProgress) -> Unit = {},
+    onDismissDownloadStatus: (String) -> Unit = {}
 ) {
     val activeList = remember(activeDownloads) {
         activeDownloads.values.filter {
@@ -85,11 +88,12 @@ internal fun LibraryDownloadsTab(
             contentPadding = PaddingValues(bottom = 28.dp),
             modifier = Modifier.fillMaxSize()
         ) {
-            items(
+            itemsIndexed(
                 items = activeList,
-                key = { "dl_active_${it.videoId}" },
-                contentType = { "download_progress" }
-            ) { prog ->
+                key = { idx, prog -> "dl_active_${idx}_${prog.videoId}" },
+                contentType = { _, _ -> "download_progress" }
+            ) { _, prog ->
+                val isFailed = prog.status == DownloadStatus.FAILED
                 Surface(
                     color = MaterialTheme.colorScheme.surfaceContainer,
                     contentColor = MaterialTheme.colorScheme.onSurface,
@@ -100,15 +104,49 @@ internal fun LibraryDownloadsTab(
                 ) {
                     Column(modifier = Modifier.padding(12.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Rounded.Download, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                            Icon(
+                                imageVector = Icons.Rounded.Download,
+                                contentDescription = null,
+                                tint = if (isFailed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+                            )
                             Spacer(modifier = Modifier.width(8.dp))
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(prog.title, style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurface, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                Text(prog.error ?: prog.status.name, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(
+                                    text = prog.error ?: prog.status.name,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = if (isFailed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            if (isFailed) {
+                                IconButton(
+                                    onClick = { onRetryDownload(prog) },
+                                    modifier = Modifier.size(48.dp).testTag("dl_retry_${prog.videoId}")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Refresh,
+                                        contentDescription = stringResource(R.string.action_retry),
+                                        tint = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                                IconButton(
+                                    onClick = { onDismissDownloadStatus(prog.videoId) },
+                                    modifier = Modifier.size(48.dp).testTag("dl_dismiss_${prog.videoId}")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Close,
+                                        contentDescription = stringResource(R.string.action_dismiss),
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
                             }
                         }
-                        Spacer(modifier = Modifier.height(6.dp))
-                        LinearProgressIndicator(progress = { prog.progress }, modifier = Modifier.fillMaxWidth())
+                        if (!isFailed) {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            LinearProgressIndicator(progress = { prog.progress }, modifier = Modifier.fillMaxWidth())
+                        }
                     }
                 }
             }
@@ -125,7 +163,7 @@ internal fun LibraryDownloadsTab(
 
             itemsIndexed(
                 items = downloads,
-                key = { _, song -> "dl_done_${song.videoId}" },
+                key = { idx, song -> "dl_done_${idx}_${song.videoId}" },
                 contentType = { _, _ -> "track" }
             ) { idx, song ->
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -240,7 +278,7 @@ internal fun LibraryLocalMusicTab(
             }
             itemsIndexed(
                 items = localTracks,
-                key = { _, song -> song.videoId },
+                key = { idx, song -> "local_${idx}_${song.videoId}" },
                 contentType = { _, _ -> "track" }
             ) { idx, song ->
                 Row(verticalAlignment = Alignment.CenterVertically) {

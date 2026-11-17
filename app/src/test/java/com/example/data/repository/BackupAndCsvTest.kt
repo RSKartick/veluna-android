@@ -282,7 +282,35 @@ class BackupAndCsvTest {
         assertThat(keys.zipWithNext().all { (a, b) -> a < b }).isTrue()
         assertThat(keys.first()).isEqualTo(sixtyDaysAgo.format(dayFmt))
         assertThat(keys.last()).isEqualTo(today.format(dayFmt))
-        assertThat(allStats.dailySeries.first().secs).isEqualTo(1000L)
-        assertThat(allStats.dailySeries.last().secs).isEqualTo(300L)
+        assertThat(keysLastCheck(allStats)).isTrue()
+    }
+
+    private fun keysLastCheck(allStats: com.example.model.StatsSummary): Boolean {
+        return allStats.dailySeries.first().secs == 1000L && allStats.dailySeries.last().secs == 300L
+    }
+
+    @Test
+    fun parseCsvOrM3uQueries_stripsUtf8BomForM3uAndCsv() {
+        val bomM3u = "\uFEFF#EXTM3U\n#EXTINF:210,Daft Punk - Digital Love\nhttps://music.youtube.com/watch?v=x1\n"
+        assertThat(VelunaRepository.parseCsvOrM3uQueries(bomM3u))
+            .containsExactly("Daft Punk - Digital Love")
+
+        val bomCsv = "\uFEFFTrack Name,Artist Name(s)\nMidnight City,M83\n"
+        assertThat(VelunaRepository.parseCsvOrM3uQueries(bomCsv))
+            .containsExactly("Midnight City M83")
+    }
+
+    @Test
+    fun removeTrackFromPlaylist_deletesTargetAndKeepsOthers(): Unit = runBlocking {
+        val plId = repo.createPlaylist("Mix", "Desc")
+        val songA = SongItem(videoId = "vidA", title = "Track A", artists = "Artist A", duration = "3:00")
+        val songB = SongItem(videoId = "vidB", title = "Track B", artists = "Artist B", duration = "3:15")
+        repo.addTrackToPlaylist(plId, songA)
+        repo.addTrackToPlaylist(plId, songB)
+
+        repo.removeTrackFromPlaylist(plId, "vidA")
+
+        val loaded = repo.loadPlaylistPage("${com.example.model.LOCAL_PLAYLIST_PREFIX}$plId").getOrThrow()
+        assertThat(loaded.items.map { it.videoId }).containsExactly("vidB")
     }
 }

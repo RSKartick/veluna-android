@@ -45,6 +45,7 @@
     <string name="search_recent">Recent searches</string>
     <string name="search_clear_all">Clear all</string>
     <string name="search_fill_query">Fill query</string>
+    <string name="search_error_title">Search failed</string>
 
     <string name="library_title">Your Library</string>
     <string name="library_import">Import</string>
@@ -143,6 +144,7 @@
     <string name="playlist_export_failed">Export failed: %1$s</string>
     <string name="playlist_edit_details">Edit details &amp; cover</string>
     <string name="playlist_remove_dupes">Remove duplicates</string>
+    <string name="playlist_remove_track">Remove from playlist</string>
     <string name="playlist_delete">Delete playlist</string>
     <string name="playlist_filter_placeholder">Filter tracks…</string>
     <string name="playlist_empty_tracks">No tracks in this playlist yet</string>

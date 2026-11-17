@@ -104,7 +104,8 @@ fun PlaylistDetailScreen(
     onPinShortcut: (BrowseItem) -> Unit,
     onStatusMessage: (String) -> Unit,
     modifier: Modifier = Modifier,
-    onExportCsv: () -> Pair<String, String>? = { null }
+    onExportCsv: () -> Pair<String, String>? = { null },
+    onRemoveLocalTrack: (Long, String) -> Unit = { _, _ -> }
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -427,12 +428,40 @@ fun PlaylistDetailScreen(
                             key = { idx, s -> "pl_${idx}_${s.videoId}" },
                             contentType = { _, _ -> "track" }
                         ) { idx, song ->
-                            TrackRow(
-                                song = song,
-                                isPlaying = nowPlayingId == song.videoId,
-                                onClick = { onPlayTracks(displayedTracks, idx, page.title) },
-                                onMoreClick = { onTrackMore(song) }
-                            )
+                            if (numericLocalId != null) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Box(modifier = Modifier.weight(1f)) {
+                                        TrackRow(
+                                            song = song,
+                                            isPlaying = nowPlayingId == song.videoId,
+                                            onClick = { onPlayTracks(displayedTracks, idx, page.title) },
+                                            onMoreClick = { onTrackMore(song) }
+                                        )
+                                    }
+                                    IconButton(
+                                        onClick = { onRemoveLocalTrack(numericLocalId, song.videoId) },
+                                        modifier = Modifier
+                                            .size(48.dp)
+                                            .testTag("playlist_remove_track_${song.videoId}")
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.Delete,
+                                            contentDescription = stringResource(R.string.playlist_remove_track),
+                                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                            } else {
+                                TrackRow(
+                                    song = song,
+                                    isPlaying = nowPlayingId == song.videoId,
+                                    onClick = { onPlayTracks(displayedTracks, idx, page.title) },
+                                    onMoreClick = { onTrackMore(song) }
+                                )
+                            }
                         }
                     }
                 }

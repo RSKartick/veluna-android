@@ -43,6 +43,10 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
@@ -408,8 +412,9 @@ fun EqualizerBottomSheet(
                 }
             }
 
+            var localBands by remember(bandsDb) { mutableStateOf(bandsDb) }
             EqualizerPresets.bandLabels.forEachIndexed { idx, hzLabel ->
-                val value = bandsDb.getOrElse(idx) { 0f }
+                val value = localBands.getOrElse(idx) { 0f }
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier.fillMaxWidth()
@@ -422,7 +427,15 @@ fun EqualizerBottomSheet(
                     )
                     Slider(
                         value = value,
-                        onValueChange = { onBandChange(idx, it) },
+                        onValueChange = { newVal ->
+                            localBands = localBands.toMutableList().apply {
+                                while (size <= idx) add(0f)
+                                set(idx, newVal)
+                            }
+                        },
+                        onValueChangeFinished = {
+                            onBandChange(idx, localBands.getOrElse(idx) { 0f })
+                        },
                         valueRange = -12f..12f,
                         enabled = enabled,
                         colors = velunaSliderColors(enabled),

@@ -145,6 +145,8 @@ class ScrobbleClient(
             if (due.isEmpty()) return@withLock
 
             val nowSecs = nowMs / 1000L
+            var batchError: String? = null
+            var anySucceeded = false
             for (row in due) {
                 val trackPayload = runCatching {
                     json.decodeFromString<QueuedScrobbleTrack>(row.payloadJson)
@@ -197,13 +199,13 @@ class ScrobbleClient(
                 when (result) {
                     is ScrobbleSubmitResult.Success -> {
                         localDao.deletePendingScrobble(row.id)
-                        repo.setLastScrobbleError(null)
+                        anySucceeded = true
                     }
                     is ScrobbleSubmitResult.Failure -> {
+                        batchError = result.reason
                         val nextAttempt = row.attempts + 1
                         if (!result.retryable || nextAttempt >= MAX_ATTEMPTS) {
                             localDao.deletePendingScrobble(row.id)
-                            repo.setLastScrobbleError(result.reason)
                         } else {
                             val delayMs = computeBackoffMs(nextAttempt)
                             localDao.updatePendingScrobbleRetry(
@@ -212,10 +214,14 @@ class ScrobbleClient(
                                 nextAttemptAt = nowMs + delayMs,
                                 lastError = result.reason
                             )
-                            repo.setLastScrobbleError(result.reason)
                         }
                     }
                 }
+            }
+            if (batchError != null) {
+                repo.setLastScrobbleError(batchError)
+            } else if (anySucceeded) {
+                repo.setLastScrobbleError(null)
             }
         }
     }

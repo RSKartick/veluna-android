@@ -97,11 +97,23 @@ interface VelunaDao {
     @Query("SELECT * FROM local_playlists WHERE id = :id")
     suspend fun getPlaylistById(id: Long): LocalPlaylistEntity?
 
+    @Query("SELECT * FROM local_playlists WHERE cloudKey = :cloudKey LIMIT 1")
+    suspend fun getPlaylistByCloudKey(cloudKey: String): LocalPlaylistEntity?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertPlaylist(playlist: LocalPlaylistEntity): Long
 
-    @Query("UPDATE local_playlists SET title = :title, description = :description, coverUri = :coverUri, updatedAt = :updatedAt WHERE id = :id")
+    @Query("UPDATE local_playlists SET title = :title, description = :description, coverUri = :coverUri, updatedAt = :updatedAt, syncRevision = syncRevision + 1 WHERE id = :id")
     suspend fun updatePlaylist(id: Long, title: String, description: String, coverUri: String?, updatedAt: Long)
+
+    @Query("UPDATE local_playlists SET title = :title, description = :description, coverUri = :coverUri, updatedAt = :updatedAt, syncRevision = :syncRevision WHERE id = :id")
+    suspend fun updatePlaylistFromCloud(id: Long, title: String, description: String, coverUri: String?, updatedAt: Long, syncRevision: Long)
+
+    @Query("UPDATE local_playlists SET updatedAt = :updatedAt, syncRevision = syncRevision + 1 WHERE id = :id")
+    suspend fun touchPlaylistRevision(id: Long, updatedAt: Long)
+
+    @Query("UPDATE local_playlists SET cloudKey = :cloudKey WHERE id = :id")
+    suspend fun updatePlaylistCloudKey(id: Long, cloudKey: String)
 
     @Query("DELETE FROM local_playlists WHERE id = :id")
     suspend fun deletePlaylist(id: Long)
@@ -326,6 +338,28 @@ interface VelunaDao {
     @Query("DELETE FROM sync_tombstones")
     suspend fun clearTombstones()
 
+    // --- Durable Sync Baselines ---
+    @Query("SELECT * FROM sync_baselines WHERE userId = :userId AND entityType = :entityType")
+    suspend fun getSyncBaselinesByType(userId: String, entityType: String): List<SyncBaselineEntity>
+
+    @Query("SELECT * FROM sync_baselines WHERE userId = :userId")
+    suspend fun getAllSyncBaselinesForUser(userId: String): List<SyncBaselineEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertSyncBaseline(baseline: SyncBaselineEntity)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertSyncBaselines(baselines: List<SyncBaselineEntity>)
+
+    @Query("DELETE FROM sync_baselines WHERE userId = :userId AND entityType = :entityType AND entityKey = :entityKey")
+    suspend fun deleteSyncBaseline(userId: String, entityType: String, entityKey: String)
+
+    @Query("DELETE FROM sync_baselines WHERE userId = :userId AND entityType = :entityType")
+    suspend fun clearSyncBaselinesForType(userId: String, entityType: String)
+
+    @Query("DELETE FROM sync_baselines")
+    suspend fun clearAllSyncBaselines()
+
     // --- Pending Scrobbles Retry Queue ---
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertPendingScrobble(entity: PendingScrobbleEntity): Long
@@ -349,22 +383,33 @@ interface VelunaDao {
     suspend fun clearPendingScrobbles()
 
     /**
-     * Transactionally clears all account-owned tables on sign-out or account deletion.
+     * Transactionally clears ONLY cloud-synced account tables on sign-out.
+     * Preserves all device-only datasets: listens, listen_songs, search_history, saved_albums,
+     * followed_artists, shortcuts, local_tracks, downloaded_tracks, lyrics_cache, and pending_scrobbles.
+     */
+    @Transaction
+    suspend fun clearSyncedAccountData() {
+        clearLikedSongs()
+        clearAllPlaylistTracks()
+        clearPlaylists()
+        clearBlockedArtists()
+        clearTombstones()
+        clearAllSyncBaselines()
+    }
+
+    /**
+     * Transactionally clears all account-owned tables on permanent account deletion.
      * Deliberately preserves local_tracks, downloaded_tracks, and lyrics_cache.
      */
     @Transaction
     suspend fun clearAccountData() {
-        clearLikedSongs()
-        clearAllPlaylistTracks()
-        clearPlaylists()
+        clearSyncedAccountData()
         clearSavedAlbums()
         clearFollowedArtists()
         clearShortcuts()
         clearListens()
         clearListenSongs()
         clearSearchHistory()
-        clearBlockedArtists()
-        clearTombstones()
         clearPendingScrobbles()
     }
 }
