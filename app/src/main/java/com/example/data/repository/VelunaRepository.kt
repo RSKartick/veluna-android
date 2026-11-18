@@ -23,6 +23,7 @@ import com.example.data.local.UserPrefsRepository
 import com.example.data.local.VelunaDao
 import com.example.data.local.VelunaDatabase
 import com.example.data.local.VelunaUserPrefs
+import com.example.data.local.newCloudPlaylistKey
 import com.example.data.network.InnerTubeClient
 import com.example.model.BrowseItem
 import com.example.model.BrowseKind
@@ -112,7 +113,7 @@ data class BackupListenEntry(
 @Serializable
 data class VelunaBackupPayload(
     @EncodeDefault(EncodeDefault.Mode.ALWAYS)
-    val version: Int = 2,
+    val version: Int = 3,
     val exportedAt: Long = System.currentTimeMillis(),
     val prefs: VelunaUserPrefs,
     val playlists: List<BackupPlaylist> = emptyList(),
@@ -130,7 +131,9 @@ data class VelunaBackupPayload(
 data class BackupPlaylist(
     val title: String,
     val description: String,
-    val tracks: List<SongItem>
+    val tracks: List<SongItem>,
+    val coverUri: String? = null,
+    val cloudKey: String? = null
 )
 
 data class BackupRestoreResult(
@@ -319,10 +322,12 @@ class VelunaRepository(
         val now = System.currentTimeMillis()
         return dao.insertPlaylist(
             LocalPlaylistEntity(
+                cloudKey = newCloudPlaylistKey(),
                 title = title.trim(),
                 description = description.trim(),
                 createdAt = now,
-                updatedAt = now
+                updatedAt = now,
+                syncRevision = 1L
             )
         )
     }
@@ -339,9 +344,7 @@ class VelunaRepository(
 
     suspend fun deletePlaylist(playlistId: Long) = withContext(Dispatchers.IO) {
         val cover = dao.getPlaylistById(playlistId)?.coverUri
-        dao.clearPlaylistTracks(playlistId)
-        dao.deletePlaylist(playlistId)
-        dao.deleteShortcut("$LOCAL_PLAYLIST_PREFIX$playlistId")
+        dao.deletePlaylistAtomic(playlistId, "$LOCAL_PLAYLIST_PREFIX$playlistId")
         if (cover != null) deleteManagedPlaylistCover(cover)
     }
 
@@ -375,7 +378,7 @@ class VelunaRepository(
         }.getOrElse { trimmed }
     }
 
-    private fun deleteManagedPlaylistCover(coverUri: String) {
+    internal fun deleteManagedPlaylistCover(coverUri: String) {
         runCatching {
             val parsed = coverUri.toUri()
             if (parsed.scheme == "file") {
@@ -390,35 +393,36 @@ class VelunaRepository(
 
     suspend fun addTrackToPlaylist(playlistId: Long, song: SongItem, skipDuplicates: Boolean = true): Boolean {
         if (song.isLocal || song.videoId.startsWith(LOCAL_SONG_PREFIX)) return false
-        val existing = dao.getPlaylistTracks(playlistId)
-        if (skipDuplicates && existing.any { it.videoId == song.videoId }) return false
-        val pos = dao.nextPlaylistPosition(playlistId)
-        dao.insertPlaylistTrack(
-            LocalPlaylistTrackEntity(
-                playlistId = playlistId,
-                videoId = song.videoId,
-                songJson = encodeSong(song),
-                position = pos
-            )
+        val now = System.currentTimeMillis()
+        val track = LocalPlaylistTrackEntity(
+            playlistId = playlistId,
+            videoId = song.videoId,
+            songJson = encodeSong(song),
+            position = 0,
+            addedAt = now
         )
-        return true
+        return dao.addTrackToPlaylistAtomic(playlistId, track, skipDuplicates, now)
     }
 
     suspend fun removeTrackFromPlaylist(playlistId: Long, videoId: String) {
-        dao.deletePlaylistTrack(playlistId, videoId)
+        dao.removeTrackFromPlaylistAtomic(playlistId, videoId, System.currentTimeMillis())
     }
 
     suspend fun removeDuplicateTracksFromPlaylist(playlistId: Long): Int {
-        val tracks = dao.getPlaylistTracks(playlistId)
-        val seen = mutableSetOf<String>()
-        var removed = 0
-        tracks.forEach { row ->
-            if (!seen.add(row.videoId)) {
-                dao.deletePlaylistTrackByRowId(row.id)
-                removed++
-            }
-        }
-        return removed
+        return dao.removeDuplicateTracksFromPlaylistAtomic(playlistId, System.currentTimeMillis())
+    }
+
+    suspend fun reorderPlaylistTracks(playlistId: Long, orderedRowIds: List<Long>): Boolean {
+        return dao.reorderPlaylistTracksAtomic(playlistId, orderedRowIds, System.currentTimeMillis())
+    }
+
+    suspend fun reorderPlaylistTracksByIndex(playlistId: Long, fromIndex: Int, toIndex: Int): Boolean {
+        val current = dao.getPlaylistTracks(playlistId)
+        if (fromIndex !in current.indices || toIndex !in current.indices || fromIndex == toIndex) return false
+        val mutable = current.map { it.id }.toMutableList()
+        val moved = mutable.removeAt(fromIndex)
+        mutable.add(toIndex, moved)
+        return dao.reorderPlaylistTracksAtomic(playlistId, mutable, System.currentTimeMillis())
     }
 
     suspend fun loadPlaylistPage(id: String): Result<PlaylistPage> = withContext(Dispatchers.IO) {
@@ -639,10 +643,27 @@ class VelunaRepository(
             ?: return@withContext Result.failure(IllegalArgumentException("Could not find a YouTube playlist ID in that link."))
         onProgress("Fetching playlist from YouTube Music…")
         val page = innerTube.getPlaylist(listId).getOrElse { return@withContext Result.failure(it) }
-        val newId = createPlaylist(page.title, page.description.orEmpty())
-        page.items.forEach { song ->
-            addTrackToPlaylist(newId, song, skipDuplicates = false)
-        }
+        val now = System.currentTimeMillis()
+        val playlistEntity = LocalPlaylistEntity(
+            cloudKey = newCloudPlaylistKey(),
+            title = page.title.trim().ifBlank { "Imported Playlist" }.take(120),
+            description = page.description.orEmpty().trim().take(500),
+            createdAt = now,
+            updatedAt = now,
+            syncRevision = 1L
+        )
+        val tracks = page.items
+            .filter { !it.isLocal && !it.videoId.startsWith(LOCAL_SONG_PREFIX) }
+            .mapIndexed { idx, song ->
+                LocalPlaylistTrackEntity(
+                    playlistId = 0,
+                    videoId = song.videoId,
+                    songJson = encodeSong(song),
+                    position = idx,
+                    addedAt = now
+                )
+            }
+        val newId = dao.createPlaylistWithTracks(playlistEntity, tracks)
         Result.success(newId)
     }
 
@@ -664,14 +685,34 @@ class VelunaRepository(
             return@withContext Result.failure(IllegalArgumentException("No tracks found in file (supports Exportify CSV or M3U)."))
         }
 
-        val playlistId = createPlaylist(defaultTitle, "Imported playlist")
+        val matchedSongs = mutableListOf<SongItem>()
+        val seenVideoIds = HashSet<String>()
         queries.forEachIndexed { idx, q ->
             onProgress(idx + 1, queries.size, "Matching: $q")
             val match = innerTube.searchSongs(q).getOrNull()?.firstOrNull()
-            if (match != null) {
-                addTrackToPlaylist(playlistId, match, skipDuplicates = true)
+            if (match != null && !match.isLocal && !match.videoId.startsWith(LOCAL_SONG_PREFIX) && seenVideoIds.add(match.videoId)) {
+                matchedSongs.add(match)
             }
         }
+        val now = System.currentTimeMillis()
+        val playlistEntity = LocalPlaylistEntity(
+            cloudKey = newCloudPlaylistKey(),
+            title = defaultTitle.trim().ifBlank { "Imported Playlist" }.take(120),
+            description = "Imported playlist",
+            createdAt = now,
+            updatedAt = now,
+            syncRevision = 1L
+        )
+        val tracks = matchedSongs.mapIndexed { idx, song ->
+            LocalPlaylistTrackEntity(
+                playlistId = 0,
+                videoId = song.videoId,
+                songJson = encodeSong(song),
+                position = idx,
+                addedAt = now
+            )
+        }
+        val playlistId = dao.createPlaylistWithTracks(playlistEntity, tracks)
         Result.success(playlistId)
     }
 
@@ -691,7 +732,7 @@ class VelunaRepository(
 
     fun exportPlaylistAsCsv(tracks: List<SongItem>): String = formatPlaylistAsCsv(tracks)
 
-    // --- Backup & Restore (v2 with v1 compatibility) ---
+    // --- Backup & Restore (v3 with v1 & v2 compatibility) ---
     suspend fun exportBackupJson(prefs: VelunaUserPrefs): String = withContext(Dispatchers.IO) {
         val sanitizedPrefs = redactPrefsForExport(prefs)
         val playlistRows = dao.getPlaylistsOnce()
@@ -729,12 +770,18 @@ class VelunaRepository(
 
         val playlists = playlistRows.map { pl ->
             val tracks = dao.getPlaylistTracks(pl.id).mapNotNull { decodeSong(it.songJson) }
-            BackupPlaylist(pl.title, pl.description, tracks)
+            BackupPlaylist(
+                title = pl.title,
+                description = pl.description,
+                tracks = tracks,
+                coverUri = SecurityValidators.sanitizeHttpsUrl(pl.coverUri, 500),
+                cloudKey = pl.cloudKey
+            )
         }
 
         json.encodeToString(
             VelunaBackupPayload(
-                version = 2,
+                version = 3,
                 exportedAt = System.currentTimeMillis(),
                 prefs = sanitizedPrefs,
                 playlists = playlists,
@@ -754,10 +801,10 @@ class VelunaRepository(
         suspendRunCatching {
             require(rawJson.length <= MAX_BACKUP_JSON_CHARS) { "Backup file exceeds maximum supported size." }
             val payload = json.decodeFromString<VelunaBackupPayload>(rawJson)
-            val blockWrite: suspend () -> Int = {
-                prefsRepo.applyBackup(clampBackupPrefs(payload.prefs))
-                payload.tasteProfile?.let(::sanitizeBackupTasteProfile)?.let { prefsRepo.saveTasteProfile(it) }
+            val preImportSnapshot = prefsRepo.captureRawPreferencesSnapshot()
+            val insertedPlaylistIds = mutableListOf<Long>()
 
+            val blockWrite: suspend () -> Int = {
                 payload.likedSongs
                     .take(5_000)
                     .mapNotNull(::sanitizeBackupSong)
@@ -828,8 +875,10 @@ class VelunaRepository(
                     )
                 }
 
-                // Deduplicate playlists against existing ones using (normalizedTitle, trackSignature)
-                val existingSignatures = dao.getPlaylistsOnce().map { existing ->
+                // Deduplicate playlists against existing ones using cloudKey and (normalizedTitle, trackSignature)
+                val existingPlaylists = dao.getPlaylistsOnce()
+                val existingCloudKeys = existingPlaylists.mapTo(HashSet()) { it.cloudKey }
+                val existingSignatures = existingPlaylists.map { existing ->
                     val existingTracks = dao.getPlaylistTracks(existing.id).map { it.videoId }
                     normalizePlaylistTitle(existing.title) to playlistTrackSignature(existingTracks)
                 }.toMutableSet()
@@ -838,37 +887,75 @@ class VelunaRepository(
                 payload.playlists.take(500).forEach { pl ->
                     val cleanTracks = pl.tracks.take(5_000).mapNotNull(::sanitizeBackupSong)
                     val cleanTitle = pl.title.trim().ifBlank { "Playlist" }.take(120)
+                    val requestedKey = pl.cloudKey?.trim()?.takeIf {
+                        it.length in 1..128 &&
+                            it.matches(VALID_CLOUD_KEY_REGEX) &&
+                            !it.startsWith("LOCAL", ignoreCase = true)
+                    }
+                    if (requestedKey != null && requestedKey in existingCloudKeys) {
+                        return@forEach
+                    }
                     val sigKey = normalizePlaylistTitle(cleanTitle) to playlistTrackSignature(cleanTracks.map { it.videoId })
                     if (existingSignatures.add(sigKey)) {
                         val now = System.currentTimeMillis()
-                        val id = dao.insertPlaylist(
-                            LocalPlaylistEntity(
-                                title = cleanTitle,
-                                description = pl.description.trim().take(500),
-                                createdAt = now,
-                                updatedAt = now
-                            )
-                        )
-                        cleanTracks.forEachIndexed { idx, song ->
-                            dao.insertPlaylistTrack(
-                                LocalPlaylistTrackEntity(
-                                    playlistId = id,
-                                    videoId = song.videoId,
-                                    songJson = encodeSong(song),
-                                    position = idx
-                                )
+                        val resolvedKey = requestedKey ?: newCloudPlaylistKey()
+                        existingCloudKeys.add(resolvedKey)
+                        val trackEntities = cleanTracks.mapIndexed { idx, song ->
+                            LocalPlaylistTrackEntity(
+                                playlistId = 0,
+                                videoId = song.videoId,
+                                songJson = encodeSong(song),
+                                position = idx,
+                                addedAt = now
                             )
                         }
+                        val id = dao.createPlaylistWithTracks(
+                            LocalPlaylistEntity(
+                                cloudKey = resolvedKey,
+                                title = cleanTitle,
+                                description = pl.description.trim().take(500),
+                                coverUri = SecurityValidators.sanitizeHttpsUrl(pl.coverUri, 500),
+                                createdAt = now,
+                                updatedAt = now,
+                                syncRevision = 1L
+                            ),
+                            trackEntities
+                        )
+                        insertedPlaylistIds.add(id)
                         count++
                     }
                 }
                 count
             }
 
+            // Room writes commit FIRST inside a single transaction before DataStore is modified
             val restoredCount = if (database != null) {
                 database.withTransaction { blockWrite() }
             } else {
                 blockWrite()
+            }
+
+            val clampedPrefs = clampBackupPrefs(payload.prefs)
+            val sanitizedTaste = payload.tasteProfile?.let(::sanitizeBackupTasteProfile)
+            try {
+                prefsRepo.applyBackupWithTaste(clampedPrefs, sanitizedTaste)
+            } catch (dsErr: Throwable) {
+                // Compensate Room and DataStore if DataStore persistence fails
+                runCatching {
+                    val compensate: suspend () -> Unit = {
+                        insertedPlaylistIds.forEach { plId ->
+                            dao.clearPlaylistTracks(plId)
+                            dao.deletePlaylist(plId)
+                        }
+                    }
+                    if (database != null) {
+                        database.withTransaction { compensate() }
+                    } else {
+                        compensate()
+                    }
+                }
+                runCatching { prefsRepo.restoreRawPreferencesSnapshot(preImportSnapshot) }
+                throw dsErr
             }
             BackupRestoreResult(restoredPlaylists = restoredCount, sourceVersion = payload.version)
         }
@@ -1122,6 +1209,7 @@ class VelunaRepository(
         private const val MAX_PLAYLIST_IMPORT_BYTES = 5 * 1024 * 1024
         private const val MAX_COVER_BYTES = 8 * 1024 * 1024
         private const val MAX_BACKUP_JSON_CHARS = 16 * 1024 * 1024
+        private val VALID_CLOUD_KEY_REGEX = Regex("^[a-zA-Z0-9_\\-]+$")
 
         private fun m3uSingleLine(value: String): String = value.replace(Regex("[\\r\\n\\u0000]+"), " ")
 

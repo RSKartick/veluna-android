@@ -112,6 +112,9 @@ interface VelunaDao {
     @Query("UPDATE local_playlists SET updatedAt = :updatedAt, syncRevision = syncRevision + 1 WHERE id = :id")
     suspend fun touchPlaylistRevision(id: Long, updatedAt: Long)
 
+    @Query("UPDATE local_playlists SET syncRevision = :syncRevision WHERE id = :id")
+    suspend fun setPlaylistSyncRevision(id: Long, syncRevision: Long)
+
     @Query("UPDATE local_playlists SET cloudKey = :cloudKey WHERE id = :id")
     suspend fun updatePlaylistCloudKey(id: Long, cloudKey: String)
 
@@ -139,6 +142,9 @@ interface VelunaDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertPlaylistTrack(track: LocalPlaylistTrackEntity)
 
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertPlaylistTracks(tracks: List<LocalPlaylistTrackEntity>)
+
     @Query("DELETE FROM local_playlist_tracks WHERE id = :trackRowId")
     suspend fun deletePlaylistTrackByRowId(trackRowId: Long)
 
@@ -147,6 +153,151 @@ interface VelunaDao {
 
     @Query("UPDATE local_playlist_tracks SET position = :position WHERE id = :rowId")
     suspend fun updatePlaylistTrackPosition(rowId: Long, position: Int)
+
+    @Transaction
+    suspend fun createPlaylistWithTracks(
+        playlist: LocalPlaylistEntity,
+        tracks: List<LocalPlaylistTrackEntity>
+    ): Long {
+        require(playlist.cloudKey.isNotBlank()) { "Playlist cloudKey must not be blank" }
+        val newId = insertPlaylist(playlist)
+        if (tracks.isNotEmpty()) {
+            val normalized = tracks.mapIndexed { index, track ->
+                track.copy(id = 0, playlistId = newId, position = index)
+            }
+            insertPlaylistTracks(normalized)
+        }
+        return newId
+    }
+
+    @Transaction
+    suspend fun addTrackToPlaylistAtomic(
+        playlistId: Long,
+        track: LocalPlaylistTrackEntity,
+        skipDuplicates: Boolean,
+        updatedAt: Long
+    ): Boolean {
+        if (getPlaylistById(playlistId) == null) return false
+        val existing = getPlaylistTracks(playlistId)
+        if (skipDuplicates && existing.any { it.videoId == track.videoId }) return false
+        val pos = (existing.maxOfOrNull { it.position } ?: -1) + 1
+        insertPlaylistTrack(track.copy(id = 0, playlistId = playlistId, position = pos))
+        touchPlaylistRevision(playlistId, updatedAt)
+        return true
+    }
+
+    @Transaction
+    suspend fun removeTrackFromPlaylistAtomic(
+        playlistId: Long,
+        videoId: String,
+        updatedAt: Long
+    ): Boolean {
+        val existing = getPlaylistTracks(playlistId)
+        val remaining = existing.filterNot { it.videoId == videoId }
+        if (remaining.size == existing.size) return false
+        deletePlaylistTrack(playlistId, videoId)
+        remaining.forEachIndexed { idx, row ->
+            if (row.position != idx) {
+                updatePlaylistTrackPosition(row.id, idx)
+            }
+        }
+        touchPlaylistRevision(playlistId, updatedAt)
+        return true
+    }
+
+    @Transaction
+    suspend fun removeDuplicateTracksFromPlaylistAtomic(
+        playlistId: Long,
+        updatedAt: Long
+    ): Int {
+        val tracks = getPlaylistTracks(playlistId)
+        val seen = HashSet<String>(tracks.size)
+        val kept = mutableListOf<LocalPlaylistTrackEntity>()
+        var removed = 0
+        for (row in tracks) {
+            if (!seen.add(row.videoId)) {
+                deletePlaylistTrackByRowId(row.id)
+                removed++
+            } else {
+                kept.add(row)
+            }
+        }
+        if (removed > 0) {
+            kept.forEachIndexed { idx, row ->
+                if (row.position != idx) {
+                    updatePlaylistTrackPosition(row.id, idx)
+                }
+            }
+            touchPlaylistRevision(playlistId, updatedAt)
+        }
+        return removed
+    }
+
+    @Transaction
+    suspend fun reorderPlaylistTracksAtomic(
+        playlistId: Long,
+        orderedRowIds: List<Long>,
+        updatedAt: Long
+    ): Boolean {
+        val existing = getPlaylistTracks(playlistId)
+        if (existing.size <= 1) return false
+        val byId = existing.associateBy { it.id }
+        val reordered = mutableListOf<LocalPlaylistTrackEntity>()
+        val seen = HashSet<Long>(existing.size)
+        for (rowId in orderedRowIds) {
+            val row = byId[rowId]
+            if (row != null && seen.add(rowId)) {
+                reordered.add(row)
+            }
+        }
+        for (row in existing) {
+            if (seen.add(row.id)) {
+                reordered.add(row)
+            }
+        }
+        if (reordered.map { it.id } == existing.map { it.id }) return false
+        reordered.forEachIndexed { idx, row ->
+            if (row.position != idx) {
+                updatePlaylistTrackPosition(row.id, idx)
+            }
+        }
+        touchPlaylistRevision(playlistId, updatedAt)
+        return true
+    }
+
+    @Transaction
+    suspend fun replacePlaylistFromCloudAtomic(
+        playlistId: Long,
+        title: String,
+        description: String,
+        coverUri: String?,
+        updatedAt: Long,
+        syncRevision: Long,
+        tracks: List<LocalPlaylistTrackEntity>
+    ) {
+        updatePlaylistFromCloud(
+            id = playlistId,
+            title = title,
+            description = description,
+            coverUri = coverUri,
+            updatedAt = updatedAt,
+            syncRevision = syncRevision
+        )
+        clearPlaylistTracks(playlistId)
+        if (tracks.isNotEmpty()) {
+            val normalized = tracks.mapIndexed { idx, row ->
+                row.copy(id = 0, playlistId = playlistId, position = idx)
+            }
+            insertPlaylistTracks(normalized)
+        }
+    }
+
+    @Transaction
+    suspend fun deletePlaylistAtomic(playlistId: Long, shortcutId: String) {
+        clearPlaylistTracks(playlistId)
+        deletePlaylist(playlistId)
+        deleteShortcut(shortcutId)
+    }
 
     @Query(
         """
@@ -356,6 +507,9 @@ interface VelunaDao {
 
     @Query("DELETE FROM sync_baselines WHERE userId = :userId AND entityType = :entityType")
     suspend fun clearSyncBaselinesForType(userId: String, entityType: String)
+
+    @Query("DELETE FROM sync_baselines WHERE userId = :userId")
+    suspend fun clearSyncBaselinesForUser(userId: String)
 
     @Query("DELETE FROM sync_baselines")
     suspend fun clearAllSyncBaselines()

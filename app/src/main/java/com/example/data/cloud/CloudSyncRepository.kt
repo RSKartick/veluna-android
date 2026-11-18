@@ -31,6 +31,14 @@ import kotlinx.coroutines.tasks.await
 import java.security.MessageDigest
 import java.util.Collections
 import java.util.Date
+import java.util.UUID
+
+class StalePlaylistRevisionException(
+    val remoteRevision: Long,
+    val attemptedRevision: Long
+) : IllegalStateException(
+    "Remote playlist revision $remoteRevision supersedes local revision $attemptedRevision"
+)
 
 data class SyncWatermarks(
     val likedMs: Long = 0L,
@@ -43,6 +51,7 @@ class CloudSyncRepository(
     private val db: FirebaseFirestore,
     private val auth: FirebaseAuth = Firebase.auth
 ) {
+    internal var onBeforeCommitPlaylistSnapshot: (suspend (snapshotId: String, chunkIndex: Int) -> Unit)? = null
     constructor(context: Context) : this(
         FirebaseFirestore.getInstance(
             context.applicationContext.getString(R.string.firestore_database_id)
@@ -179,13 +188,23 @@ class CloudSyncRepository(
 
             val playlistsWithTracks = playlistDocs.map { pl ->
                 val subTracks = if (!pl.deleted) {
-                    val trSnap = userDoc.collection("playlists")
-                        .document(pl.playlistKey)
-                        .collection("tracks")
-                        .get()
-                        .await()
-                    trSnap.documents.forEach { knownExistingPaths.add(it.reference.path) }
-                    trSnap.toObjects(CloudPlaylistTrack::class.java)
+                    val plRef = userDoc.collection("playlists").document(pl.playlistKey)
+                    val activeSnapId = pl.activeSnapshotId?.trim()?.takeIf { it.isNotEmpty() }
+                    val snapTracks = if (activeSnapId != null) {
+                        val snapRef = plRef.collection("snapshots").document(activeSnapId)
+                        val trSnap = snapRef.collection("tracks").get().await()
+                        trSnap.documents.forEach { knownExistingPaths.add(it.reference.path) }
+                        trSnap.toObjects(CloudPlaylistTrack::class.java)
+                    } else {
+                        emptyList()
+                    }
+                    if (snapTracks.isNotEmpty() || (activeSnapId != null && pl.trackCount == 0L)) {
+                        snapTracks
+                    } else {
+                        val trSnap = plRef.collection("tracks").get().await()
+                        trSnap.documents.forEach { knownExistingPaths.add(it.reference.path) }
+                        trSnap.toObjects(CloudPlaylistTrack::class.java)
+                    }
                 } else {
                     emptyList()
                 }
@@ -274,7 +293,8 @@ class CloudSyncRepository(
         tasteProfile: TasteProfile,
         email: String?,
         photoUrl: String?,
-        overrideDisplayName: String? = null
+        overrideDisplayName: String? = null,
+        prefsUpdatedAtMs: Long = System.currentTimeMillis()
     ) {
         val uid = requireUserId()
         val docRef = db.collection("users").document(uid)
@@ -306,6 +326,7 @@ class CloudSyncRepository(
             "hideMusicVideos" to prefs.hideMusicVideos,
             "selectedGenres" to safeGenres,
             "onboardingCompleted" to tasteProfile.onboardingCompleted,
+            "prefsUpdatedAt" to prefsUpdatedAtMs.coerceAtLeast(0L),
             "updatedAt" to FieldValue.serverTimestamp()
         )
 
@@ -324,8 +345,9 @@ class CloudSyncRepository(
     }
 
     /**
-     * Upserts active seeds using stable docIds without double-hashing, and writes explicit
-     * tombstone documents for deleted/cleared seeds so empty lists propagate across devices.
+     * Upserts active seeds using stable docIds and preserves each seed's real client timestamp
+     * ([TasteSeed.updatedAtMs]) rather than fabricating `now`. Writes explicit tombstone documents
+     * for deleted/cleared seeds so empty lists propagate across devices.
      */
     suspend fun upsertTasteSeeds(
         artists: List<TasteSeed>,
@@ -339,25 +361,27 @@ class CloudSyncRepository(
 
         artists.take(30).forEach { seed ->
             val docId = resolveSeedDocId("art", seed)
+            val seedTs = (seed.updatedAtMs.takeIf { it > 0L } ?: nowMs).coerceAtLeast(0L)
             targetMap[docId] = mapOf(
                 "kind" to "ARTIST",
                 "name" to seed.name.trim().ifBlank { "Artist" }.take(160),
                 "subtitle" to seed.subtitle?.take(160),
                 "thumbnail" to SecurityValidators.sanitizeHttpsUrl(seed.thumbnail, 500),
                 "deleted" to false,
-                "clientUpdatedAt" to nowMs.coerceAtLeast(0L),
+                "clientUpdatedAt" to seedTs,
                 "updatedAt" to FieldValue.serverTimestamp()
             )
         }
         songs.take(30).forEach { seed ->
             val docId = resolveSeedDocId("sng", seed)
+            val seedTs = (seed.updatedAtMs.takeIf { it > 0L } ?: nowMs).coerceAtLeast(0L)
             targetMap[docId] = mapOf(
                 "kind" to "SONG",
                 "name" to seed.name.trim().ifBlank { "Track" }.take(160),
                 "subtitle" to seed.subtitle?.take(160),
                 "thumbnail" to SecurityValidators.sanitizeHttpsUrl(seed.thumbnail, 500),
                 "deleted" to false,
-                "clientUpdatedAt" to nowMs.coerceAtLeast(0L),
+                "clientUpdatedAt" to seedTs,
                 "updatedAt" to FieldValue.serverTimestamp()
             )
         }
@@ -467,6 +491,15 @@ class CloudSyncRepository(
         }
     }
 
+    /**
+     * Atomically publishes a versioned playlist snapshot:
+     * 1. Creates staging snapshot doc (`state = STAGING`)
+     * 2. Writes track documents in batches <= 400 under `snapshots/{snapshotId}/tracks`
+     * 3. Marks snapshot `COMMITTED`
+     * 4. Runs a Firestore transaction on the parent playlist doc verifying monotonic
+     *    `syncRevision` / `clientUpdatedAt` before switching `activeSnapshotId`
+     * 5. Best-effort deletes superseded snapshots and legacy `tracks` subcollection docs.
+     */
     suspend fun upsertPlaylist(
         playlistKey: String,
         title: String,
@@ -474,97 +507,235 @@ class CloudSyncRepository(
         coverUri: String?,
         tracks: List<SongItem>,
         clientUpdatedAt: Long,
+        syncRevision: Long = 1L,
         removeLegacyTracksField: Boolean = false
     ) {
         val uid = requireUserId()
         val safeKey = sanitizeDocId(playlistKey, prefix = "pl")
         val plDocRef = db.collection("users").document(uid).collection("playlists").document(safeKey)
 
+        val targetRev = syncRevision.coerceAtLeast(1L)
+        val safeClientTs = clientUpdatedAt.coerceAtLeast(0L)
+        val safeCover = SecurityValidators.sanitizeHttpsUrl(coverUri, 500)
         val remoteTracks = tracks.filter { !it.isLocal && !it.videoId.startsWith(LOCAL_SONG_PREFIX) }
-        val targetTrackIds = remoteTracks.map { sanitizeDocId(it.videoId, prefix = "trk") }.toSet()
 
-        val mutableFields = linkedMapOf<String, Any?>(
-            "title" to title.trim().ifBlank { "Playlist" }.take(120),
-            "description" to description.take(500),
-            "coverUri" to SecurityValidators.sanitizeHttpsUrl(coverUri, 500),
-            "deleted" to false,
-            "clientUpdatedAt" to clientUpdatedAt.coerceAtLeast(0L),
-            "updatedAt" to FieldValue.serverTimestamp()
-        )
-        if (removeLegacyTracksField && plDocRef.path in knownExistingPaths) {
-            mutableFields["tracks"] = FieldValue.delete()
-        }
+        val snapshotId = "snap_${targetRev}_${UUID.randomUUID().toString().replace("-", "").take(12)}"
+        val snapRef = plDocRef.collection("snapshots").document(snapshotId)
 
+        var committedParent = false
         try {
-            setMergedWithoutPreRead(plDocRef, mutableFields)
-
-            val tracksCol = plDocRef.collection("tracks")
-            remoteTracks.forEachIndexed { idx, s ->
-                val trkId = sanitizeDocId(s.videoId, prefix = "trk")
-                val trkFields = mapOf<String, Any?>(
-                    "videoId" to s.videoId.take(128),
-                    "title" to s.title.trim().ifBlank { "Track" }.take(200),
-                    "artists" to s.artists.trim().take(200),
-                    "album" to s.album?.take(200),
-                    "albumId" to s.albumId?.take(128),
-                    "artistId" to s.artistId?.take(128),
-                    "duration" to s.duration?.take(24),
-                    "durationSecs" to s.durationSeconds.coerceAtLeast(0L),
-                    "thumbnail" to SecurityValidators.sanitizeHttpsUrl(s.thumbnail, 500),
-                    "explicit" to s.explicit,
-                    "position" to idx,
-                    "addedAt" to (s.addedAt ?: clientUpdatedAt).coerceAtLeast(0L),
-                    "deleted" to false,
-                    "clientUpdatedAt" to clientUpdatedAt.coerceAtLeast(0L),
+            snapRef.set(
+                mapOf(
+                    "state" to "STAGING",
+                    "syncRevision" to targetRev,
+                    "trackCount" to remoteTracks.size.toLong(),
+                    "clientUpdatedAt" to safeClientTs,
+                    "createdAt" to FieldValue.serverTimestamp(),
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
-                setMergedWithoutPreRead(tracksCol.document(trkId), trkFields)
+            ).await()
+
+            val snapTracksCol = snapRef.collection("tracks")
+            remoteTracks.withIndex().chunked(SNAPSHOT_BATCH_LIMIT).forEachIndexed { chunkIdx, chunk ->
+                onBeforeCommitPlaylistSnapshot?.invoke(snapshotId, chunkIdx)
+                val batch = db.batch()
+                for ((idx, s) in chunk) {
+                    val trkId = snapshotTrackDocId(idx, s.videoId)
+                    val trkFields = linkedMapOf<String, Any?>(
+                        "videoId" to s.videoId.take(128),
+                        "title" to s.title.trim().ifBlank { "Track" }.take(200),
+                        "artists" to s.artists.trim().take(200),
+                        "album" to s.album?.take(200),
+                        "albumId" to s.albumId?.take(128),
+                        "artistId" to s.artistId?.take(128),
+                        "duration" to s.duration?.take(24),
+                        "durationSecs" to s.durationSeconds.coerceAtLeast(0L),
+                        "thumbnail" to SecurityValidators.sanitizeHttpsUrl(s.thumbnail, 500),
+                        "explicit" to s.explicit,
+                        "position" to idx,
+                        "addedAt" to (s.addedAt ?: safeClientTs).coerceAtLeast(0L),
+                        "deleted" to false,
+                        "clientUpdatedAt" to safeClientTs,
+                        "createdAt" to FieldValue.serverTimestamp(),
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    ).filterValues { it != null }
+                    batch.set(snapTracksCol.document(trkId), trkFields)
+                }
+                batch.commit().await()
             }
 
-            // Soft-tombstone any track previously in this playlist subcollection that was removed locally
-            val existingTracksSnap = tracksCol.whereEqualTo("deleted", false).get().await()
-            for (doc in existingTracksSnap.documents) {
-                if (doc.id !in targetTrackIds) {
-                    val tomb = mapOf(
-                        "deleted" to true,
-                        "clientUpdatedAt" to clientUpdatedAt.coerceAtLeast(0L),
-                        "updatedAt" to FieldValue.serverTimestamp()
-                    )
-                    knownExistingPaths.add(doc.reference.path)
-                    setMergedWithoutPreRead(doc.reference, tomb)
+            snapRef.update(
+                mapOf(
+                    "state" to "COMMITTED",
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+
+            db.runTransaction { tx ->
+                val existing = tx.get(plDocRef)
+                if (existing.exists()) {
+                    val existingDeleted = existing.getBoolean("deleted") == true
+                    val existingRev = existing.getLong("syncRevision") ?: 0L
+                    val existingTs = existing.getLong("clientUpdatedAt") ?: 0L
+                    val stale = !existingDeleted && (
+                        existingRev > targetRev ||
+                            (existingRev == targetRev && existingTs > safeClientTs)
+                        )
+                    if (stale) {
+                        throw StalePlaylistRevisionException(existingRev, targetRev)
+                    }
                 }
-            }
+
+                val payload = linkedMapOf<String, Any?>(
+                    "title" to title.trim().ifBlank { "Playlist" }.take(120),
+                    "description" to description.take(500),
+                    "deleted" to false,
+                    "syncRevision" to targetRev,
+                    "activeSnapshotId" to snapshotId,
+                    "trackCount" to remoteTracks.size.toLong(),
+                    "clientUpdatedAt" to safeClientTs,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+                if (safeCover != null) {
+                    payload["coverUri"] = safeCover
+                } else if (existing.exists() && existing.contains("coverUri")) {
+                    payload["coverUri"] = FieldValue.delete()
+                }
+                if (!existing.exists()) {
+                    payload["createdAt"] = FieldValue.serverTimestamp()
+                    tx.set(plDocRef, payload.filterValues { it != null })
+                } else {
+                    if (removeLegacyTracksField || existing.contains("tracks")) {
+                        payload["tracks"] = FieldValue.delete()
+                    }
+                    tx.update(plDocRef, payload)
+                }
+                null
+            }.await()
+            committedParent = true
+            knownExistingPaths.add(plDocRef.path)
         } catch (e: CancellationException) {
+            if (!committedParent) {
+                cleanupSnapshotBestEffort(snapRef)
+            }
+            throw e
+        } catch (e: StalePlaylistRevisionException) {
+            cleanupSnapshotBestEffort(snapRef)
             throw e
         } catch (e: Exception) {
+            if (!committedParent) {
+                cleanupSnapshotBestEffort(snapRef)
+            }
             handleFirestoreError(e, OperationType.WRITE, plDocRef.path)
             throw e
         }
+
+        // Best-effort post-commit garbage collection of superseded snapshots and legacy tracks
+        cleanupSupersededPlaylistDataBestEffort(plDocRef, keepSnapshotId = snapshotId)
     }
 
     suspend fun deletePlaylist(
         playlistKey: String,
         clientUpdatedAt: Long = System.currentTimeMillis(),
+        syncRevision: Long = 0L,
         clearLegacyTracksArray: Boolean = true
     ) {
         val uid = requireUserId()
         val safeKey = sanitizeDocId(playlistKey, prefix = "pl")
         val docRef = db.collection("users").document(uid).collection("playlists").document(safeKey)
+        val safeTs = clientUpdatedAt.coerceAtLeast(0L)
         try {
-            val tombFields = linkedMapOf<String, Any?>(
-                "deleted" to true,
-                "clientUpdatedAt" to clientUpdatedAt.coerceAtLeast(0L),
-                "updatedAt" to FieldValue.serverTimestamp()
-            )
-            if (clearLegacyTracksArray && docRef.path in knownExistingPaths) {
-                tombFields["tracks"] = FieldValue.delete()
+            if (syncRevision > 0L) {
+                db.runTransaction { tx ->
+                    val existing = tx.get(docRef)
+                    if (existing.exists()) {
+                        val existingDeleted = existing.getBoolean("deleted") == true
+                        val existingRev = existing.getLong("syncRevision") ?: 0L
+                        if (!existingDeleted && existingRev > syncRevision) {
+                            throw StalePlaylistRevisionException(existingRev, syncRevision)
+                        }
+                        val updates = linkedMapOf<String, Any>(
+                            "deleted" to true,
+                            "clientUpdatedAt" to safeTs,
+                            "syncRevision" to syncRevision,
+                            "trackCount" to 0L,
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                        if (existing.contains("activeSnapshotId")) {
+                            updates["activeSnapshotId"] = FieldValue.delete()
+                        }
+                        if (clearLegacyTracksArray && existing.contains("tracks")) {
+                            updates["tracks"] = FieldValue.delete()
+                        }
+                        tx.update(docRef, updates)
+                    } else {
+                        tx.set(
+                            docRef,
+                            mapOf(
+                                "deleted" to true,
+                                "clientUpdatedAt" to safeTs,
+                                "syncRevision" to syncRevision,
+                                "trackCount" to 0L,
+                                "createdAt" to FieldValue.serverTimestamp(),
+                                "updatedAt" to FieldValue.serverTimestamp()
+                            )
+                        )
+                    }
+                    null
+                }.await()
+                knownExistingPaths.add(docRef.path)
+            } else {
+                val tombFields = linkedMapOf<String, Any?>(
+                    "deleted" to true,
+                    "trackCount" to 0L,
+                    "activeSnapshotId" to FieldValue.delete(),
+                    "clientUpdatedAt" to safeTs,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+                if (clearLegacyTracksArray) {
+                    tombFields["tracks"] = FieldValue.delete()
+                }
+                setMergedWithoutPreRead(docRef, tombFields)
             }
-            setMergedWithoutPreRead(docRef, tombFields)
+            cleanupSupersededPlaylistDataBestEffort(docRef, keepSnapshotId = null)
         } catch (e: CancellationException) {
+            throw e
+        } catch (e: StalePlaylistRevisionException) {
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.DELETE, docRef.path)
             throw e
+        }
+    }
+
+    private suspend fun cleanupSnapshotBestEffort(snapRef: DocumentReference) {
+        try {
+            deleteCollectionInBatches(snapRef.collection("tracks"))
+            snapRef.delete().await()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            // Best effort cleanup of orphaned staging snapshots
+        }
+    }
+
+    private suspend fun cleanupSupersededPlaylistDataBestEffort(
+        plDocRef: DocumentReference,
+        keepSnapshotId: String?
+    ) {
+        try {
+            val snaps = plDocRef.collection("snapshots").get().await()
+            for (doc in snaps.documents) {
+                if (keepSnapshotId == null || doc.id != keepSnapshotId) {
+                    deleteCollectionInBatches(doc.reference.collection("tracks"))
+                    doc.reference.delete().await()
+                }
+            }
+            deleteCollectionInBatches(plDocRef.collection("tracks"))
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            // Best-effort cleanup
         }
     }
 
@@ -578,7 +749,11 @@ class CloudSyncRepository(
         val uid = requireUserId()
         val cleanName = name.trim()
         if (cleanName.isBlank()) return
-        val key = stableDocId("blk", cleanName.lowercase())
+        val key = if (!blocked && cleanName.startsWith("blk_") && isValidFirestoreId(cleanName)) {
+            cleanName
+        } else {
+            stableDocId("blk", cleanName.lowercase())
+        }
         val docRef = db.collection("users").document(uid).collection("hidden_artists").document(key)
         try {
             if (!blocked) {
@@ -617,9 +792,14 @@ class CloudSyncRepository(
         val userDoc = db.collection("users").document(uid)
 
         try {
-            // 1. Nested tracks subcollections inside each playlist
+            // 1. Nested snapshot/tracks subcollections inside each playlist
             val playlists = userDoc.collection("playlists").get().await()
             for (plDoc in playlists.documents) {
+                val snaps = plDoc.reference.collection("snapshots").get().await()
+                for (snapDoc in snaps.documents) {
+                    deleteCollectionInBatches(snapDoc.reference.collection("tracks"))
+                }
+                deleteCollectionInBatches(plDoc.reference.collection("snapshots"))
                 deleteCollectionInBatches(plDoc.reference.collection("tracks"))
             }
 
@@ -668,8 +848,13 @@ class CloudSyncRepository(
                 if (expired.isEmpty) break
 
                 if (sub == "playlists") {
-                    // Firestore does not cascade deletes; remove every nested track before its parent.
-                    expired.documents.forEach { doc ->
+                    // Firestore does not cascade deletes; remove every nested snapshot/track before its parent.
+                    for (doc in expired.documents) {
+                        val snaps = doc.reference.collection("snapshots").get().await()
+                        for (snapDoc in snaps.documents) {
+                            deleteCollectionInBatches(snapDoc.reference.collection("tracks"))
+                        }
+                        deleteCollectionInBatches(doc.reference.collection("snapshots"))
                         deleteCollectionInBatches(doc.reference.collection("tracks"))
                     }
                 }
@@ -689,6 +874,18 @@ class CloudSyncRepository(
             .firstOrNull()
 
     companion object {
+        const val SNAPSHOT_BATCH_LIMIT = 400
+
+        fun snapshotTrackDocId(index: Int, videoId: String): String {
+            val raw = "trk_${index.toString().padStart(5, '0')}_${videoId.trim()}"
+            val cleaned = raw.replace(Regex("[^a-zA-Z0-9_\\-]"), "_")
+            return if (cleaned.length in 1..128 && !cleaned.startsWith("LOCAL")) {
+                cleaned
+            } else {
+                stableDocId("trk_${index}", videoId)
+            }
+        }
+
         fun stableDocId(prefix: String, raw: String): String {
             val digest = MessageDigest.getInstance("SHA-256")
                 .digest(raw.toByteArray(Charsets.UTF_8))

@@ -26,6 +26,7 @@ data class CloudUserProfile(
     val hideMusicVideos: Boolean = false,
     val selectedGenres: List<String> = emptyList(),
     val onboardingCompleted: Boolean = false,
+    val prefsUpdatedAt: Long = 0L,
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
 )
@@ -116,6 +117,17 @@ data class CloudPlaylistTrack(
 }
 
 @IgnoreExtraProperties
+data class CloudPlaylistSnapshotMeta(
+    @DocumentId val snapshotId: String = "",
+    val state: String = "STAGING",
+    val syncRevision: Long = 0L,
+    val trackCount: Long = 0L,
+    val clientUpdatedAt: Long = 0L,
+    @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null
+)
+
+@IgnoreExtraProperties
 data class CloudPlaylist(
     @DocumentId val playlistKey: String = "",
     val title: String = "",
@@ -124,6 +136,9 @@ data class CloudPlaylist(
     // Legacy array kept readable for one-time migration to subcollection tracks
     val tracks: List<Map<String, Any?>> = emptyList(),
     val deleted: Boolean = false,
+    val syncRevision: Long = 0L,
+    val activeSnapshotId: String? = null,
+    val trackCount: Long = 0L,
     val clientUpdatedAt: Long = 0L,
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null

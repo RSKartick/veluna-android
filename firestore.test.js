@@ -401,3 +401,137 @@ test("Account deletion batch wipe succeeds for owner across subcollections and r
   await assertSucceeds(userDoc.collection("liked_songs").doc("trk_del").delete());
   await assertSucceeds(userDoc.delete());
 });
+
+test("Playlist versioned snapshots enforce owner-only access, valid state transitions, and snapshot tracks rules", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const plRef = aliceDb.collection("users").doc(ALICE_UID).collection("playlists").doc("pl_snap");
+  const snapRef = plRef.collection("snapshots").doc("snap_1_abc123");
+  const trackRef = snapRef.collection("tracks").doc("trk_00000_dQw4w9WgXcQ");
+
+  await assertSucceeds(
+    snapRef.set({
+      state: "STAGING",
+      syncRevision: 1,
+      trackCount: 1,
+      clientUpdatedAt: 1700000000000,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    })
+  );
+  await assertSucceeds(trackRef.set(validPlaylistTrackPayload()));
+  await assertSucceeds(
+    snapRef.update({
+      state: "COMMITTED",
+      updatedAt: serverTimestamp(),
+    })
+  );
+  await assertSucceeds(
+    plRef.set(
+      validPlaylistPayload({
+        syncRevision: 1,
+        activeSnapshotId: "snap_1_abc123",
+        trackCount: 1,
+      })
+    )
+  );
+  await assertSucceeds(snapRef.collection("tracks").get());
+
+  // Cannot mutate syncRevision after snapshot creation or use invalid state
+  await assertFails(
+    snapRef.update({
+      syncRevision: 2,
+      updatedAt: serverTimestamp(),
+    })
+  );
+  await assertFails(
+    plRef.collection("snapshots").doc("snap_bad").set({
+      state: "UNKNOWN",
+      syncRevision: 1,
+      trackCount: 0,
+      clientUpdatedAt: 1700000000000,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    })
+  );
+  // LOCAL track rejected inside snapshot tracks
+  await assertFails(
+    snapRef.collection("tracks").doc("LOCAL_trk").set(validPlaylistTrackPayload())
+  );
+
+  // Cross-user access to snapshots or snapshot tracks fails
+  const bobPlRef = bobDb.collection("users").doc(ALICE_UID).collection("playlists").doc("pl_snap");
+  await assertFails(bobPlRef.collection("snapshots").get());
+  await assertFails(bobPlRef.collection("snapshots").doc("snap_1_abc123").collection("tracks").get());
+  await assertFails(bobPlRef.collection("snapshots").doc("snap_1_abc123").delete());
+
+  // Owner cleanup succeeds
+  await assertSucceeds(trackRef.delete());
+  await assertSucceeds(snapRef.delete());
+});
+
+test("Client timestamps accept bounded skew (<= 5 min) and reject far-future values across collections", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const userDoc = aliceDb.collection("users").doc(ALICE_UID);
+  const now = Date.now();
+  const validSkewMs = now + 60_000;
+  const invalidFutureMs = now + 600_000;
+
+  await assertSucceeds(
+    userDoc.set(validProfilePayload(ALICE_UID, { prefsUpdatedAt: validSkewMs }))
+  );
+  await assertFails(
+    userDoc.update({ prefsUpdatedAt: invalidFutureMs, updatedAt: serverTimestamp() })
+  );
+
+  await assertSucceeds(
+    userDoc.collection("liked_songs").doc("skew_ok").set(validLikedSongPayload({ clientUpdatedAt: validSkewMs }))
+  );
+  await assertFails(
+    userDoc.collection("liked_songs").doc("skew_bad").set(validLikedSongPayload({ clientUpdatedAt: invalidFutureMs }))
+  );
+  await assertFails(
+    userDoc.collection("playlists").doc("pl_future").set(validPlaylistPayload({ clientUpdatedAt: invalidFutureMs }))
+  );
+  await assertFails(
+    userDoc.collection("taste_seeds").doc("art_future").set({
+      kind: "ARTIST",
+      name: "Future Artist",
+      deleted: false,
+      clientUpdatedAt: invalidFutureMs,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    })
+  );
+  await assertFails(
+    userDoc.collection("hidden_artists").doc("blk_future").set({
+      name: "Future Hidden",
+      blockedAt: now,
+      deleted: false,
+      clientUpdatedAt: invalidFutureMs,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    })
+  );
+  await assertFails(
+    userDoc.collection("liked_songs").doc("tomb_future").set(validTombstonePayload({ clientUpdatedAt: invalidFutureMs }))
+  );
+});
+
+test("Compound tombstone query (deleted == true, clientUpdatedAt < cutoff) succeeds for owner", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const userDoc = aliceDb.collection("users").doc(ALICE_UID);
+  const cutoff = 1700000010000;
+
+  for (const col of ["liked_songs", "playlists", "taste_seeds", "hidden_artists"]) {
+    await assertSucceeds(
+      userDoc.collection(col).doc("old_tomb").set(validTombstonePayload({ clientUpdatedAt: cutoff - 5000 }))
+    );
+    const snap = await assertSucceeds(
+      userDoc.collection(col).where("deleted", "==", true).where("clientUpdatedAt", "<", cutoff).get()
+    );
+    if (snap.size !== 1) {
+      throw new Error(`Expected 1 expired tombstone in ${col}, got ${snap.size}`);
+    }
+  }
+});

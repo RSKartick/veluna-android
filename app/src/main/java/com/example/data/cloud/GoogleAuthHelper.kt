@@ -19,6 +19,7 @@ import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
 import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
 import com.google.android.libraries.identity.googleid.GoogleIdTokenParsingException
 import com.google.firebase.Firebase
+import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.FirebaseUser
 import com.google.firebase.auth.GoogleAuthProvider
 import com.google.firebase.auth.auth
@@ -27,6 +28,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.lang.ref.WeakReference
 
 sealed interface GoogleSignInOutcome {
@@ -234,15 +236,17 @@ object GoogleAuthHelper {
         user.delete().await()
     }
 
-    suspend fun signOut(context: Context) {
+    suspend fun signOut(context: Context, firebaseAuth: FirebaseAuth = Firebase.auth) {
         val appContext = context.applicationContext
         withContext(NonCancellable) {
-            runCatching {
-                CredentialManager.create(appContext).clearCredentialState(ClearCredentialStateRequest())
-            }.onFailure { err ->
-                if (BuildConfig.DEBUG) Log.w(TAG, "clearCredentialState skipped: ${err.javaClass.simpleName}")
+            withTimeoutOrNull(2_000L) {
+                runCatching {
+                    CredentialManager.create(appContext).clearCredentialState(ClearCredentialStateRequest())
+                }.onFailure { err ->
+                    if (BuildConfig.DEBUG) Log.w(TAG, "clearCredentialState skipped: ${err.javaClass.simpleName}")
+                }
             }
-            Firebase.auth.signOut()
+            firebaseAuth.signOut()
         }
     }
 }

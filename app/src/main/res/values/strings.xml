@@ -236,14 +236,14 @@
     <string name="settings_unhide">Unhide</string>
 
     <string name="settings_card_backup">Backup &amp; Restore</string>
-    <string name="settings_backup_desc">Export your playlists, liked tracks, taste profile, albums, artists, shortcuts, recent search &amp; listening history (last 90 days), and theme settings as Backup v2 JSON. Scrobble secrets are never exported.</string>
+    <string name="settings_backup_desc">Export your playlists, liked tracks, taste profile, albums, artists, shortcuts, recent search &amp; listening history (last 90 days), and theme settings as Backup v3 JSON. Scrobble secrets are never exported.</string>
     <string name="settings_backup_export">Export</string>
     <string name="settings_backup_restore">Restore</string>
     <string name="settings_backup_exported">Backup exported</string>
     <string name="settings_backup_export_failed">Export failed: %1$s</string>
     <string name="settings_backup_restore_failed">Restore failed: %1$s</string>
     <string name="settings_legacy_backup_warning_title">Legacy v1 Backup Restored</string>
-    <string name="settings_legacy_backup_warning_body">Older v1 backup files may contain plaintext scrobbling credentials. Delete old v1 backup files after creating a fresh v2 backup.</string>
+    <string name="settings_legacy_backup_warning_body">Older v1 backup files may contain plaintext scrobbling credentials. Delete old v1 backup files after creating a fresh v3 backup.</string>
 
     <string name="search_tab_top">Top</string>
     <string name="search_tab_songs">Songs</string>

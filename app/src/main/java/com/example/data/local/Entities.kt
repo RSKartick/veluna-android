@@ -21,20 +21,26 @@ data class ListenSongEntity(
     val songJson: String
 )
 
+fun newCloudPlaylistKey(): String = "pl_${java.util.UUID.randomUUID()}"
+
 @Entity(
     tableName = "local_playlists",
     indices = [Index(value = ["cloudKey"], unique = true)]
 )
 data class LocalPlaylistEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
-    val cloudKey: String = "",
+    val cloudKey: String = newCloudPlaylistKey(),
     val title: String,
     val description: String = "",
     val coverUri: String? = null,
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = System.currentTimeMillis(),
     val syncRevision: Long = 0L
-)
+) {
+    init {
+        require(cloudKey.isNotBlank()) { "LocalPlaylistEntity.cloudKey must not be blank" }
+    }
+}
 
 @Entity(
     tableName = "local_playlist_tracks",
@@ -181,6 +187,7 @@ object SyncEntityTypes {
     const val PLAYLIST = "PLAYLIST"
     const val HIDDEN_ARTIST = "HIDDEN_ARTIST"
     const val SEED = "SEED"
+    const val PROFILE_PREFS = "PROFILE_PREFS"
 }
 
 object ScrobbleServices {

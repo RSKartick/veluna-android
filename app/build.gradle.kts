@@ -18,6 +18,7 @@ android {
         targetSdk = 36
         versionCode = (project.findProperty("velunaVersionCode") as? String)?.toIntOrNull() ?: 1
         versionName = (project.findProperty("velunaVersionName") as? String)?.takeIf { it.isNotBlank() } ?: "1.0.0"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     signingConfigs {
@@ -145,6 +146,12 @@ dependencies {
     testImplementation(libs.truth)
     testImplementation(libs.androidx.room.testing)
     testImplementation(libs.kotlinx.coroutines.test)
+
+    androidTestImplementation(libs.junit)
+    androidTestImplementation(libs.androidx.test.core)
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.androidx.test.ext.junit)
+    androidTestImplementation(libs.truth)
 }
 
 tasks.withType<Test> {

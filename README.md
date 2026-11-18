@@ -37,34 +37,36 @@ Compare the printed `Signer #1 certificate SHA-256 digest` against the release c
 
 When signed in with Google (via Android Credential Manager), Veluna syncs account data under `users/{uid}`:
 
-- Display profile and onboarding taste profile / seeds
+- Display profile (`userDisplayName`), syncable appearance/playback preferences (`themePreset`, `themeMode`, `customAccentHex`, `adaptToArtwork`, `cornerRadiusDp`, `audioQuality`, `autoplay`, `loudnessNormalization`, `hideMusicVideos` with bidirectional `prefsUpdatedAt` LWW), and onboarding taste profile / seeds (preserving real per-seed `updatedAtMs` timestamps)
 - Liked YouTube songs (`LOCAL:` device tracks are strictly blocked from cloud sync)
-- Custom playlists and their `playlists/{key}/tracks/{videoId}` track subcollections
+- Custom playlists keyed by persistent Room `cloudKey` UUIDs (`pl_<uuid>`) with monotonic `syncRevision` tracking and atomic versioned snapshots (`playlists/{key}/snapshots/{snapshotId}/tracks/{trackDocId}` plus backward-compatible fallback reads of legacy `tracks`)
 - Hidden / blocked artists
 
 ### Device-Only Data
 
 The following stay strictly on your device and are never uploaded to Firestore:
 
-- Local device audio files (`local_tracks`) and offline downloaded tracks/files (`downloaded_tracks`)
-- Lyrics cache (`lyrics_cache`), pending scrobble retry queue, listening history/stats, search history, saved albums, followed artists, and shortcuts
+- Local device audio files (`local_tracks`), offline downloaded tracks/files (`downloaded_tracks`), and lyrics cache (`lyrics_cache`)
+- Listening history/stats (`listens`, `listen_songs`), search history, saved albums, followed artists, shortcuts, and pending scrobble retry queue (`pending_scrobbles`)
+- Device-specific preferences (`playbackSpeed`, `classicPlayerLayout`, `equalizer`, `lyricsProviderOrder`, `romanizeLyrics`, `allowMirrorFallbacks`, `showMoodChips`, `showHeroArtworkBackdrop`, `scrobblingEnabled`)
 - Scrobble credentials (API key, API secret, session key, ListenBrainz token), stored in `SecretVault` (`noBackupFilesDir/secrets.bin`) encrypted with Android Keystore AES-256-GCM and excluded from Android Auto Backup and Device Transfer
 
-### Sync & Tombstone Limitations
+### Sync Baselines & Tombstone Limitations
 
-- Conflict resolution uses per-item **last-write-wins (`clientUpdatedAt`)** based on device clocks. A device with an inaccurate clock significantly behind real time may lose writes in conflicts.
+- Local Room `sync_baselines` (scoped by `userId`) durably record the last synced signature, `revision`, `deleted` flag, and `clientUpdatedAt` for each entity so offline edits and deletions always sync on reconnect and increment the pre-sign-out unsynced change counter accurately.
+- Conflict resolution uses per-item **last-write-wins (`clientUpdatedAt` / `prefsUpdatedAt`)** with monotonic `syncRevision` transactions on playlist snapshots, guarded against large future clock skew (`<= request.time + 5m`). A device with an inaccurate clock significantly behind real time may lose writes in conflicts.
 - Deletions write soft tombstones that are automatically purged after **30 days**. A device kept offline longer than 30 days can resurrect items whose tombstones were already purged.
 
-### Backup v2 (JSON Export & Restore)
+### Backup v3 (JSON Export & Restore)
 
-- Exports playlists, liked tracks, taste profile, saved albums, followed artists, shortcuts, recent search history (up to 100), listening history (last 90 days), and theme/playback preferences.
-- **Scrobble secrets are never exported.** Preferences are clamped to valid bounds and playlists are deduplicated by normalized title + track signature on restore.
-- Legacy v1 backups remain importable and trigger an in-app warning banner advising you to delete unredacted v1 files.
+- Exports playlists (including `cloudKey` and sanitized `https://` `coverUri`), liked tracks, taste profile, saved albums, followed artists, shortcuts, recent search history (up to 100), listening history (last 90 days), and theme/playback preferences.
+- **Scrobble secrets are never exported.** Preferences are clamped to valid bounds, playlists are deduplicated by `cloudKey` and `(normalizedTitle, trackSignature)` on restore, and DataStore failures trigger a compensating Room rollback.
+- Legacy v1 and v2 backups remain importable; v1 backups trigger an in-app warning banner advising you to delete unredacted v1 files.
 
 ### Account Sign-Out & Deletion
 
-- **Sign-Out**: Flushes pending sync changes (or prompts before discarding), wipes synced account Room tables, clears `SecretVault` and user profile preferences, and signs out of Firebase and Credential Manager while keeping offline downloads and local audio files on the device.
-- **In-App Deletion**: Open **Settings → Profile & Cloud Sync → Delete Account & Cloud Data** for a two-step confirmation that re-authenticates with Google (if required), removes all Firestore documents and subcollections under `users/{uid}`, deletes the Firebase Auth user, and wipes local account data and secrets while keeping downloaded/local media intact.
+- **Ordinary Sign-Out**: Cancels background debounce watchers, flushes pending sync changes (or counts remaining unsynced changes from `sync_baselines` and prompts before discarding), wipes synced account tables (`liked_songs`, `local_playlists`, `blocked_artists`, `sync_tombstones`, `sync_baselines`) and cloud sync watermarks/display name, and signs out of Firebase and Credential Manager. **Device-local history, saved albums, followed artists, shortcuts, offline downloads, local audio files, scrobbling settings, and `SecretVault` scrobble credentials remain intact on the device.**
+- **In-App Deletion**: Open **Settings → Profile & Cloud Sync → Delete Account & Cloud Data** for a two-step confirmation that re-authenticates with Google (if required), removes all Firestore documents and subcollections under `users/{uid}`, deletes the Firebase Auth user, and wipes all account Room tables (including `listens`, `saved_albums`, `followed_artists`, `shortcuts`, `search_history`, `pending_scrobbles`) plus `SecretVault` while still keeping offline downloaded media, local audio files, and `lyrics_cache` intact.
 - **Web Deletion Path**: If distributing publicly on Google Play or an external store, host a static account-deletion instruction page referencing **Veluna** and the in-app path above (along with a support contact) and link it in your store listing's Data Safety / Account Deletion URL field.
 
 ## Third-Party Services & Privacy
@@ -85,11 +87,15 @@ Veluna communicates with the following external services depending on features y
 
 - **JDK 21** and **Gradle 9.3.1** (or Android Studio with Gradle 9.3.1; maintainers can optionally generate a local wrapper via `gradle wrapper --gradle-version 9.3.1`)
 - **Android SDK** (`compileSdk 36`, `minSdk 26`, `targetSdk 36`)
-- **Node.js 20+** and **Firebase CLI** (for Firestore security rules emulator tests)
+- **Node.js 20+** and **Firebase CLI** (for Firestore security rules emulator tests & deploying `firestore.rules` + `firestore.indexes.json`)
 - A Firebase project config at `app/google-services.json` (gitignored):
   1. Create a Firebase project and register Android app `com.veluna.music` with your release/debug SHA-1 & SHA-256 certificate fingerprints.
   2. Enable **Authentication → Google** and **Cloud Firestore**.
-  3. Download `google-services.json` into `app/google-services.json`.
+  3. Deploy rules and composite indexes (`firestore.indexes.json`) before serving traffic:
+     ```bash
+     firebase deploy --only firestore:rules,firestore:indexes
+     ```
+  4. Download `google-services.json` into `app/google-services.json`.
 
 ### Build Commands
 
@@ -107,8 +113,8 @@ gradle :app:lintDebug
 # 1. Install Node test dependencies for Firestore rules testing
 npm install
 
-# 2. Run Firestore security rules & Android unit/Robolectric/Room migration tests
-npx firebase emulators:exec --only firestore,auth "node --test firestore.test.js && gradle :app:testDebugUnitTest --stacktrace"
+# 2. Run Firestore security rules & Android unit/Robolectric/Room migration tests + instrumentation test compilation
+npx firebase emulators:exec --only firestore,auth "node --test firestore.test.js && gradle :app:testDebugUnitTest :app:compileDebugAndroidTestKotlin --stacktrace"
 ```
 
 ## License

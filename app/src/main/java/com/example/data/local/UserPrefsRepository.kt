@@ -507,7 +507,28 @@ class UserPrefsRepository(
     }
 
     /**
-     * Explicit user/account DataStore key reset for sign-out and account deletion.
+     * Clears only Google-account/cloud-sync state on ordinary sign-out.
+     * Preserves device-only preferences, EQ, playback settings, and SecretVault scrobble credentials.
+     */
+    suspend fun resetCloudSyncStateForSignOut() {
+        dataStore.edit { p ->
+            p.remove(Keys.DISPLAY_NAME)
+            p.remove(Keys.ONBOARDING_COMPLETED)
+            p.remove(Keys.TASTE_PROFILE_JSON)
+            p.remove(Keys.LAST_PROFILE_PUSH_HASH)
+            p.remove(Keys.LAST_SEEDS_PUSH_HASH)
+            p.remove(Keys.LOCAL_LIKES_SCRUBBED)
+            p.remove(Keys.PLAYLIST_TRACKS_V2_MIGRATED)
+            p.remove(Keys.PREFS_UPDATED_AT)
+            p.remove(Keys.watermarkKey(WATERMARK_LIKED))
+            p.remove(Keys.watermarkKey(WATERMARK_PLAYLISTS))
+            p.remove(Keys.watermarkKey(WATERMARK_SEEDS))
+            p.remove(Keys.watermarkKey(WATERMARK_HIDDEN))
+        }
+    }
+
+    /**
+     * Explicit user/account DataStore key + SecretVault reset for permanent account deletion.
      * Leaves device-level theme, EQ, and playback settings intact.
      */
     suspend fun resetUserKeys() {
@@ -537,7 +558,22 @@ class UserPrefsRepository(
         }
     }
 
-    suspend fun applyBackup(backup: VelunaUserPrefs) {
+    suspend fun captureRawPreferencesSnapshot(): Preferences = dataStore.data.first()
+
+    suspend fun restoreRawPreferencesSnapshot(snapshot: Preferences) {
+        dataStore.edit { mutable ->
+            mutable.clear()
+            snapshot.asMap().forEach { (k, v) ->
+                @Suppress("UNCHECKED_CAST")
+                mutable[k as Preferences.Key<Any>] = v
+            }
+        }
+    }
+
+    suspend fun applyBackupWithTaste(
+        backup: VelunaUserPrefs,
+        tasteProfile: TasteProfile?
+    ) {
         val validHex = backup.customAccentHex?.trim()?.takeIf { SecurityValidators.isValidHexColor(it) }
         val safeSpeed = if (backup.playbackSpeed.isFinite()) backup.playbackSpeed.coerceIn(0.5f, 2.0f) else 1.0f
         val safeBands = sanitizeEqBands(backup.eqBandsDb) ?: EqualizerPresets.presets.getValue("Flat")
@@ -564,9 +600,17 @@ class UserPrefsRepository(
             it[Keys.SHOW_MOOD_CHIPS] = backup.showMoodChips
             it[Keys.SHOW_HERO_BACKDROP] = backup.showHeroArtworkBackdrop
             it[Keys.DISPLAY_NAME] = backup.userDisplayName.trim().ifBlank { "Listener" }.take(80)
+            if (tasteProfile != null) {
+                it[Keys.ONBOARDING_COMPLETED] = tasteProfile.onboardingCompleted
+                it[Keys.TASTE_PROFILE_JSON] = json.encodeToString(tasteProfile)
+            }
             it[Keys.PREFS_UPDATED_AT] = now
             // Never restore scrobbling secrets or legacy keys from JSON backups.
         }
+    }
+
+    suspend fun applyBackup(backup: VelunaUserPrefs) {
+        applyBackupWithTaste(backup, null)
     }
 
     companion object {

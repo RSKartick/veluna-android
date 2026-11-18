@@ -32,10 +32,14 @@ service cloud.firestore {
       return resource.data;
     }
 
-    // Bounds timestamps against future clock values (<= request.time).
-    // Note: Clients may backdate non-server timestamps; device-clock LWW relies on clientUpdatedAt.
+    // Bounds server timestamps against future clock values (<= request.time).
     function isNotFutureTimestamp(ts) {
       return ts is timestamp && ts <= request.time;
+    }
+
+    // Allows up to +5 minutes clock skew on client-side LWW timestamps while blocking far-future values.
+    function isValidClientTimestamp(tsMs) {
+      return tsMs is int && tsMs >= 0 && tsMs <= request.time.toMillis() + 300000;
     }
 
     function isValidOptionalString(data, key, maxLen) {
@@ -44,9 +48,15 @@ service cloud.firestore {
 
     function isTombstone(data) {
       return data.deleted == true &&
-             data.clientUpdatedAt is int &&
-             data.clientUpdatedAt >= 0 &&
+             isValidClientTimestamp(data.clientUpdatedAt) &&
              isNotFutureTimestamp(data.updatedAt);
+    }
+
+    function isValidPlaylistTombstone(data) {
+      return isTombstone(data) &&
+             (!('syncRevision' in data) || (data.syncRevision is int && data.syncRevision >= 0)) &&
+             (!('activeSnapshotId' in data) || data.activeSnapshotId == null) &&
+             (!('trackCount' in data) || data.trackCount == 0);
     }
 
     function isValidUserProfile(data) {
@@ -66,13 +76,14 @@ service cloud.firestore {
              data.selectedGenres is list && data.selectedGenres.size() <= 25 &&
              (data.selectedGenres.size() == 0 || data.selectedGenres[0] is string) &&
              data.onboardingCompleted is bool &&
+             (!('prefsUpdatedAt' in data) || isValidClientTimestamp(data.prefsUpdatedAt)) &&
              isNotFutureTimestamp(data.createdAt) &&
              isNotFutureTimestamp(data.updatedAt);
     }
 
     function isValidTasteSeed(data) {
       return data.deleted == false &&
-             data.clientUpdatedAt is int && data.clientUpdatedAt >= 0 &&
+             isValidClientTimestamp(data.clientUpdatedAt) &&
              data.kind in ['ARTIST', 'SONG'] &&
              data.name is string && data.name.size() >= 1 && data.name.size() <= 160 &&
              isValidOptionalString(data, 'subtitle', 160) &&
@@ -82,7 +93,7 @@ service cloud.firestore {
 
     function isValidLikedSong(data) {
       return data.deleted == false &&
-             data.clientUpdatedAt is int && data.clientUpdatedAt >= 0 &&
+             isValidClientTimestamp(data.clientUpdatedAt) &&
              data.title is string && data.title.size() >= 1 && data.title.size() <= 200 &&
              data.artists is string && data.artists.size() <= 200 &&
              isValidOptionalString(data, 'album', 200) &&
@@ -102,13 +113,25 @@ service cloud.firestore {
              data.description is string && data.description.size() <= 500 &&
              isValidOptionalString(data, 'coverUri', 500) &&
              !('tracks' in data) &&
-             data.clientUpdatedAt is int && data.clientUpdatedAt >= 0 &&
+             (!('syncRevision' in data) || (data.syncRevision is int && data.syncRevision >= 0)) &&
+             (!('activeSnapshotId' in data) || data.activeSnapshotId == null || isValidId(data.activeSnapshotId)) &&
+             (!('trackCount' in data) || (data.trackCount is int && data.trackCount >= 0)) &&
+             isValidClientTimestamp(data.clientUpdatedAt) &&
+             isNotFutureTimestamp(data.updatedAt);
+    }
+
+    function isValidPlaylistSnapshot(data) {
+      return data.state in ['STAGING', 'COMMITTED'] &&
+             data.syncRevision is int && data.syncRevision >= 1 &&
+             data.trackCount is int && data.trackCount >= 0 &&
+             isValidClientTimestamp(data.clientUpdatedAt) &&
+             isNotFutureTimestamp(data.createdAt) &&
              isNotFutureTimestamp(data.updatedAt);
     }
 
     function isValidPlaylistTrack(data) {
       return data.deleted == false &&
-             data.clientUpdatedAt is int && data.clientUpdatedAt >= 0 &&
+             isValidClientTimestamp(data.clientUpdatedAt) &&
              data.videoId is string && data.videoId.size() >= 1 && data.videoId.size() <= 128 &&
              !data.videoId.matches('^LOCAL:.*') &&
              data.title is string && data.title.size() >= 1 && data.title.size() <= 200 &&
@@ -127,7 +150,7 @@ service cloud.firestore {
 
     function isValidHiddenArtist(data) {
       return data.deleted == false &&
-             data.clientUpdatedAt is int && data.clientUpdatedAt >= 0 &&
+             isValidClientTimestamp(data.clientUpdatedAt) &&
              data.name is string && data.name.size() >= 1 && data.name.size() <= 160 &&
              isValidOptionalString(data, 'channelId', 128) &&
              data.blockedAt is int && data.blockedAt >= 0 &&
@@ -156,7 +179,7 @@ service cloud.firestore {
                          'userId', 'displayName', 'email', 'photoUrl', 'themePreset', 'themeMode',
                          'customAccentHex', 'adaptToArtwork', 'cornerRadiusDp', 'audioQuality',
                          'autoplay', 'loudnessNormalization', 'hideMusicVideos',
-                         'selectedGenres', 'onboardingCompleted', 'createdAt', 'updatedAt'
+                         'selectedGenres', 'onboardingCompleted', 'prefsUpdatedAt', 'createdAt', 'updatedAt'
                        ]) &&
                        isValidUserProfile(incoming());
 
@@ -169,7 +192,7 @@ service cloud.firestore {
                          'displayName', 'email', 'photoUrl', 'themePreset', 'themeMode',
                          'customAccentHex', 'adaptToArtwork', 'cornerRadiusDp', 'audioQuality',
                          'autoplay', 'loudnessNormalization', 'hideMusicVideos',
-                         'selectedGenres', 'onboardingCompleted', 'updatedAt'
+                         'selectedGenres', 'onboardingCompleted', 'prefsUpdatedAt', 'updatedAt'
                        ]);
 
       allow delete: if isOwner(userId) && isValidId(userId);
@@ -261,12 +284,17 @@ service cloud.firestore {
                               'title', 'description', 'deleted', 'clientUpdatedAt', 'createdAt', 'updatedAt'
                             ]) &&
                             incoming().keys().hasOnly([
-                              'title', 'description', 'coverUri', 'deleted', 'clientUpdatedAt', 'createdAt', 'updatedAt'
+                              'title', 'description', 'coverUri', 'deleted',
+                              'syncRevision', 'activeSnapshotId', 'trackCount',
+                              'clientUpdatedAt', 'createdAt', 'updatedAt'
                             ]) &&
                             isValidSyncedPlaylist(incoming())) ||
                            (incoming().keys().hasAll(['deleted', 'clientUpdatedAt', 'createdAt', 'updatedAt']) &&
-                            incoming().keys().hasOnly(['deleted', 'clientUpdatedAt', 'createdAt', 'updatedAt']) &&
-                            isTombstone(incoming()))
+                            incoming().keys().hasOnly([
+                              'deleted', 'syncRevision', 'activeSnapshotId', 'trackCount',
+                              'clientUpdatedAt', 'createdAt', 'updatedAt'
+                            ]) &&
+                            isValidPlaylistTombstone(incoming()))
                          );
 
         allow update: if isOwner(userId) &&
@@ -275,16 +303,84 @@ service cloud.firestore {
                          (
                            (isValidSyncedPlaylist(incoming()) &&
                             incoming().diff(existing()).affectedKeys().hasOnly([
-                              'title', 'description', 'coverUri', 'tracks', 'deleted', 'clientUpdatedAt', 'updatedAt'
+                              'title', 'description', 'coverUri', 'tracks', 'deleted',
+                              'syncRevision', 'activeSnapshotId', 'trackCount',
+                              'clientUpdatedAt', 'updatedAt'
                             ])) ||
-                           (isTombstone(incoming()) &&
+                           (isValidPlaylistTombstone(incoming()) &&
                             incoming().diff(existing()).affectedKeys().hasOnly([
-                              'tracks', 'deleted', 'clientUpdatedAt', 'updatedAt'
+                              'tracks', 'deleted', 'syncRevision', 'activeSnapshotId', 'trackCount',
+                              'clientUpdatedAt', 'updatedAt'
                             ]))
                          );
 
         allow delete: if isOwner(userId) && isValidId(playlistKey);
 
+        match /snapshots/{snapshotId} {
+          allow get: if isOwner(userId) && isValidId(playlistKey) && isValidId(snapshotId);
+          allow list: if isOwner(userId) && isValidId(playlistKey);
+
+          allow create: if isOwner(userId) &&
+                           isValidId(playlistKey) &&
+                           isValidId(snapshotId) &&
+                           incoming().keys().hasAll([
+                             'state', 'syncRevision', 'trackCount',
+                             'clientUpdatedAt', 'createdAt', 'updatedAt'
+                           ]) &&
+                           incoming().keys().hasOnly([
+                             'state', 'syncRevision', 'trackCount',
+                             'clientUpdatedAt', 'createdAt', 'updatedAt'
+                           ]) &&
+                           isValidPlaylistSnapshot(incoming());
+
+          allow update: if isOwner(userId) &&
+                           isValidId(playlistKey) &&
+                           isValidId(snapshotId) &&
+                           createdAtPreservedOnUpdate() &&
+                           isValidPlaylistSnapshot(incoming()) &&
+                           incoming().syncRevision == existing().syncRevision &&
+                           incoming().trackCount == existing().trackCount &&
+                           incoming().diff(existing()).affectedKeys().hasOnly(['state', 'updatedAt']);
+
+          allow delete: if isOwner(userId) && isValidId(playlistKey) && isValidId(snapshotId);
+
+          match /tracks/{trackDocId} {
+            allow get: if isOwner(userId) && isValidId(playlistKey) && isValidId(snapshotId) && isNonLocalTrackId(trackDocId);
+            allow list: if isOwner(userId) && isValidId(playlistKey) && isValidId(snapshotId);
+
+            allow create: if isOwner(userId) &&
+                             isValidId(playlistKey) &&
+                             isValidId(snapshotId) &&
+                             isNonLocalTrackId(trackDocId) &&
+                             isNotFutureTimestamp(incoming().createdAt) &&
+                             incoming().keys().hasAll([
+                               'videoId', 'title', 'artists', 'durationSecs', 'explicit',
+                               'position', 'addedAt', 'deleted', 'clientUpdatedAt', 'createdAt', 'updatedAt'
+                             ]) &&
+                             incoming().keys().hasOnly([
+                               'videoId', 'title', 'artists', 'album', 'albumId', 'artistId',
+                               'duration', 'durationSecs', 'thumbnail', 'explicit',
+                               'position', 'addedAt', 'deleted', 'clientUpdatedAt', 'createdAt', 'updatedAt'
+                             ]) &&
+                             isValidPlaylistTrack(incoming());
+
+            allow update: if isOwner(userId) &&
+                             isValidId(playlistKey) &&
+                             isValidId(snapshotId) &&
+                             isNonLocalTrackId(trackDocId) &&
+                             createdAtPreservedOnUpdate() &&
+                             isValidPlaylistTrack(incoming()) &&
+                             incoming().diff(existing()).affectedKeys().hasOnly([
+                               'videoId', 'title', 'artists', 'album', 'albumId', 'artistId',
+                               'duration', 'durationSecs', 'thumbnail', 'explicit',
+                               'position', 'addedAt', 'deleted', 'clientUpdatedAt', 'updatedAt'
+                             ]);
+
+            allow delete: if isOwner(userId) && isValidId(playlistKey) && isValidId(snapshotId) && isValidId(trackDocId);
+          }
+        }
+
+        // Legacy tracks subcollection kept readable/deletable during transition from pre-snapshot playlists
         match /tracks/{videoId} {
           allow get: if isOwner(userId) && isNonLocalTrackId(playlistKey) && isNonLocalTrackId(videoId);
           allow list: if isOwner(userId) && isValidId(playlistKey);

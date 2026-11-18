@@ -2,6 +2,8 @@ package com.example.data.repository
 
 import android.app.Application
 import android.content.Context
+import androidx.datastore.core.DataStore
+import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
@@ -17,6 +19,7 @@ import com.example.model.SongItem
 import com.example.model.StatsRange
 import com.example.model.TasteProfile
 import com.google.common.truth.Truth.assertThat
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
@@ -27,6 +30,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import java.io.File
+import java.io.IOException
 import java.time.LocalDate
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -153,7 +157,7 @@ class BackupAndCsvTest {
     }
 
     @Test
-    fun backupExportRedactsSecrets_andImportClampsDeduplicatesAndSupportsV1() = runBlocking {
+    fun backupExportRedactsSecrets_andImportClampsDeduplicatesAndSupportsV1() : Unit = runBlocking {
         prefsRepo.setScrobblingConfig(
             enabled = true,
             lastFmUser = "alice",
@@ -165,6 +169,13 @@ class BackupAndCsvTest {
         prefsRepo.setCornerRadius(16)
         prefsRepo.saveTasteProfile(TasteProfile(onboardingCompleted = true, selectedGenres = listOf("Jazz")))
         val plId = repo.createPlaylist("Chill Vibes", "Evening mix")
+        repo.updatePlaylist(
+            plId,
+            "Chill Vibes",
+            "Evening mix",
+            "https://cdn.example.com/chill-cover.jpg"
+        )
+        val createdPl = db.velunaDao().getPlaylistById(plId)!!
         val song = SongItem(videoId = "yt_1", title = "Blue in Green", artists = "Miles Davis", duration = "5:27")
         repo.addTrackToPlaylist(plId, song)
         repo.toggleLike(song)
@@ -177,11 +188,13 @@ class BackupAndCsvTest {
         assertThat(exportedJson).doesNotContain("secret_api_secret")
         assertThat(exportedJson).doesNotContain("secret_session_key")
         assertThat(exportedJson).doesNotContain("secret_lb_token")
-        assertThat(exportedJson).contains("\"version\":2")
+        assertThat(exportedJson).contains("\"version\":3")
+        assertThat(exportedJson).contains(createdPl.cloudKey)
+        assertThat(exportedJson).contains("https://cdn.example.com/chill-cover.jpg")
 
         // Double import of same backup must not duplicate playlists
         val firstImport = repo.importBackupJson(exportedJson).getOrThrow()
-        assertThat(firstImport.sourceVersion).isEqualTo(2)
+        assertThat(firstImport.sourceVersion).isEqualTo(3)
         assertThat(firstImport.restoredPlaylists).isEqualTo(0)
 
         // Out-of-range values are clamped on restore
@@ -234,7 +247,7 @@ class BackupAndCsvTest {
     }
 
     @Test
-    fun computeStats_respectsRangeWindow() = runBlocking {
+    fun computeStats_respectsRangeWindow() : Unit = runBlocking {
         val now = System.currentTimeMillis()
         val oldMs = now - 60L * 24L * 3600L * 1000L // 60 days ago
         val recentMs = now - 2L * 24L * 3600L * 1000L // 2 days ago
@@ -253,7 +266,7 @@ class BackupAndCsvTest {
     }
 
     @Test
-    fun computeStats_allRangeDailySeriesIsChronologicalAndEndsToday() = runBlocking {
+    fun computeStats_allRangeDailySeriesIsChronologicalAndEndsToday() : Unit = runBlocking {
         val zone = ZoneId.systemDefault()
         val dayFmt = DateTimeFormatter.ofPattern("yyyy-MM-dd", Locale.US)
         val today = LocalDate.now(zone)
@@ -312,5 +325,133 @@ class BackupAndCsvTest {
 
         val loaded = repo.loadPlaylistPage("${com.example.model.LOCAL_PLAYLIST_PREFIX}$plId").getOrThrow()
         assertThat(loaded.items.map { it.videoId }).containsExactly("vidB")
+    }
+
+    @Test
+    fun backupRestore_v2CompatibilityAndCoverUriSanitization() : Unit = runBlocking {
+        val v2Json = """
+            {
+              "version": 2,
+              "exportedAt": 1700000000000,
+              "prefs": { "cornerRadiusDp": 18 },
+              "playlists": [
+                {
+                  "title": "V2 Safe Cover",
+                  "description": "Keeps https cover",
+                  "coverUri": "https://images.example.com/v2-art.png",
+                  "tracks": [
+                    { "videoId": "v2_trk1", "title": "Song 1", "artists": "Artist 1" }
+                  ]
+                },
+                {
+                  "title": "V2 Unsafe Cover",
+                  "description": "Strips file cover",
+                  "coverUri": "file:///data/data/secret.png",
+                  "tracks": [
+                    { "videoId": "v2_trk2", "title": "Song 2", "artists": "Artist 2" }
+                  ]
+                }
+              ],
+              "likedSongs": [],
+              "blockedArtists": []
+            }
+        """.trimIndent()
+
+        val result = repo.importBackupJson(v2Json).getOrThrow()
+        assertThat(result.sourceVersion).isEqualTo(2)
+        assertThat(result.restoredPlaylists).isEqualTo(2)
+
+        val playlists = db.velunaDao().getPlaylistsOnce()
+        val safe = playlists.first { it.title == "V2 Safe Cover" }
+        val unsafe = playlists.first { it.title == "V2 Unsafe Cover" }
+        assertThat(safe.cloudKey).startsWith("pl_")
+        assertThat(unsafe.cloudKey).startsWith("pl_")
+        assertThat(safe.cloudKey).isNotEqualTo(unsafe.cloudKey)
+        assertThat(safe.coverUri).isEqualTo("https://images.example.com/v2-art.png")
+        assertThat(unsafe.coverUri).isNull()
+
+        // Re-importing same v2 backup deduplicates by (normalizedTitle, trackSignature)
+        val second = repo.importBackupJson(v2Json).getOrThrow()
+        assertThat(second.restoredPlaylists).isEqualTo(0)
+    }
+
+    @Test
+    fun backupRestore_deduplicatesByCloudKeyEvenIfPlaylistRenamed() : Unit = runBlocking {
+        val plId = repo.createPlaylist("Original Title", "Desc")
+        val song = SongItem(videoId = "yt_dedupe", title = "Song", artists = "Artist")
+        repo.addTrackToPlaylist(plId, song)
+        val exported = repo.exportBackupJson(prefsRepo.prefsFlow.first())
+
+        repo.updatePlaylist(plId, "Renamed Locally", "New desc", null)
+        val reimport = repo.importBackupJson(exported).getOrThrow()
+        assertThat(reimport.restoredPlaylists).isEqualTo(0)
+        assertThat(db.velunaDao().getPlaylistsOnce()).hasSize(1)
+        assertThat(db.velunaDao().getPlaylistsOnce().first().title).isEqualTo("Renamed Locally")
+    }
+
+    @Test
+    fun backupRestore_malformedJsonFailsWithoutModifyingDatabase() : Unit = runBlocking {
+        repo.createPlaylist("Keep Me", "Safe")
+        val result = repo.importBackupJson("{ not valid json !!!")
+        assertThat(result.isFailure).isTrue()
+        assertThat(db.velunaDao().getPlaylistsOnce().map { it.title }).containsExactly("Keep Me")
+    }
+
+    @Test
+    fun backupRestore_rollsBackRoomPlaylistsWhenDataStoreWriteFails() : Unit = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val realDs = PreferenceDataStoreFactory.create(
+            produceFile = { File(tempDir, "failing_prefs.preferences_pb") }
+        )
+        var shouldFailWrite = false
+        val failingDs = object : DataStore<Preferences> {
+            override val data: Flow<Preferences> = realDs.data
+            override suspend fun updateData(transform: suspend (t: Preferences) -> Preferences): Preferences {
+                if (shouldFailWrite) throw IOException("Simulated DataStore write failure")
+                return realDs.updateData(transform)
+            }
+        }
+        val failingVault = SecretVault(File(tempDir, "failing_vault.bin"), InMemoryAesGcmVaultCipher())
+        val failingPrefsRepo = UserPrefsRepository(context, failingVault, failingDs)
+        failingPrefsRepo.setCornerRadius(14)
+
+        val localRepo = VelunaRepository(
+            context = context,
+            dao = db.velunaDao(),
+            prefsRepo = failingPrefsRepo,
+            innerTube = InnerTubeClient(OkHttpClient()),
+            database = db
+        )
+        val existingId = localRepo.createPlaylist("Preexisting", "Stay intact")
+        localRepo.addTrackToPlaylist(existingId, SongItem(videoId = "vid_keep", title = "Keep", artists = "Artist"))
+
+        val backupJson = """
+            {
+              "version": 3,
+              "exportedAt": 1700000000000,
+              "prefs": { "cornerRadiusDp": 22 },
+              "playlists": [
+                {
+                  "cloudKey": "pl_rollback_test",
+                  "title": "Should Rollback",
+                  "description": "Should not survive DataStore failure",
+                  "tracks": [
+                    { "videoId": "vid_tmp", "title": "Temp", "artists": "Artist" }
+                  ]
+                }
+              ],
+              "likedSongs": [],
+              "blockedArtists": []
+            }
+        """.trimIndent()
+
+        shouldFailWrite = true
+        val importResult = localRepo.importBackupJson(backupJson)
+        assertThat(importResult.isFailure).isTrue()
+
+        val playlistsAfter = db.velunaDao().getPlaylistsOnce()
+        assertThat(playlistsAfter.map { it.title }).containsExactly("Preexisting")
+        assertThat(db.velunaDao().getPlaylistTracks(existingId).map { it.videoId }).containsExactly("vid_keep")
+        assertThat(failingPrefsRepo.prefsFlow.first().cornerRadiusDp).isEqualTo(14)
     }
 }

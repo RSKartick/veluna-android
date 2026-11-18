@@ -102,7 +102,7 @@ jobs:
       - name: Run Firestore security rules, unit tests, lint, and compile check
         run: |
           npx firebase emulators:exec --only firestore,auth --project veluna-ci-test \
-            "FIRESTORE_EMULATOR_HOST=127.0.0.1:8085 FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:9099 node --test firestore.test.js && gradle :app:testDebugUnitTest :app:lintDebug :app:compileReleaseKotlin --no-daemon --stacktrace"
+            "FIRESTORE_EMULATOR_HOST=127.0.0.1:8085 FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:9099 node --test firestore.test.js && gradle :app:testDebugUnitTest :app:compileDebugAndroidTestKotlin :app:lintDebug :app:compileReleaseKotlin --no-daemon --stacktrace"
 
       - name: Upload test and lint reports on failure
         if: failure()
@@ -199,11 +199,10 @@ jobs:
           [ -n "$APK_PATH" ] && [ -s "$APK_PATH" ] || { echo "Release APK not found"; exit 1; }
           cp "$APK_PATH" dist/veluna-android.apk
           AAPT2=$(find "${ANDROID_SDK_ROOT:-$ANDROID_HOME}/build-tools" -name aapt2 | sort -V | tail -n 1)
-          if [ -n "$AAPT2" ]; then
-            if "$AAPT2" dump badging dist/veluna-android.apk | grep -q "application-debuggable"; then
-              echo "Refusing to publish a debuggable APK"
-              exit 1
-            fi
+          [ -n "$AAPT2" ] || { echo "aapt2 not found"; exit 1; }
+          if "$AAPT2" dump badging dist/veluna-android.apk | grep -q "application-debuggable"; then
+            echo "Refusing to publish a debuggable APK"
+            exit 1
           fi
           APKSIGNER=$(find "${ANDROID_SDK_ROOT:-$ANDROID_HOME}/build-tools" -name apksigner | sort -V | tail -n 1)
           [ -n "$APKSIGNER" ] || { echo "apksigner not found"; exit 1; }
