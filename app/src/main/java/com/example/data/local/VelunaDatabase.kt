@@ -26,7 +26,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         SyncBaselineEntity::class,
         PendingScrobbleEntity::class
     ],
-    version = 3,
+    version = 4,
     exportSchema = true
 )
 abstract class VelunaDatabase : RoomDatabase() {
@@ -97,6 +97,18 @@ abstract class VelunaDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_3_4: Migration = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `local_playlists` ADD COLUMN `remoteCoverUri` TEXT")
+                db.execSQL("ALTER TABLE `local_playlists` ADD COLUMN `coverRemoved` INTEGER NOT NULL DEFAULT 0")
+                db.execSQL(
+                    "UPDATE `local_playlists` SET `remoteCoverUri` = `coverUri` " +
+                        "WHERE `coverUri` IS NOT NULL AND `coverUri` LIKE 'https://%'"
+                )
+                db.execSQL("ALTER TABLE `sync_baselines` ADD COLUMN `snapshotJson` TEXT NOT NULL DEFAULT ''")
+            }
+        }
+
         @Volatile
         private var INSTANCE: VelunaDatabase? = null
 
@@ -107,7 +119,7 @@ abstract class VelunaDatabase : RoomDatabase() {
                     VelunaDatabase::class.java,
                     "veluna.db"
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
                     .build()
                     .also { INSTANCE = it }
             }

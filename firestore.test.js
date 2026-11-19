@@ -535,3 +535,147 @@ test("Compound tombstone query (deleted == true, clientUpdatedAt < cutoff) succe
     }
   }
 });
+
+test("Playlist enforces monotonic syncRevision, prevents stale un-delete, and validates activeSnapshotId", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const plRef = aliceDb.collection("users").doc(ALICE_UID).collection("playlists").doc("pl_mono");
+  const snap1Ref = plRef.collection("snapshots").doc("snap_1");
+  const snap2Ref = plRef.collection("snapshots").doc("snap_2");
+  const snap3StagingRef = plRef.collection("snapshots").doc("snap_3_staging");
+
+  await assertSucceeds(
+    snap1Ref.set({
+      state: "COMMITTED",
+      syncRevision: 2,
+      trackCount: 0,
+      clientUpdatedAt: 1700000000000,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    })
+  );
+  await assertSucceeds(
+    snap2Ref.set({
+      state: "COMMITTED",
+      syncRevision: 3,
+      trackCount: 0,
+      clientUpdatedAt: 1700000002000,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    })
+  );
+  await assertSucceeds(
+    snap3StagingRef.set({
+      state: "STAGING",
+      syncRevision: 4,
+      trackCount: 0,
+      clientUpdatedAt: 1700000003000,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  // Reject pointing activeSnapshotId to missing, STAGING, or revision-mismatched snapshot
+  await assertFails(
+    plRef.set(validPlaylistPayload({ syncRevision: 2, activeSnapshotId: "snap_missing", trackCount: 0 }))
+  );
+  await assertFails(
+    plRef.set(validPlaylistPayload({ syncRevision: 4, activeSnapshotId: "snap_3_staging", trackCount: 0 }))
+  );
+  await assertFails(
+    plRef.set(validPlaylistPayload({ syncRevision: 5, activeSnapshotId: "snap_1", trackCount: 0 }))
+  );
+
+  // Valid create pointing to COMMITTED snapshot with matching syncRevision + coverRemoved flag
+  await assertSucceeds(
+    plRef.set(
+      validPlaylistPayload({
+        syncRevision: 2,
+        activeSnapshotId: "snap_1",
+        trackCount: 0,
+        coverRemoved: false,
+      })
+    )
+  );
+
+  // Reject decrementing syncRevision
+  await assertFails(
+    plRef.update({
+      title: "Downgraded",
+      syncRevision: 1,
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  // Delete (tombstone at rev 2)
+  await assertSucceeds(
+    plRef.update({
+      deleted: true,
+      syncRevision: 2,
+      activeSnapshotId: null,
+      trackCount: 0,
+      coverRemoved: true,
+      clientUpdatedAt: 1700000001000,
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  // Reject un-delete at same revision 2
+  await assertFails(
+    plRef.update({
+      deleted: false,
+      title: "Resurrected",
+      description: "",
+      syncRevision: 2,
+      activeSnapshotId: "snap_1",
+      trackCount: 0,
+      clientUpdatedAt: 1700000002000,
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  // Allow recreation only with strictly higher syncRevision pointing to COMMITTED snap_2
+  await assertSucceeds(
+    plRef.update({
+      deleted: false,
+      title: "Recreated",
+      description: "Back intentionally",
+      syncRevision: 3,
+      activeSnapshotId: "snap_2",
+      trackCount: 0,
+      coverRemoved: false,
+      clientUpdatedAt: 1700000002000,
+      updatedAt: serverTimestamp(),
+    })
+  );
+});
+
+test("User profile enforces monotonic tombstoneCompactedBeforeMs and syncGeneration", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const profileRef = aliceDb.collection("users").doc(ALICE_UID);
+
+  await assertSucceeds(
+    profileRef.set(
+      validProfilePayload(ALICE_UID, {
+        tombstoneCompactedBeforeMs: 1700000005000,
+        syncGeneration: 1,
+      })
+    )
+  );
+
+  await assertSucceeds(
+    profileRef.update({
+      tombstoneCompactedBeforeMs: 1700000009000,
+      syncGeneration: 2,
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  // Regressing tombstoneCompactedBeforeMs must fail
+  await assertFails(
+    profileRef.update({
+      tombstoneCompactedBeforeMs: 1700000001000,
+      updatedAt: serverTimestamp(),
+    })
+  );
+});
+

@@ -454,4 +454,208 @@ class BackupAndCsvTest {
         assertThat(db.velunaDao().getPlaylistTracks(existingId).map { it.videoId }).containsExactly("vid_keep")
         assertThat(failingPrefsRepo.prefsFlow.first().cornerRadiusDp).isEqualTo(14)
     }
+
+    @Test
+    fun backupRestore_rejectsInvalidPayloadUpfrontWithoutMutatingExistingData() : Unit = runBlocking {
+        val plId = repo.createPlaylist("Safe List", "Intact")
+        val existingSong = SongItem(videoId = "yt_safe_1", title = "Keep", artists = "Artist")
+        repo.addTrackToPlaylist(plId, existingSong)
+        repo.toggleLike(existingSong)
+        prefsRepo.setCornerRadius(14)
+
+        val badVersion = """{ "version": 99, "prefs": {}, "playlists": [], "likedSongs": [], "blockedArtists": [] }"""
+        assertThat(repo.importBackupJson(badVersion).isFailure).isTrue()
+
+        val badCloudKey = """
+            {
+              "version": 3,
+              "prefs": { "cornerRadiusDp": 20 },
+              "playlists": [
+                { "cloudKey": "LOCAL_bad", "title": "Bad", "description": "", "tracks": [] }
+              ],
+              "likedSongs": [],
+              "blockedArtists": []
+            }
+        """.trimIndent()
+        assertThat(repo.importBackupJson(badCloudKey).isFailure).isTrue()
+
+        val badCover = """
+            {
+              "version": 3,
+              "prefs": { "cornerRadiusDp": 20 },
+              "playlists": [
+                {
+                  "cloudKey": "pl_bad_cover",
+                  "title": "Bad Cover",
+                  "description": "",
+                  "coverImageBase64": "${android.util.Base64.encodeToString("NOT_AN_IMAGE".toByteArray(), android.util.Base64.NO_WRAP)}",
+                  "tracks": []
+                }
+              ],
+              "likedSongs": [],
+              "blockedArtists": []
+            }
+        """.trimIndent()
+        assertThat(repo.importBackupJson(badCover).isFailure).isTrue()
+
+        assertThat(db.velunaDao().getPlaylistsOnce().map { it.title }).containsExactly("Safe List")
+        assertThat(prefsRepo.prefsFlow.first().cornerRadiusDp).isEqualTo(14)
+    }
+
+    @Test
+    fun backupRestore_rollsBackAllTenRoomTablesAndDeletesCreatedCoverFilesOnFailure() : Unit = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val coversDir = File(context.filesDir, "playlist_covers")
+        coversDir.deleteRecursively()
+        val dao = db.velunaDao()
+
+        // Populate all 10 backed-up Room tables + pre-existing rows that backup will overwrite
+        val origPlId = repo.createPlaylist("Orig Pl", "Orig desc")
+        dao.insertPlaylistTrack(
+            com.example.data.local.LocalPlaylistTrackEntity(
+                playlistId = origPlId,
+                videoId = "orig_vid",
+                songJson = repo.encodeSong(SongItem(videoId = "orig_vid", title = "Orig Track", artists = "Orig Artist")),
+                position = 0,
+                addedAt = 1700000000000L
+            )
+        )
+        dao.insertLikedSong(
+            com.example.data.local.LikedSongEntity(
+                videoId = "orig_like",
+                songJson = repo.encodeSong(SongItem(videoId = "orig_like", title = "Orig Like", artists = "Artist")),
+                likedAt = 1700000000000L
+            )
+        )
+        dao.insertBlockedArtist(com.example.data.local.BlockedArtistEntity("Orig Blocked"))
+        dao.insertSavedAlbum(com.example.data.local.SavedAlbumEntity("alb_orig", "Orig Album", "Sub", null, 100L))
+        dao.insertFollowedArtist(com.example.data.local.FollowedArtistEntity("art_orig", "Orig Artist", null, "10K", 100L))
+        dao.upsertShortcut(com.example.data.local.ShortcutEntity("sc_orig", BrowseKind.ALBUM.name, "Orig Shortcut", null, null, 0))
+        dao.upsertSearchHistory(com.example.data.local.SearchHistoryEntity("orig query", 100L))
+        dao.upsertListenSong(
+            com.example.data.local.ListenSongEntity(
+                "orig_listen",
+                repo.encodeSong(SongItem(videoId = "orig_listen", title = "Orig Listen", artists = "Artist"))
+            )
+        )
+        dao.insertListen(com.example.data.local.ListenEntity(videoId = "orig_listen", playedAt = 1000L, secs = 90L))
+        prefsRepo.setCornerRadius(12)
+
+        val pngBytes = valid1x1PngBytes()
+        val b64 = android.util.Base64.encodeToString(pngBytes, android.util.Base64.NO_WRAP)
+        val backupWithNewData = """
+            {
+              "version": 3,
+              "exportedAt": 1700000005000,
+              "prefs": { "cornerRadiusDp": 24 },
+              "playlists": [
+                {
+                  "cloudKey": "pl_new_import",
+                  "title": "New Imported Pl",
+                  "description": "Will fail before prefs commit",
+                  "coverImageBase64": "$b64",
+                  "tracks": [
+                    { "videoId": "new_vid", "title": "New Track", "artists": "New Artist" }
+                  ]
+                }
+              ],
+              "likedSongs": [
+                { "videoId": "orig_like", "title": "Overwritten Title", "artists": "New Artist" },
+                { "videoId": "new_like", "title": "Brand New Like", "artists": "New Artist" }
+              ],
+              "blockedArtists": ["New Blocked"],
+              "savedAlbums": [
+                { "albumId": "alb_orig", "title": "Overwritten Album" },
+                { "albumId": "alb_new", "title": "New Album" }
+              ],
+              "followedArtists": [
+                { "channelId": "art_new", "name": "New Followed" }
+              ],
+              "shortcuts": [
+                { "id": "sc_new", "kind": "ALBUM", "title": "New Shortcut" }
+              ],
+              "searchHistory": [
+                { "query": "new query", "searchedAt": 2000 }
+              ],
+              "listens": [
+                {
+                  "videoId": "new_listen",
+                  "playedAt": 3000,
+                  "secs": 120,
+                  "song": { "videoId": "new_listen", "title": "New Listen", "artists": "New Artist" }
+                }
+              ]
+            }
+        """.trimIndent()
+
+        repo.onBeforeDataStoreRestore = {
+            throw java.io.IOException("Simulated crash right after Room writes")
+        }
+        val res = try {
+            repo.importBackupJson(backupWithNewData)
+        } finally {
+            repo.onBeforeDataStoreRestore = null
+        }
+
+        assertThat(res.isFailure).isTrue()
+        assertThat(dao.getPlaylistsOnce().map { it.title }).containsExactly("Orig Pl")
+        assertThat(dao.getPlaylistTracks(origPlId).map { it.videoId }).containsExactly("orig_vid")
+        assertThat(dao.getLikedSongsOnce().map { it.videoId }).containsExactly("orig_like")
+        assertThat(repo.decodeSong(dao.getLikedSongsOnce().single().songJson)?.title).isEqualTo("Orig Like")
+        assertThat(dao.getBlockedArtistsOnce().map { it.name }).containsExactly("Orig Blocked")
+        assertThat(dao.getSavedAlbumsOnce().single().title).isEqualTo("Orig Album")
+        assertThat(dao.getFollowedArtistsOnce().map { it.channelId }).containsExactly("art_orig")
+        assertThat(dao.getShortcutsOnce().map { it.id }).containsExactly("sc_orig")
+        assertThat(dao.getSearchHistoryOnce(50).map { it.query }).containsExactly("orig query")
+        assertThat(dao.getListenSongsByIds(listOf("orig_listen", "new_listen")).map { it.videoId })
+            .containsExactly("orig_listen")
+        assertThat(dao.getListensSince(0L).map { it.videoId }).containsExactly("orig_listen")
+        assertThat(prefsRepo.prefsFlow.first().cornerRadiusDp).isEqualTo(12)
+        // Newly materialized cover file must be rolled back / cleaned up
+        assertThat(coversDir.listFiles()?.toList().orEmpty()).isEmpty()
+    }
+
+    @Test
+    fun portableCoverExportAndImportRoundtrip_andRejectInvalidManagedCover() : Unit = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val coversDir = File(context.filesDir, "playlist_covers").apply { mkdirs() }
+        coversDir.listFiles()?.forEach { it.delete() }
+
+        val plId = repo.createPlaylist("Portable Art", "Local cover backup")
+        val pngBytes = valid1x1PngBytes()
+        val managedFile = File(coversDir, "seed_cover.png").apply { writeBytes(pngBytes) }
+
+        repo.updatePlaylist(plId, "Portable Art", "Local cover backup", android.net.Uri.fromFile(managedFile).toString())
+        val updated = db.velunaDao().getPlaylistById(plId)!!
+        assertThat(updated.coverUri).isEqualTo(android.net.Uri.fromFile(managedFile).toString())
+
+        val exportedJson = repo.exportBackupJson(prefsRepo.prefsFlow.first())
+        assertThat(exportedJson).contains("coverImageBase64")
+
+        // Attempting to attach an external /etc/passwd or corrupt file URI must reject rather than persist it
+        val externalPath = File(tempDir, "outside.png").apply { writeBytes(pngBytes) }
+        repo.updatePlaylist(plId, "Portable Art", "Bad file uri", android.net.Uri.fromFile(externalPath).toString())
+        assertThat(db.velunaDao().getPlaylistById(plId)!!.coverUri).isNull()
+
+        // Wipe local DB and managed cover, then restore from backup JSON -> cover file is recreated atomically
+        db.velunaDao().clearSyncedAccountData()
+        coversDir.listFiles()?.forEach { it.delete() }
+
+        val restored = repo.importBackupJson(exportedJson).getOrThrow()
+        assertThat(restored.restoredPlaylists).isEqualTo(1)
+        val restoredPl = db.velunaDao().getPlaylistsOnce().single()
+        assertThat(restoredPl.coverUri).startsWith("file://")
+        val restoredCoverFile = File(android.net.Uri.parse(restoredPl.coverUri!!).path!!)
+        assertThat(restoredCoverFile.exists()).isTrue()
+        assertThat(restoredCoverFile.readBytes()).isEqualTo(pngBytes)
+    }
+
+    private fun valid1x1PngBytes(): ByteArray {
+        val bmp = android.graphics.Bitmap.createBitmap(1, 1, android.graphics.Bitmap.Config.ARGB_8888)
+        val baos = java.io.ByteArrayOutputStream()
+        bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, baos)
+        bmp.recycle()
+        return baos.toByteArray()
+    }
 }
+

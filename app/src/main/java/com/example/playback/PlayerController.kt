@@ -113,6 +113,7 @@ class PlayerController(
     private var currentPrefs = VelunaUserPrefs()
     private var mediaController: MediaController? = null
     @Volatile private var controllerReady = CompletableDeferred<MediaController>()
+    @Volatile private var connectingService = false
     private var currentListenId: Long? = null
     private var recordedListenVideoId: String? = null
     private var currentTrackStartedAtSecs: Long = 0L
@@ -184,6 +185,10 @@ class PlayerController(
     }
 
     private fun connectService() {
+        val existing = mediaController
+        if (existing != null && existing.isConnected) return
+        if (connectingService) return
+        connectingService = true
         if (controllerReady.isCompleted && mediaController == null) {
             controllerReady = CompletableDeferred()
         }
@@ -192,12 +197,15 @@ class PlayerController(
         val future = MediaController.Builder(context, token).buildAsync()
         future.addListener(
             {
+                connectingService = false
                 val controllerResult = runCatching { future.get() }
                 val controller = controllerResult.getOrNull()
                 if (controller == null) {
-                    deferred.completeExceptionally(
-                        controllerResult.exceptionOrNull() ?: IllegalStateException("MediaController unavailable")
-                    )
+                    if (!deferred.isCompleted) {
+                        deferred.completeExceptionally(
+                            controllerResult.exceptionOrNull() ?: IllegalStateException("MediaController unavailable")
+                        )
+                    }
                     return@addListener
                 }
                 mediaController = controller
@@ -205,6 +213,7 @@ class PlayerController(
                     deferred.complete(controller)
                 }
                 controller.playbackParameters = PlaybackParameters(currentPrefs.playbackSpeed)
+                controller.removeListener(playerListener)
                 controller.addListener(playerListener)
                 startTicker()
             },
@@ -501,7 +510,16 @@ class PlayerController(
     }
 
     fun togglePlayPause() {
-        val ctrl = mediaController ?: return
+        val ctrl = mediaController?.takeIf { it.isConnected }
+        if (ctrl == null) {
+            mediaController = null
+            connectService()
+            val cur = _state.value
+            if (cur.queue.isNotEmpty() && cur.currentIndex in cur.queue.indices && !cur.isBuffering) {
+                playIndex(cur.currentIndex)
+            }
+            return
+        }
         if (ctrl.isPlaying) {
             flushListenSeconds()
             ctrl.pause()

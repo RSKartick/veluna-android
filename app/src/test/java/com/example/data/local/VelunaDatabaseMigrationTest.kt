@@ -187,4 +187,94 @@ class VelunaDatabaseMigrationTest {
             db.close()
         }
     }
+
+    @Test
+    fun migrate3To4_backfillsRemoteCoverUriAndBaselineSnapshotJson() {
+        val dbName = "veluna_migration_3_4.db"
+        helper.createDatabase(dbName, 3).use { db ->
+            db.execSQL(
+                "INSERT INTO local_playlists (id, cloudKey, title, description, coverUri, createdAt, updatedAt, syncRevision) " +
+                    "VALUES (5, 'pl_v3_https', 'HTTPS Art', 'Desc', 'https://cdn.example.com/art.jpg', 1700000000000, 1700000001000, 3)"
+            )
+            db.execSQL(
+                "INSERT INTO local_playlists (id, cloudKey, title, description, coverUri, createdAt, updatedAt, syncRevision) " +
+                    "VALUES (6, 'pl_v3_file', 'Local Art', 'Desc', 'file:///data/user/0/com.veluna.music/files/playlist_covers/pl_6.jpg', 1700000000000, 1700000002000, 2)"
+            )
+            db.execSQL(
+                "INSERT INTO sync_baselines (userId, entityType, entityKey, revision, signature, clientUpdatedAt, deleted, updatedAt) " +
+                    "VALUES ('uid_v3', 'PLAYLIST', 'pl_v3_https', 3, 'sig_123', 1700000001000, 0, 1700000001000)"
+            )
+        }
+
+        val migratedDb = helper.runMigrationsAndValidate(
+            dbName,
+            4,
+            true,
+            VelunaDatabase.MIGRATION_3_4
+        )
+
+        migratedDb.query(
+            "SELECT cloudKey, coverUri, remoteCoverUri, coverRemoved FROM local_playlists ORDER BY id ASC"
+        ).use { c ->
+            assertThat(c.moveToFirst()).isTrue()
+            assertThat(c.getString(0)).isEqualTo("pl_v3_https")
+            assertThat(c.getString(1)).isEqualTo("https://cdn.example.com/art.jpg")
+            assertThat(c.getString(2)).isEqualTo("https://cdn.example.com/art.jpg")
+            assertThat(c.getInt(3)).isEqualTo(0)
+
+            assertThat(c.moveToNext()).isTrue()
+            assertThat(c.getString(0)).isEqualTo("pl_v3_file")
+            assertThat(c.isNull(2)).isTrue()
+            assertThat(c.getInt(3)).isEqualTo(0)
+        }
+
+        migratedDb.query("SELECT snapshotJson FROM sync_baselines WHERE entityKey = 'pl_v3_https'").use { c ->
+            assertThat(c.moveToFirst()).isTrue()
+            assertThat(c.getString(0)).isEqualTo("")
+        }
+        migratedDb.close()
+    }
+
+    @Test
+    fun migrate1To4_preservesAllLegacyTablesTracksAndCoverMetadata() {
+        val dbName = "veluna_migration_1_4.db"
+        helper.createDatabase(dbName, 1).use { db ->
+            db.execSQL(
+                "INSERT INTO liked_songs (videoId, songJson, likedAt) VALUES ('trk_legacy_1', '{\"videoId\":\"trk_legacy_1\",\"title\":\"Legacy\"}', 1700000000000)"
+            )
+            db.execSQL(
+                "INSERT INTO local_playlists (id, title, description, coverUri, createdAt, updatedAt) " +
+                    "VALUES (9, 'V1 Playlist', 'Since v1', 'https://cdn.example.com/v1.png', 1700000000000, 1700000005000)"
+            )
+            db.execSQL(
+                "INSERT INTO local_playlist_tracks (id, playlistId, videoId, songJson, position, addedAt) " +
+                    "VALUES (100, 9, 'trk_legacy_1', '{}', 0, 1700000000500)"
+            )
+        }
+
+        val migratedDb = helper.runMigrationsAndValidate(
+            dbName,
+            4,
+            true,
+            VelunaDatabase.MIGRATION_1_2,
+            VelunaDatabase.MIGRATION_2_3,
+            VelunaDatabase.MIGRATION_3_4
+        )
+
+        migratedDb.query(
+            "SELECT cloudKey, remoteCoverUri, coverRemoved, syncRevision FROM local_playlists WHERE id = 9"
+        ).use { c ->
+            assertThat(c.moveToFirst()).isTrue()
+            assertThat(c.getString(0)).isEqualTo("pl_local_9")
+            assertThat(c.getString(1)).isEqualTo("https://cdn.example.com/v1.png")
+            assertThat(c.getInt(2)).isEqualTo(0)
+            assertThat(c.getLong(3)).isEqualTo(0L)
+        }
+        migratedDb.query("SELECT videoId FROM local_playlist_tracks WHERE playlistId = 9").use { c ->
+            assertThat(c.moveToFirst()).isTrue()
+            assertThat(c.getString(0)).isEqualTo("trk_legacy_1")
+        }
+        migratedDb.close()
+    }
 }
+

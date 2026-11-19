@@ -122,6 +122,9 @@ class UserPrefsRepository(
         val LOCAL_LIKES_SCRUBBED = booleanPreferencesKey("local_likes_scrubbed")
         val PLAYLIST_TRACKS_V2_MIGRATED = booleanPreferencesKey("playlist_tracks_v2_migrated")
         val PREFS_UPDATED_AT = longPreferencesKey("prefs_updated_at")
+        val ACTIVE_CLOUD_UID = stringPreferencesKey("active_cloud_uid")
+        val LAST_SUCCESSFUL_SYNC_AT_MS = longPreferencesKey("last_successful_sync_at_ms")
+        val LAST_SUCCESSFUL_SYNC_UID = stringPreferencesKey("last_successful_sync_uid")
 
         // Legacy DataStore keys (removed during migration, never written back)
         val LEGACY_CROSSFADE_SECS = intPreferencesKey("crossfade_secs")
@@ -506,6 +509,41 @@ class UserPrefsRepository(
         dataStore.edit { it[Keys.PLAYLIST_TRACKS_V2_MIGRATED] = true }
     }
 
+    suspend fun getActiveCloudUid(): String? =
+        dataStore.data.first()[Keys.ACTIVE_CLOUD_UID]?.takeIf { it.isNotBlank() }
+
+    suspend fun setActiveCloudUid(uid: String?) {
+        dataStore.edit { p ->
+            if (uid.isNullOrBlank()) p.remove(Keys.ACTIVE_CLOUD_UID)
+            else p[Keys.ACTIVE_CLOUD_UID] = uid
+        }
+    }
+
+    suspend fun getLastSuccessfulSyncAtMs(uid: String): Long {
+        val p = dataStore.data.first()
+        return if (p[Keys.LAST_SUCCESSFUL_SYNC_UID] == uid) {
+            p[Keys.LAST_SUCCESSFUL_SYNC_AT_MS] ?: 0L
+        } else {
+            0L
+        }
+    }
+
+    suspend fun setLastSuccessfulSyncAtMs(uid: String, epochMs: Long) {
+        dataStore.edit { p ->
+            p[Keys.LAST_SUCCESSFUL_SYNC_UID] = uid
+            p[Keys.LAST_SUCCESSFUL_SYNC_AT_MS] = epochMs.coerceAtLeast(0L)
+        }
+    }
+
+    suspend fun clearAllSyncWatermarks() {
+        dataStore.edit { p ->
+            p.remove(Keys.watermarkKey(WATERMARK_LIKED))
+            p.remove(Keys.watermarkKey(WATERMARK_PLAYLISTS))
+            p.remove(Keys.watermarkKey(WATERMARK_SEEDS))
+            p.remove(Keys.watermarkKey(WATERMARK_HIDDEN))
+        }
+    }
+
     /**
      * Clears only Google-account/cloud-sync state on ordinary sign-out.
      * Preserves device-only preferences, EQ, playback settings, and SecretVault scrobble credentials.
@@ -520,6 +558,9 @@ class UserPrefsRepository(
             p.remove(Keys.LOCAL_LIKES_SCRUBBED)
             p.remove(Keys.PLAYLIST_TRACKS_V2_MIGRATED)
             p.remove(Keys.PREFS_UPDATED_AT)
+            p.remove(Keys.ACTIVE_CLOUD_UID)
+            p.remove(Keys.LAST_SUCCESSFUL_SYNC_AT_MS)
+            p.remove(Keys.LAST_SUCCESSFUL_SYNC_UID)
             p.remove(Keys.watermarkKey(WATERMARK_LIKED))
             p.remove(Keys.watermarkKey(WATERMARK_PLAYLISTS))
             p.remove(Keys.watermarkKey(WATERMARK_SEEDS))
@@ -547,6 +588,9 @@ class UserPrefsRepository(
             p.remove(Keys.LOCAL_LIKES_SCRUBBED)
             p.remove(Keys.PLAYLIST_TRACKS_V2_MIGRATED)
             p.remove(Keys.PREFS_UPDATED_AT)
+            p.remove(Keys.ACTIVE_CLOUD_UID)
+            p.remove(Keys.LAST_SUCCESSFUL_SYNC_AT_MS)
+            p.remove(Keys.LAST_SUCCESSFUL_SYNC_UID)
             p.remove(Keys.watermarkKey(WATERMARK_LIKED))
             p.remove(Keys.watermarkKey(WATERMARK_PLAYLISTS))
             p.remove(Keys.watermarkKey(WATERMARK_SEEDS))

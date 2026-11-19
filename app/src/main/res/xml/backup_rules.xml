@@ -8,5 +8,6 @@
     <exclude domain="file" path="secrets.bin" />
     <exclude domain="file" path="secrets.bin.tmp" />
     <exclude domain="file" path="local_covers" />
+    <exclude domain="file" path="playlist_covers" />
     <exclude domain="file" path="downloads" />
 </full-backup-content>

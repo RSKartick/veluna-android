@@ -40,6 +40,14 @@ class StalePlaylistRevisionException(
     "Remote playlist revision $remoteRevision supersedes local revision $attemptedRevision"
 )
 
+class IncompletePlaylistSnapshotException(
+    val playlistKey: String,
+    val snapshotId: String,
+    reason: String
+) : IllegalStateException(
+    "Playlist '$playlistKey' snapshot '$snapshotId' is incomplete: $reason"
+)
+
 data class SyncWatermarks(
     val likedMs: Long = 0L,
     val playlistsMs: Long = 0L,
@@ -52,6 +60,8 @@ class CloudSyncRepository(
     private val auth: FirebaseAuth = Firebase.auth
 ) {
     internal var onBeforeCommitPlaylistSnapshot: (suspend (snapshotId: String, chunkIndex: Int) -> Unit)? = null
+    internal var onBeforePublishTransaction: (suspend (playlistKey: String, snapshotId: String) -> Unit)? = null
+    internal var onBeforeGcDeleteSnapshot: (suspend (playlistKey: String, snapshotId: String) -> Unit)? = null
     constructor(context: Context) : this(
         FirebaseFirestore.getInstance(
             context.applicationContext.getString(R.string.firestore_database_id)
@@ -187,31 +197,15 @@ class CloudSyncRepository(
             val playlistDocs = playlistsSnap.toObjects(CloudPlaylist::class.java)
 
             val playlistsWithTracks = playlistDocs.map { pl ->
-                val subTracks = if (!pl.deleted) {
-                    val plRef = userDoc.collection("playlists").document(pl.playlistKey)
-                    val activeSnapId = pl.activeSnapshotId?.trim()?.takeIf { it.isNotEmpty() }
-                    val snapTracks = if (activeSnapId != null) {
-                        val snapRef = plRef.collection("snapshots").document(activeSnapId)
-                        val trSnap = snapRef.collection("tracks").get().await()
-                        trSnap.documents.forEach { knownExistingPaths.add(it.reference.path) }
-                        trSnap.toObjects(CloudPlaylistTrack::class.java)
-                    } else {
-                        emptyList()
-                    }
-                    if (snapTracks.isNotEmpty() || (activeSnapId != null && pl.trackCount == 0L)) {
-                        snapTracks
-                    } else {
-                        val trSnap = plRef.collection("tracks").get().await()
-                        trSnap.documents.forEach { knownExistingPaths.add(it.reference.path) }
-                        trSnap.toObjects(CloudPlaylistTrack::class.java)
-                    }
+                val (resolvedPl, subTracks) = if (!pl.deleted) {
+                    fetchPlaylistTracksSafely(userDoc, pl)
                 } else {
-                    emptyList()
+                    pl to emptyList()
                 }
                 CloudPlaylistWithTracks(
-                    playlist = pl,
+                    playlist = resolvedPl,
                     subcollectionTracks = subTracks,
-                    hasLegacyArrayTracks = pl.tracks.isNotEmpty()
+                    hasLegacyArrayTracks = resolvedPl.tracks.isNotEmpty()
                 )
             }
 
@@ -227,7 +221,10 @@ class CloudSyncRepository(
                 hiddenArtists = hidden,
                 maxLikedUpdatedAtMs = maxTimestampMillis(liked.map { it.updatedAt }, watermarks.likedMs),
                 maxSeedsUpdatedAtMs = maxTimestampMillis(seeds.map { it.updatedAt }, watermarks.seedsMs),
-                maxPlaylistsUpdatedAtMs = maxTimestampMillis(playlistDocs.map { it.updatedAt }, watermarks.playlistsMs),
+                maxPlaylistsUpdatedAtMs = maxTimestampMillis(
+                    playlistsWithTracks.map { it.playlist.updatedAt },
+                    watermarks.playlistsMs
+                ),
                 maxHiddenUpdatedAtMs = maxTimestampMillis(hidden.map { it.updatedAt }, watermarks.hiddenMs)
             )
         } catch (e: CancellationException) {
@@ -238,9 +235,65 @@ class CloudSyncRepository(
         }
     }
 
+    private suspend fun fetchPlaylistTracksSafely(
+        userDoc: DocumentReference,
+        initialPl: CloudPlaylist
+    ): Pair<CloudPlaylist, List<CloudPlaylistTrack>> {
+        val plRef = userDoc.collection("playlists").document(initialPl.playlistKey)
+        var currentPl = initialPl
+        repeat(MAX_SNAPSHOT_READ_ATTEMPTS) { attempt ->
+            if (currentPl.deleted) {
+                return currentPl to emptyList()
+            }
+            val activeSnapId = currentPl.activeSnapshotId?.trim()?.takeIf { it.isNotEmpty() }
+            if (activeSnapId == null) {
+                // True legacy playlist without snapshot pointer: read legacy subcollection only.
+                val legacySnap = plRef.collection("tracks").get().await()
+                legacySnap.documents.forEach { knownExistingPaths.add(it.reference.path) }
+                return currentPl to legacySnap.toObjects(CloudPlaylistTrack::class.java)
+            }
+
+            val snapRef = plRef.collection("snapshots").document(activeSnapId)
+            val snapMetaDoc = snapRef.get().await()
+            val trSnap = snapRef.collection("tracks").get().await()
+
+            val snapValid = snapMetaDoc.exists() && snapMetaDoc.getString("state") == "COMMITTED"
+            val expectedCount = snapMetaDoc.getLong("trackCount") ?: currentPl.trackCount
+            val loadedTracks = trSnap.toObjects(CloudPlaylistTrack::class.java)
+
+            if (snapValid && (expectedCount < 0L || loadedTracks.size.toLong() == expectedCount)) {
+                trSnap.documents.forEach { knownExistingPaths.add(it.reference.path) }
+                return currentPl to loadedTracks
+            }
+
+            // Re-check parent playlist in case concurrent publisher rotated activeSnapshotId mid-read.
+            val refreshed = plRef.get().await().toObject(CloudPlaylist::class.java)
+            if (refreshed != null && (refreshed.deleted || refreshed.activeSnapshotId != activeSnapId)) {
+                currentPl = refreshed
+                return@repeat
+            }
+            if (attempt == MAX_SNAPSHOT_READ_ATTEMPTS - 1) {
+                val reason = if (!snapMetaDoc.exists()) {
+                    "snapshot document missing"
+                } else if (snapMetaDoc.getString("state") != "COMMITTED") {
+                    "snapshot state=${snapMetaDoc.getString("state")}"
+                } else {
+                    "expected $expectedCount tracks but loaded ${loadedTracks.size}"
+                }
+                throw IncompletePlaylistSnapshotException(currentPl.playlistKey, activeSnapId, reason)
+            }
+        }
+        throw IncompletePlaylistSnapshotException(
+            currentPl.playlistKey,
+            currentPl.activeSnapshotId.orEmpty(),
+            "exhausted snapshot read retries"
+        )
+    }
+
     private suspend fun queryCollectionSince(colRef: CollectionReference, sinceMs: Long): QuerySnapshot {
         return if (sinceMs > 0L) {
-            colRef.whereGreaterThan("updatedAt", Timestamp(Date(sinceMs))).get().await()
+            val overlapSinceMs = (sinceMs - WATERMARK_OVERLAP_MS).coerceAtLeast(0L)
+            colRef.whereGreaterThanOrEqualTo("updatedAt", Timestamp(Date(overlapSinceMs))).get().await()
         } else {
             colRef.get().await()
         }
@@ -249,7 +302,7 @@ class CloudSyncRepository(
     private fun maxTimestampMillis(timestamps: List<Timestamp?>, baseline: Long): Long {
         var maxMs = baseline
         timestamps.forEach { ts ->
-            val ms = ts?.toDate()?.time ?: 0L
+            val ms = ts?.let { it.seconds * 1000L + ((it.nanoseconds + 999_999) / 1_000_000L) } ?: 0L
             if (ms > maxMs) maxMs = ms
         }
         return maxMs
@@ -508,7 +561,8 @@ class CloudSyncRepository(
         tracks: List<SongItem>,
         clientUpdatedAt: Long,
         syncRevision: Long = 1L,
-        removeLegacyTracksField: Boolean = false
+        removeLegacyTracksField: Boolean = false,
+        coverRemoved: Boolean = false
     ) {
         val uid = requireUserId()
         val safeKey = sanitizeDocId(playlistKey, prefix = "pl")
@@ -516,7 +570,7 @@ class CloudSyncRepository(
 
         val targetRev = syncRevision.coerceAtLeast(1L)
         val safeClientTs = clientUpdatedAt.coerceAtLeast(0L)
-        val safeCover = SecurityValidators.sanitizeHttpsUrl(coverUri, 500)
+        val safeCover = if (coverRemoved) null else SecurityValidators.sanitizeHttpsUrl(coverUri, 500)
         val remoteTracks = tracks.filter { !it.isLocal && !it.videoId.startsWith(LOCAL_SONG_PREFIX) }
 
         val snapshotId = "snap_${targetRev}_${UUID.randomUUID().toString().replace("-", "").take(12)}"
@@ -571,16 +625,32 @@ class CloudSyncRepository(
                 )
             ).await()
 
+            onBeforePublishTransaction?.invoke(safeKey, snapshotId)
+
             db.runTransaction { tx ->
+                val snapDoc = tx.get(snapRef)
+                if (!snapDoc.exists() ||
+                    snapDoc.getString("state") != "COMMITTED" ||
+                    (snapDoc.getLong("syncRevision") ?: 0L) != targetRev ||
+                    (snapDoc.getLong("trackCount") ?: -1L) != remoteTracks.size.toLong()
+                ) {
+                    throw IncompletePlaylistSnapshotException(
+                        safeKey,
+                        snapshotId,
+                        "Snapshot missing or not COMMITTED before transaction pointer update"
+                    )
+                }
+
                 val existing = tx.get(plDocRef)
                 if (existing.exists()) {
                     val existingDeleted = existing.getBoolean("deleted") == true
                     val existingRev = existing.getLong("syncRevision") ?: 0L
                     val existingTs = existing.getLong("clientUpdatedAt") ?: 0L
-                    val stale = !existingDeleted && (
-                        existingRev > targetRev ||
-                            (existingRev == targetRev && existingTs > safeClientTs)
-                        )
+                    val stale = if (existingDeleted) {
+                        targetRev <= existingRev
+                    } else {
+                        existingRev > targetRev || (existingRev == targetRev && existingTs > safeClientTs)
+                    }
                     if (stale) {
                         throw StalePlaylistRevisionException(existingRev, targetRev)
                     }
@@ -596,10 +666,17 @@ class CloudSyncRepository(
                     "clientUpdatedAt" to safeClientTs,
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
-                if (safeCover != null) {
+                if (coverRemoved) {
+                    payload["coverRemoved"] = true
+                    if (existing.exists() && existing.contains("coverUri")) {
+                        payload["coverUri"] = FieldValue.delete()
+                    }
+                } else if (safeCover != null) {
                     payload["coverUri"] = safeCover
-                } else if (existing.exists() && existing.contains("coverUri")) {
-                    payload["coverUri"] = FieldValue.delete()
+                    payload["coverRemoved"] = false
+                } else {
+                    // Preserve any existing remote HTTPS cover when this device has only a local cover or unchanged cover.
+                    payload["coverRemoved"] = false
                 }
                 if (!existing.exists()) {
                     payload["createdAt"] = FieldValue.serverTimestamp()
@@ -630,8 +707,16 @@ class CloudSyncRepository(
             throw e
         }
 
-        // Best-effort post-commit garbage collection of superseded snapshots and legacy tracks
-        cleanupSupersededPlaylistDataBestEffort(plDocRef, keepSnapshotId = snapshotId)
+        if (removeLegacyTracksField) {
+            // Safe once the parent doc points to the new COMMITTED snapshot: clean up obsolete legacy tracks.
+            try {
+                deleteCollectionInBatches(plDocRef.collection("tracks"))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // Best-effort legacy cleanup
+            }
+        }
     }
 
     suspend fun deletePlaylist(
@@ -645,59 +730,52 @@ class CloudSyncRepository(
         val docRef = db.collection("users").document(uid).collection("playlists").document(safeKey)
         val safeTs = clientUpdatedAt.coerceAtLeast(0L)
         try {
-            if (syncRevision > 0L) {
-                db.runTransaction { tx ->
-                    val existing = tx.get(docRef)
-                    if (existing.exists()) {
-                        val existingDeleted = existing.getBoolean("deleted") == true
-                        val existingRev = existing.getLong("syncRevision") ?: 0L
-                        if (!existingDeleted && existingRev > syncRevision) {
-                            throw StalePlaylistRevisionException(existingRev, syncRevision)
-                        }
-                        val updates = linkedMapOf<String, Any>(
+            db.runTransaction { tx ->
+                val existing = tx.get(docRef)
+                val existingRev = existing.getLong("syncRevision") ?: 0L
+                val existingDeleted = existing.getBoolean("deleted") == true
+                val existingTs = existing.getLong("clientUpdatedAt") ?: 0L
+                val targetRev = if (syncRevision > 0L) syncRevision else maxOf(existingRev + 1L, 1L)
+
+                if (existing.exists() && syncRevision > 0L) {
+                    val stale = existingRev > targetRev ||
+                        (existingRev == targetRev && !existingDeleted && existingTs > safeTs)
+                    if (stale) {
+                        throw StalePlaylistRevisionException(existingRev, targetRev)
+                    }
+                }
+
+                if (existing.exists()) {
+                    val updates = linkedMapOf<String, Any>(
+                        "deleted" to true,
+                        "clientUpdatedAt" to safeTs,
+                        "syncRevision" to targetRev,
+                        "trackCount" to 0L,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                    if (existing.contains("activeSnapshotId")) {
+                        updates["activeSnapshotId"] = FieldValue.delete()
+                    }
+                    if (clearLegacyTracksArray && existing.contains("tracks")) {
+                        updates["tracks"] = FieldValue.delete()
+                    }
+                    tx.update(docRef, updates)
+                } else {
+                    tx.set(
+                        docRef,
+                        mapOf(
                             "deleted" to true,
                             "clientUpdatedAt" to safeTs,
-                            "syncRevision" to syncRevision,
+                            "syncRevision" to targetRev,
                             "trackCount" to 0L,
+                            "createdAt" to FieldValue.serverTimestamp(),
                             "updatedAt" to FieldValue.serverTimestamp()
                         )
-                        if (existing.contains("activeSnapshotId")) {
-                            updates["activeSnapshotId"] = FieldValue.delete()
-                        }
-                        if (clearLegacyTracksArray && existing.contains("tracks")) {
-                            updates["tracks"] = FieldValue.delete()
-                        }
-                        tx.update(docRef, updates)
-                    } else {
-                        tx.set(
-                            docRef,
-                            mapOf(
-                                "deleted" to true,
-                                "clientUpdatedAt" to safeTs,
-                                "syncRevision" to syncRevision,
-                                "trackCount" to 0L,
-                                "createdAt" to FieldValue.serverTimestamp(),
-                                "updatedAt" to FieldValue.serverTimestamp()
-                            )
-                        )
-                    }
-                    null
-                }.await()
-                knownExistingPaths.add(docRef.path)
-            } else {
-                val tombFields = linkedMapOf<String, Any?>(
-                    "deleted" to true,
-                    "trackCount" to 0L,
-                    "activeSnapshotId" to FieldValue.delete(),
-                    "clientUpdatedAt" to safeTs,
-                    "updatedAt" to FieldValue.serverTimestamp()
-                )
-                if (clearLegacyTracksArray) {
-                    tombFields["tracks"] = FieldValue.delete()
+                    )
                 }
-                setMergedWithoutPreRead(docRef, tombFields)
-            }
-            cleanupSupersededPlaylistDataBestEffort(docRef, keepSnapshotId = null)
+                null
+            }.await()
+            knownExistingPaths.add(docRef.path)
         } catch (e: CancellationException) {
             throw e
         } catch (e: StalePlaylistRevisionException) {
@@ -708,6 +786,65 @@ class CloudSyncRepository(
         }
     }
 
+    /**
+     * Concurrency-safe garbage collector for old playlist snapshots and legacy tracks.
+     * Never deletes `activeSnapshotId`, never deletes the most recent [retainCommittedCount]
+     * committed snapshots, and never removes staging/superseded snapshots younger than
+     * [retentionWindowMs]. Re-verifies parent `activeSnapshotId` right before each delete.
+     */
+    suspend fun garbageCollectPlaylistSnapshots(
+        playlistKey: String,
+        retentionWindowMs: Long = DEFAULT_SNAPSHOT_RETENTION_MS,
+        retainCommittedCount: Int = DEFAULT_RETAINED_COMMITTED_SNAPSHOTS,
+        nowMs: Long = System.currentTimeMillis()
+    ): Int {
+        val uid = requireUserId()
+        val safeKey = sanitizeDocId(playlistKey, prefix = "pl")
+        val plDocRef = db.collection("users").document(uid).collection("playlists").document(safeKey)
+        var deletedCount = 0
+        try {
+            val parentSnap = plDocRef.get().await()
+            val activeId = parentSnap.getString("activeSnapshotId")
+            val snaps = plDocRef.collection("snapshots").get().await()
+            val protectedCommitted = snaps.documents
+                .filter { it.getString("state") == "COMMITTED" }
+                .sortedWith(
+                    compareByDescending<com.google.firebase.firestore.DocumentSnapshot> {
+                        it.getLong("syncRevision") ?: 0L
+                    }.thenByDescending {
+                        it.getLong("clientUpdatedAt") ?: 0L
+                    }
+                )
+                .take(retainCommittedCount.coerceAtLeast(1))
+                .map { it.id }
+                .toSet()
+
+            for (doc in snaps.documents) {
+                if (doc.id == activeId || doc.id in protectedCommitted) continue
+                val ageTs = doc.getLong("clientUpdatedAt")
+                    ?: doc.getTimestamp("updatedAt")?.toDate()?.time
+                    ?: nowMs
+                if (nowMs - ageTs < retentionWindowMs) continue
+
+                val recheckParent = plDocRef.get().await()
+                if (recheckParent.getString("activeSnapshotId") == doc.id) continue
+
+                onBeforeGcDeleteSnapshot?.invoke(safeKey, doc.id)
+                deleteCollectionInBatches(doc.reference.collection("tracks"))
+                doc.reference.delete().await()
+                deletedCount++
+            }
+            if (activeId != null) {
+                deleteCollectionInBatches(plDocRef.collection("tracks"))
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            // Best-effort deferred garbage collection
+        }
+        return deletedCount
+    }
+
     private suspend fun cleanupSnapshotBestEffort(snapRef: DocumentReference) {
         try {
             deleteCollectionInBatches(snapRef.collection("tracks"))
@@ -716,26 +853,6 @@ class CloudSyncRepository(
             throw e
         } catch (_: Exception) {
             // Best effort cleanup of orphaned staging snapshots
-        }
-    }
-
-    private suspend fun cleanupSupersededPlaylistDataBestEffort(
-        plDocRef: DocumentReference,
-        keepSnapshotId: String?
-    ) {
-        try {
-            val snaps = plDocRef.collection("snapshots").get().await()
-            for (doc in snaps.documents) {
-                if (keepSnapshotId == null || doc.id != keepSnapshotId) {
-                    deleteCollectionInBatches(doc.reference.collection("tracks"))
-                    doc.reference.delete().await()
-                }
-            }
-            deleteCollectionInBatches(plDocRef.collection("tracks"))
-        } catch (e: CancellationException) {
-            throw e
-        } catch (_: Exception) {
-            // Best-effort cleanup
         }
     }
 
@@ -833,15 +950,36 @@ class CloudSyncRepository(
     }
 
     /**
-     * Client-side maintenance sweep removing soft-tombstone documents older than 30 days.
+     * Client-side maintenance sweep removing soft-tombstone documents older than the retention cutoff
+     * and recording the compaction high-watermark on `users/{userId}` when a profile document exists.
      */
     suspend fun purgeExpiredCloudTombstones(userId: String, olderThanEpochMs: Long) {
         val userDoc = db.collection("users").document(userId)
+        val safeCutoff = olderThanEpochMs.coerceAtLeast(0L)
+        if (userDoc.get().await().exists()) {
+            db.runTransaction { tx ->
+                val snap = tx.get(userDoc)
+                if (snap.exists()) {
+                    val prevCompacted = snap.getLong("tombstoneCompactedBeforeMs") ?: 0L
+                    val nextCompacted = maxOf(prevCompacted, safeCutoff)
+                    val prevGen = snap.getLong("syncGeneration") ?: 0L
+                    tx.update(
+                        userDoc,
+                        mapOf(
+                            "tombstoneCompactedBeforeMs" to nextCompacted,
+                            "syncGeneration" to (prevGen + 1L),
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    )
+                }
+                null
+            }.await()
+        }
         for (sub in listOf("liked_songs", "playlists", "taste_seeds", "hidden_artists")) {
             while (true) {
                 val expired = userDoc.collection(sub)
                     .whereEqualTo("deleted", true)
-                    .whereLessThan("clientUpdatedAt", olderThanEpochMs)
+                    .whereLessThan("clientUpdatedAt", safeCutoff)
                     .limit(200)
                     .get()
                     .await()
@@ -875,6 +1013,10 @@ class CloudSyncRepository(
 
     companion object {
         const val SNAPSHOT_BATCH_LIMIT = 400
+        const val MAX_SNAPSHOT_READ_ATTEMPTS = 3
+        const val WATERMARK_OVERLAP_MS = 10_000L
+        const val DEFAULT_SNAPSHOT_RETENTION_MS = 7L * 24L * 60L * 60L * 1000L
+        const val DEFAULT_RETAINED_COMMITTED_SNAPSHOTS = 3
 
         fun snapshotTrackDocId(index: Int, videoId: String): String {
             val raw = "trk_${index.toString().padStart(5, '0')}_${videoId.trim()}"

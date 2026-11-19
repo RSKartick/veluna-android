@@ -102,8 +102,10 @@ class CloudSyncCoordinator(
     private var autoSignInJob: Job? = null
     private val syncLifecycleLock = Any()
     private val watcherJobs = mutableListOf<Job>()
+    private var signOutJob: Job? = null
     private var retryJob: Job? = null
     private var retryAttempt = 0
+    internal var signOutFlushTimeoutMs: Long = 10_000L
 
     // Track failed operations so honest sync status never masks partial failures
     private val failedCollections = ConcurrentHashMap<String, String>()
@@ -239,36 +241,53 @@ class CloudSyncCoordinator(
         if (_authState.value.isAuthBusy || _authState.value.isDeletingAccount) return
         if (!isSigningOut.compareAndSet(false, true)) return
         _authState.update { it.copy(isAuthBusy = true, errorMessage = null, pendingSignOutConfirmCount = null) }
-        synchronized(syncLifecycleLock) {
-            cancelWorkersLocked()
-        }
-        scope.launch {
+        val launchedJob = scope.launch {
             val user = auth.currentUser
+            var timedOut = false
             if (user != null) {
-                withTimeoutOrNull(10_000L) {
+                val merged = withTimeoutOrNull(signOutFlushTimeoutMs) {
                     runBidirectionalMerge(user, allowDuringSignOut = true)
                 }
+                if (merged == null) {
+                    timedOut = true
+                    failedCollections["signout_timeout"] = "Sync flush timed out before sign-out."
+                }
             }
-            val remaining = if (user != null) countUnsyncedChangesFor(user.uid) else 0
+            if (!isSigningOut.get()) return@launch
+            val remaining = if (user != null) {
+                val unsynced = countUnsyncedChangesFor(user.uid)
+                if (timedOut) unsynced.coerceAtLeast(1) else unsynced
+            } else {
+                0
+            }
             if (remaining > 0) {
                 _authState.update {
                     it.copy(
                         isAuthBusy = false,
                         pendingUnsyncedCount = remaining,
-                        pendingSignOutConfirmCount = remaining
+                        pendingSignOutConfirmCount = remaining,
+                        errorMessage = if (timedOut) "Sync timed out before sign-out." else it.errorMessage
                     )
                 }
             } else {
                 performLocalWipeAndSignOut(signOutAuth = true, clearAllAccountData = false)
             }
         }
+        synchronized(syncLifecycleLock) {
+            cancelWorkersLocked()
+            signOutJob?.cancel()
+            signOutJob = launchedJob
+        }
     }
 
     fun dismissSignOutConfirm() {
-        isSigningOut.set(false)
-        _authState.update { it.copy(pendingSignOutConfirmCount = null, isAuthBusy = false) }
+        val user = auth.currentUser
         synchronized(syncLifecycleLock) {
-            val user = auth.currentUser
+            signOutJob?.cancel()
+            signOutJob = null
+            isSigningOut.set(false)
+            failedCollections.remove("signout_timeout")
+            _authState.update { it.copy(pendingSignOutConfirmCount = null, isAuthBusy = false) }
             if (user != null && activeUserId == user.uid && watcherJobs.isEmpty()) {
                 launchWatchersLocked(user)
             } else if (user != null && activeUserId != user.uid) {
@@ -278,6 +297,12 @@ class CloudSyncCoordinator(
     }
 
     fun confirmSignOutDiscard() {
+        synchronized(syncLifecycleLock) {
+            signOutJob?.cancel()
+            signOutJob = null
+            isSigningOut.set(true)
+            cancelWorkersLocked()
+        }
         _authState.update { it.copy(pendingSignOutConfirmCount = null, isAuthBusy = true) }
         scope.launch {
             performLocalWipeAndSignOut(signOutAuth = true, clearAllAccountData = false)
@@ -483,13 +508,26 @@ class CloudSyncCoordinator(
         return runBidirectionalMerge(user)
     }
 
+    suspend fun <T> runWithLocalSyncSuppressed(block: suspend () -> T): T = syncMutex.withLock {
+        suppressLocalPushCount.incrementAndGet()
+        try {
+            block()
+        } finally {
+            suppressLocalPushCount.decrementAndGet()
+        }
+    }
+
     fun clearError() {
         _authState.update { it.copy(errorMessage = null) }
     }
 
     fun shutdown() {
         auth.removeAuthStateListener(authStateListener)
-        stopSyncForSignedOut(clearFailureState = true)
+        synchronized(syncLifecycleLock) {
+            signOutJob?.cancel()
+            signOutJob = null
+            stopSyncForSignedOutLocked(clearFailureState = true)
+        }
     }
 
     private fun stopSyncForSignedOut(clearFailureState: Boolean = true) {
@@ -567,7 +605,14 @@ class CloudSyncCoordinator(
             val tracks = dao.getPlaylistTracks(pl.id)
                 .mapNotNull { repository.decodeSong(it.songJson) }
                 .filter { !it.isLocal }
-            val sig = SyncSignatureHelper.playlistSignature(pl.cloudKey, pl.title, pl.description, pl.coverUri, tracks)
+            val sig = SyncSignatureHelper.playlistSignature(
+                cloudKey = pl.cloudKey,
+                title = pl.title,
+                description = pl.description,
+                coverUri = pl.remoteCoverUri ?: SecurityValidators.sanitizeHttpsUrl(pl.coverUri, 500),
+                tracks = tracks,
+                coverRemoved = pl.coverRemoved
+            )
             val base = plBaselines[pl.cloudKey]
             if (base == null || base.deleted || pl.syncRevision > base.revision || base.signature != sig) {
                 count++
@@ -652,6 +697,19 @@ class CloudSyncCoordinator(
         prefsRepo.markLocalLikesScrubbed()
     }
 
+    private suspend fun ensureAccountOwnershipIsolatedLocked(uid: String) {
+        val persistedUid = prefsRepo.getActiveCloudUid()
+        if (persistedUid != null && persistedUid != uid) {
+            dao.clearSyncedAccountData()
+            prefsRepo.resetCloudSyncStateForSignOut()
+            cloudRepo.clearSessionCache()
+            failedCollections.clear()
+        }
+        if (persistedUid != uid) {
+            prefsRepo.setActiveCloudUid(uid)
+        }
+    }
+
     private suspend fun runBidirectionalMerge(
         user: FirebaseUser,
         allowDuringSignOut: Boolean = false
@@ -664,14 +722,16 @@ class CloudSyncCoordinator(
         }
         suppressLocalPushCount.incrementAndGet()
         try {
+            ensureAccountOwnershipIsolatedLocked(user.uid)
             scrubLocalLikesOnceIfNeeded()
 
             val now = System.currentTimeMillis()
             val tombstoneCutoff = now - TOMBSTONE_RETENTION_MS
             dao.purgeOldTombstones(tombstoneCutoff)
 
+            val lastSuccessAt = prefsRepo.getLastSuccessfulSyncAtMs(user.uid)
             val hasDurableBaselines = dao.getAllSyncBaselinesForUser(user.uid).isNotEmpty()
-            val watermarks = if (hasDurableBaselines) {
+            var watermarks = if (hasDurableBaselines) {
                 SyncWatermarks(
                     likedMs = prefsRepo.getSyncWatermark(UserPrefsRepository.WATERMARK_LIKED),
                     playlistsMs = prefsRepo.getSyncWatermark(UserPrefsRepository.WATERMARK_PLAYLISTS),
@@ -686,18 +746,37 @@ class CloudSyncCoordinator(
                 cloudRepo.purgeExpiredCloudTombstones(user.uid, tombstoneCutoff)
             }
 
-            val snapshot = cloudRepo.fetchAccountSnapshot(watermarks)
+            var snapshot = cloudRepo.fetchAccountSnapshot(watermarks)
             if (auth.currentUser?.uid != user.uid) return@withLock false
             if (!allowDuringSignOut && isSigningOut.get()) return@withLock false
 
-            val resolvedDisplayName = mergeProfileAndSeedsLocked(user, snapshot, now)
-            mergeLikedSongsLocked(user.uid, snapshot, watermarks, now)
-            mergePlaylistsLocked(user.uid, snapshot, watermarks, now)
-            mergeHiddenArtistsLocked(user.uid, snapshot, watermarks, now)
+            val cloudCompactedBefore = snapshot.profile?.tombstoneCompactedBeforeMs ?: 0L
+            val staleDueToCompaction = cloudCompactedBefore > 0L &&
+                lastSuccessAt in 1L..cloudCompactedBefore
+            if (staleDueToCompaction && watermarks != SyncWatermarks()) {
+                watermarks = SyncWatermarks()
+                prefsRepo.clearAllSyncWatermarks()
+                snapshot = cloudRepo.fetchAccountSnapshot(watermarks)
+                if (auth.currentUser?.uid != user.uid) return@withLock false
+                if (!allowDuringSignOut && isSigningOut.get()) return@withLock false
+            }
+            val compactionCutoffForLocal = if (staleDueToCompaction) cloudCompactedBefore else 0L
+
+            val resolvedDisplayName = mergeProfileAndSeedsLocked(user, snapshot, now, compactionCutoffForLocal)
+            mergeLikedSongsLocked(user.uid, snapshot, watermarks, now, compactionCutoffForLocal)
+            mergePlaylistsLocked(user.uid, snapshot, watermarks, now, compactionCutoffForLocal)
+            mergeHiddenArtistsLocked(user.uid, snapshot, watermarks, now, compactionCutoffForLocal)
+
+            if (watermarks.playlistsMs == 0L) {
+                dao.getPlaylistsOnce().forEach { pl ->
+                    cloudRepo.garbageCollectPlaylistSnapshots(pl.cloudKey)
+                }
+            }
 
             failedCollections.clear()
             retryAttempt = 0
             val doneAt = System.currentTimeMillis()
+            prefsRepo.setLastSuccessfulSyncAtMs(user.uid, doneAt)
             _authState.update {
                 it.copy(
                     displayName = resolvedDisplayName,
@@ -738,7 +817,8 @@ class CloudSyncCoordinator(
     private suspend fun mergeProfileAndSeedsLocked(
         user: FirebaseUser,
         snapshot: CloudAccountSnapshot,
-        now: Long
+        now: Long,
+        compactedBeforeMs: Long = 0L
     ): String {
         val uid = user.uid
         var localPrefs = prefsRepo.prefsFlow.first()
@@ -928,7 +1008,21 @@ class CloudSyncCoordinator(
             c.seedId to MergeItem(c.seedId, ts, c.deleted, resolvedSeed)
         }
 
+        val compactedSeedsToDrop = mutableSetOf<String>()
+        if (compactedBeforeMs > 0L) {
+            for ((id, item) in localSeedMergeMap) {
+                if (item.deleted || id in cloudSeedMergeMap || id in existingSeedTombs) continue
+                val base = seedBaselines[id] ?: continue
+                if (!base.deleted && item.clientUpdatedAt <= compactedBeforeMs && item.value != null &&
+                    SyncSignatureHelper.tasteSeedSignature(item.value.first, item.value.second) == base.signature
+                ) {
+                    compactedSeedsToDrop.add(id)
+                }
+            }
+        }
+
         val relevantLocalSeeds = localSeedMergeMap.filterKeys { id ->
+            if (id in compactedSeedsToDrop) return@filterKeys false
             val item = localSeedMergeMap.getValue(id)
             val base = seedBaselines[id]
             id in cloudSeedMergeMap ||
@@ -948,6 +1042,11 @@ class CloudSyncCoordinator(
 
         val nextArtistsMap = localArtistsById.toMutableMap()
         val nextSongsMap = localSongsById.toMutableMap()
+        compactedSeedsToDrop.forEach { dropId ->
+            nextArtistsMap.remove(dropId)
+            nextSongsMap.remove(dropId)
+            dao.deleteSyncBaseline(uid, SyncEntityTypes.SEED, dropId)
+        }
         val dirtyArtistsToPush = mutableListOf<TasteSeed>()
         val dirtySongsToPush = mutableListOf<TasteSeed>()
         val dirtyTombsToPush = mutableListOf<SyncTombstoneEntity>()
@@ -1046,7 +1145,8 @@ class CloudSyncCoordinator(
         uid: String,
         snapshot: CloudAccountSnapshot,
         watermarks: SyncWatermarks,
-        now: Long
+        now: Long,
+        compactedBeforeMs: Long = 0L
     ) {
         val localLikedList = dao.getLikedSongsOnce().filter { !it.videoId.startsWith(LOCAL_SONG_PREFIX) }
         val localLikedById = localLikedList.associateBy { it.videoId }
@@ -1082,7 +1182,25 @@ class CloudSyncCoordinator(
                 c.videoId to MergeItem(c.videoId, ts, c.deleted, if (c.deleted) null else c.toSongItem())
             }
 
+        val compactedLikesToDrop = mutableSetOf<String>()
+        if (compactedBeforeMs > 0L) {
+            for ((id, item) in localLikedMerge) {
+                if (item.deleted || id in cloudLikedMerge || id in likedTombstones) continue
+                val base = likedBaselines[id] ?: continue
+                if (!base.deleted && item.clientUpdatedAt <= compactedBeforeMs && item.value != null &&
+                    SyncSignatureHelper.likedSongSignature(item.value) == base.signature
+                ) {
+                    compactedLikesToDrop.add(id)
+                }
+            }
+        }
+        compactedLikesToDrop.forEach { id ->
+            dao.deleteLikedSong(id)
+            dao.deleteSyncBaseline(uid, SyncEntityTypes.LIKED, id)
+        }
+
         val effectiveLocalLiked = localLikedMerge.filterKeys { id ->
+            if (id in compactedLikesToDrop) return@filterKeys false
             val item = localLikedMerge.getValue(id)
             val base = likedBaselines[id]
             id in cloudLikedMerge ||
@@ -1151,11 +1269,28 @@ class CloudSyncCoordinator(
         }
     }
 
+    private fun encodePlaylistSnapshotJson(
+        title: String,
+        description: String,
+        remoteCoverUri: String?,
+        coverRemoved: Boolean,
+        tracks: List<SongItem>
+    ): String = PlaylistThreeWayMerger.encodeBaselineSnapshot(
+        PlaylistBaselineSnapshot(
+            title = title,
+            description = description,
+            remoteCoverUri = if (coverRemoved) null else SecurityValidators.sanitizeHttpsUrl(remoteCoverUri, 500),
+            coverRemoved = coverRemoved,
+            trackIds = tracks.map { it.videoId }
+        )
+    )
+
     private suspend fun mergePlaylistsLocked(
         uid: String,
         snapshot: CloudAccountSnapshot,
         watermarks: SyncWatermarks,
-        now: Long
+        now: Long,
+        compactedBeforeMs: Long = 0L
     ) {
         val rawLocalPlaylists = dao.getPlaylistsOnce()
         val validLocalPlaylists = rawLocalPlaylists.map { pl ->
@@ -1205,21 +1340,28 @@ class CloudSyncCoordinator(
                     if (targetRev != matchedLocal.syncRevision) {
                         dao.setPlaylistSyncRevision(matchedLocal.id, targetRev)
                     }
+                    val remoteCover = matchedLocal.remoteCoverUri ?: SecurityValidators.sanitizeHttpsUrl(matchedLocal.coverUri, 500)
                     cloudRepo.upsertPlaylist(
                         playlistKey = key,
                         title = matchedLocal.title,
                         description = matchedLocal.description,
-                        coverUri = matchedLocal.coverUri,
+                        coverUri = remoteCover,
                         tracks = localTracks,
                         clientUpdatedAt = matchedLocal.updatedAt,
                         syncRevision = targetRev,
-                        removeLegacyTracksField = cloudBundle.hasLegacyArrayTracks
+                        removeLegacyTracksField = cloudBundle.hasLegacyArrayTracks,
+                        coverRemoved = matchedLocal.coverRemoved
                     )
                     val sig = SyncSignatureHelper.playlistSignature(
-                        key, matchedLocal.title, matchedLocal.description, matchedLocal.coverUri, localTracks
+                        key, matchedLocal.title, matchedLocal.description, remoteCover, localTracks, matchedLocal.coverRemoved
                     )
                     dao.upsertSyncBaseline(
-                        SyncBaselineEntity(uid, SyncEntityTypes.PLAYLIST, key, targetRev, sig, matchedLocal.updatedAt, false, now)
+                        SyncBaselineEntity(
+                            uid, SyncEntityTypes.PLAYLIST, key, targetRev, sig, matchedLocal.updatedAt, false, now,
+                            snapshotJson = encodePlaylistSnapshotJson(
+                                matchedLocal.title, matchedLocal.description, remoteCover, matchedLocal.coverRemoved, localTracks
+                            )
+                        )
                     )
                 } else {
                     if (matchedLocal != null) {
@@ -1259,25 +1401,29 @@ class CloudSyncCoordinator(
             }
 
             val cloudTitle = cloudPl.title.ifBlank { matchedLocal?.title ?: "Playlist" }
-            val safeCloudCoverUri = SecurityValidators.sanitizeHttpsUrl(cloudPl.coverUri, 500)
+            val safeCloudCoverUri = if (cloudPl.coverRemoved) null else SecurityValidators.sanitizeHttpsUrl(cloudPl.coverUri, 500)
             val cloudSig = SyncSignatureHelper.playlistSignature(
                 cloudKey = key,
                 title = cloudTitle,
                 description = cloudPl.description,
                 coverUri = safeCloudCoverUri,
-                tracks = remoteTracks
+                tracks = remoteTracks,
+                coverRemoved = cloudPl.coverRemoved
             )
 
             if (matchedLocal != null) {
                 val localTracks = dao.getPlaylistTracks(matchedLocal.id)
                     .mapNotNull { repository.decodeSong(it.songJson) }
                     .filter { !it.isLocal }
+                val localRemoteCover = matchedLocal.remoteCoverUri
+                    ?: SecurityValidators.sanitizeHttpsUrl(matchedLocal.coverUri, 500)
                 val localSig = SyncSignatureHelper.playlistSignature(
                     cloudKey = key,
                     title = matchedLocal.title,
                     description = matchedLocal.description,
-                    coverUri = matchedLocal.coverUri,
-                    tracks = localTracks
+                    coverUri = localRemoteCover,
+                    tracks = localTracks,
+                    coverRemoved = matchedLocal.coverRemoved
                 )
                 val localDirty = baseline == null ||
                     baseline.deleted ||
@@ -1289,14 +1435,104 @@ class CloudSyncCoordinator(
                     cloudPl.clientUpdatedAt > baseline.clientUpdatedAt ||
                     cloudBundle.hasLegacyArrayTracks
 
-                val cloudWins = when {
-                    cloudDirty && !localDirty -> cloudSig != localSig || cloudPl.syncRevision > matchedLocal.syncRevision
-                    cloudDirty && localDirty -> cloudPl.clientUpdatedAt > matchedLocal.updatedAt
-                    else -> false
-                }
-
-                if (cloudWins) {
-                    val resolvedCover = safeCloudCoverUri ?: matchedLocal.coverUri
+                if (localDirty && cloudDirty) {
+                    val baseSnap = PlaylistThreeWayMerger.decodeBaselineSnapshot(baseline?.snapshotJson)
+                    val merged = PlaylistThreeWayMerger.merge(
+                        baseline = baseSnap,
+                        localTitle = matchedLocal.title,
+                        localDescription = matchedLocal.description,
+                        localRemoteCoverUri = localRemoteCover,
+                        localCoverRemoved = matchedLocal.coverRemoved,
+                        localTracks = localTracks,
+                        localUpdatedAt = matchedLocal.updatedAt,
+                        remoteTitle = cloudTitle,
+                        remoteDescription = cloudPl.description,
+                        remoteCoverUri = safeCloudCoverUri,
+                        remoteCoverRemoved = cloudPl.coverRemoved,
+                        remoteTracks = remoteTracks,
+                        remoteUpdatedAt = cloudPl.clientUpdatedAt
+                    )
+                    val mergedRemoteCover = merged.remoteCoverUri
+                    val resolvedCover: String? = when {
+                        merged.coverRemoved -> {
+                            matchedLocal.coverUri?.let { repository.deleteManagedPlaylistCover(it) }
+                            null
+                        }
+                        matchedLocal.coverUri?.startsWith("file://") == true &&
+                            (mergedRemoteCover == null || mergedRemoteCover == localRemoteCover) -> matchedLocal.coverUri
+                        else -> mergedRemoteCover ?: matchedLocal.coverUri?.takeIf { it.startsWith("file://") }
+                    }
+                    val mergedTs = maxOf(matchedLocal.updatedAt, cloudPl.clientUpdatedAt)
+                    val targetRev = if (merged.needsCloudPush || cloudBundle.hasLegacyArrayTracks || cloudPl.activeSnapshotId.isNullOrBlank()) {
+                        maxOf(matchedLocal.syncRevision, cloudPl.syncRevision + 1L, 1L)
+                    } else {
+                        maxOf(cloudPl.syncRevision, 1L)
+                    }
+                    val mergedSig = SyncSignatureHelper.playlistSignature(
+                        cloudKey = key,
+                        title = merged.title,
+                        description = merged.description,
+                        coverUri = mergedRemoteCover,
+                        tracks = merged.tracks,
+                        coverRemoved = merged.coverRemoved
+                    )
+                    if (merged.needsLocalUpdate || resolvedCover != matchedLocal.coverUri || targetRev != matchedLocal.syncRevision) {
+                        val trackEntities = merged.tracks.mapIndexed { idx, s ->
+                            LocalPlaylistTrackEntity(
+                                playlistId = matchedLocal.id,
+                                videoId = s.videoId,
+                                songJson = repository.encodeSong(s),
+                                position = idx,
+                                addedAt = s.addedAt ?: now
+                            )
+                        }
+                        dao.replacePlaylistFromCloudAtomic(
+                            playlistId = matchedLocal.id,
+                            title = merged.title,
+                            description = merged.description,
+                            coverUri = resolvedCover,
+                            remoteCoverUri = mergedRemoteCover,
+                            coverRemoved = merged.coverRemoved,
+                            updatedAt = mergedTs,
+                            syncRevision = targetRev,
+                            tracks = trackEntities
+                        )
+                    }
+                    if (merged.needsCloudPush || cloudBundle.hasLegacyArrayTracks || cloudPl.activeSnapshotId.isNullOrBlank()) {
+                        cloudRepo.upsertPlaylist(
+                            playlistKey = key,
+                            title = merged.title,
+                            description = merged.description,
+                            coverUri = mergedRemoteCover,
+                            tracks = merged.tracks,
+                            clientUpdatedAt = mergedTs,
+                            syncRevision = targetRev,
+                            removeLegacyTracksField = cloudBundle.hasLegacyArrayTracks,
+                            coverRemoved = merged.coverRemoved
+                        )
+                    }
+                    dao.upsertSyncBaseline(
+                        SyncBaselineEntity(
+                            uid, SyncEntityTypes.PLAYLIST, key, targetRev, mergedSig, mergedTs, false, now,
+                            snapshotJson = encodePlaylistSnapshotJson(
+                                merged.title, merged.description, mergedRemoteCover, merged.coverRemoved, merged.tracks
+                            )
+                        )
+                    )
+                } else if (cloudDirty && !localDirty && (cloudSig != localSig || cloudPl.syncRevision > matchedLocal.syncRevision || cloudBundle.hasLegacyArrayTracks)) {
+                    val resolvedCover: String? = when {
+                        cloudPl.coverRemoved -> {
+                            matchedLocal.coverUri?.let { repository.deleteManagedPlaylistCover(it) }
+                            null
+                        }
+                        safeCloudCoverUri != null && safeCloudCoverUri != localRemoteCover -> {
+                            matchedLocal.coverUri?.let { repository.deleteManagedPlaylistCover(it) }
+                            safeCloudCoverUri
+                        }
+                        matchedLocal.coverUri?.startsWith("file://") == true -> matchedLocal.coverUri
+                        else -> safeCloudCoverUri
+                    }
+                    val resolvedRemoteCover = if (cloudPl.coverRemoved) null else (safeCloudCoverUri ?: localRemoteCover)
                     val adoptedTs = cloudPl.clientUpdatedAt.takeIf { it > 0L } ?: matchedLocal.updatedAt
                     val adoptedRev = maxOf(cloudPl.syncRevision, 1L)
                     val trackEntities = remoteTracks.mapIndexed { idx, s ->
@@ -1313,6 +1549,8 @@ class CloudSyncCoordinator(
                         title = cloudTitle,
                         description = cloudPl.description,
                         coverUri = resolvedCover,
+                        remoteCoverUri = resolvedRemoteCover,
+                        coverRemoved = cloudPl.coverRemoved,
                         updatedAt = adoptedTs,
                         syncRevision = adoptedRev,
                         tracks = trackEntities
@@ -1322,15 +1560,21 @@ class CloudSyncCoordinator(
                             playlistKey = key,
                             title = cloudTitle,
                             description = cloudPl.description,
-                            coverUri = resolvedCover,
+                            coverUri = resolvedRemoteCover,
                             tracks = remoteTracks,
                             clientUpdatedAt = adoptedTs,
                             syncRevision = adoptedRev,
-                            removeLegacyTracksField = true
+                            removeLegacyTracksField = true,
+                            coverRemoved = cloudPl.coverRemoved
                         )
                     }
                     dao.upsertSyncBaseline(
-                        SyncBaselineEntity(uid, SyncEntityTypes.PLAYLIST, key, adoptedRev, cloudSig, adoptedTs, false, now)
+                        SyncBaselineEntity(
+                            uid, SyncEntityTypes.PLAYLIST, key, adoptedRev, cloudSig, adoptedTs, false, now,
+                            snapshotJson = encodePlaylistSnapshotJson(
+                                cloudTitle, cloudPl.description, resolvedRemoteCover, cloudPl.coverRemoved, remoteTracks
+                            )
+                        )
                     )
                 } else if (
                     cloudBundle.hasLegacyArrayTracks ||
@@ -1346,21 +1590,30 @@ class CloudSyncCoordinator(
                         playlistKey = key,
                         title = matchedLocal.title,
                         description = matchedLocal.description,
-                        coverUri = matchedLocal.coverUri,
+                        coverUri = localRemoteCover,
                         tracks = localTracks,
                         clientUpdatedAt = pushTs,
                         syncRevision = targetRev,
-                        removeLegacyTracksField = cloudBundle.hasLegacyArrayTracks
+                        removeLegacyTracksField = cloudBundle.hasLegacyArrayTracks,
+                        coverRemoved = matchedLocal.coverRemoved
                     )
                     dao.upsertSyncBaseline(
-                        SyncBaselineEntity(uid, SyncEntityTypes.PLAYLIST, key, targetRev, localSig, pushTs, false, now)
+                        SyncBaselineEntity(
+                            uid, SyncEntityTypes.PLAYLIST, key, targetRev, localSig, pushTs, false, now,
+                            snapshotJson = encodePlaylistSnapshotJson(
+                                matchedLocal.title, matchedLocal.description, localRemoteCover, matchedLocal.coverRemoved, localTracks
+                            )
+                        )
                     )
                 } else {
                     dao.upsertSyncBaseline(
                         SyncBaselineEntity(
                             uid, SyncEntityTypes.PLAYLIST, key,
                             maxOf(matchedLocal.syncRevision, cloudPl.syncRevision),
-                            localSig, matchedLocal.updatedAt, false, now
+                            localSig, matchedLocal.updatedAt, false, now,
+                            snapshotJson = encodePlaylistSnapshotJson(
+                                matchedLocal.title, matchedLocal.description, localRemoteCover, matchedLocal.coverRemoved, localTracks
+                            )
                         )
                     )
                 }
@@ -1383,6 +1636,8 @@ class CloudSyncCoordinator(
                         title = cloudTitle,
                         description = cloudPl.description,
                         coverUri = safeCloudCoverUri,
+                        remoteCoverUri = safeCloudCoverUri,
+                        coverRemoved = cloudPl.coverRemoved,
                         createdAt = now,
                         updatedAt = initialTs,
                         syncRevision = initialRev
@@ -1398,11 +1653,17 @@ class CloudSyncCoordinator(
                         tracks = remoteTracks,
                         clientUpdatedAt = initialTs,
                         syncRevision = initialRev,
-                        removeLegacyTracksField = true
+                        removeLegacyTracksField = true,
+                        coverRemoved = cloudPl.coverRemoved
                     )
                 }
                 dao.upsertSyncBaseline(
-                    SyncBaselineEntity(uid, SyncEntityTypes.PLAYLIST, key, initialRev, cloudSig, initialTs, false, now)
+                    SyncBaselineEntity(
+                        uid, SyncEntityTypes.PLAYLIST, key, initialRev, cloudSig, initialTs, false, now,
+                        snapshotJson = encodePlaylistSnapshotJson(
+                            cloudTitle, cloudPl.description, safeCloudCoverUri, cloudPl.coverRemoved, remoteTracks
+                        )
+                    )
                 )
             }
         }
@@ -1413,18 +1674,31 @@ class CloudSyncCoordinator(
             val localTracks = dao.getPlaylistTracks(localPl.id)
                 .mapNotNull { repository.decodeSong(it.songJson) }
                 .filter { !it.isLocal }
+            val localRemoteCover = localPl.remoteCoverUri
+                ?: SecurityValidators.sanitizeHttpsUrl(localPl.coverUri, 500)
             val sig = SyncSignatureHelper.playlistSignature(
                 cloudKey = localPl.cloudKey,
                 title = localPl.title,
                 description = localPl.description,
-                coverUri = localPl.coverUri,
-                tracks = localTracks
+                coverUri = localRemoteCover,
+                tracks = localTracks,
+                coverRemoved = localPl.coverRemoved
             )
             val baseline = plBaselines[localPl.cloudKey]
             val dirty = baseline == null ||
                 baseline.deleted ||
                 localPl.syncRevision > baseline.revision ||
                 sig != baseline.signature
+
+            if (compactedBeforeMs > 0L && baseline != null && !baseline.deleted &&
+                !dirty && localPl.updatedAt <= compactedBeforeMs
+            ) {
+                dao.deletePlaylistAtomic(localPl.id, "$LOCAL_PLAYLIST_PREFIX${localPl.id}")
+                localPl.coverUri?.let { repository.deleteManagedPlaylistCover(it) }
+                dao.deleteSyncBaseline(uid, SyncEntityTypes.PLAYLIST, localPl.cloudKey)
+                continue
+            }
+
             if (dirty) {
                 val targetRev = localPl.syncRevision.coerceAtLeast(1L)
                 if (targetRev != localPl.syncRevision) {
@@ -1434,15 +1708,19 @@ class CloudSyncCoordinator(
                     playlistKey = localPl.cloudKey,
                     title = localPl.title,
                     description = localPl.description,
-                    coverUri = localPl.coverUri,
+                    coverUri = localRemoteCover,
                     tracks = localTracks,
                     clientUpdatedAt = localPl.updatedAt,
-                    syncRevision = targetRev
+                    syncRevision = targetRev,
+                    coverRemoved = localPl.coverRemoved
                 )
                 dao.upsertSyncBaseline(
                     SyncBaselineEntity(
                         uid, SyncEntityTypes.PLAYLIST, localPl.cloudKey,
-                        targetRev, sig, localPl.updatedAt, false, now
+                        targetRev, sig, localPl.updatedAt, false, now,
+                        snapshotJson = encodePlaylistSnapshotJson(
+                            localPl.title, localPl.description, localRemoteCover, localPl.coverRemoved, localTracks
+                        )
                     )
                 )
             }
@@ -1475,7 +1753,8 @@ class CloudSyncCoordinator(
         uid: String,
         snapshot: CloudAccountSnapshot,
         watermarks: SyncWatermarks,
-        now: Long
+        now: Long,
+        compactedBeforeMs: Long = 0L
     ) {
         val localBlocked = dao.getBlockedArtistsOnce()
         val localByKey = localBlocked
@@ -1516,7 +1795,25 @@ class CloudSyncCoordinator(
                 )
             }
 
+        val compactedHiddenToDrop = mutableSetOf<String>()
+        if (compactedBeforeMs > 0L) {
+            for ((key, item) in localHiddenMerge) {
+                if (item.deleted || key in cloudHiddenMerge || key in hiddenTombstones) continue
+                val base = hiddenBaselines[key] ?: continue
+                if (!base.deleted && item.clientUpdatedAt <= compactedBeforeMs && item.value != null &&
+                    SyncSignatureHelper.hiddenArtistSignature(item.value.name, item.value.channelId) == base.signature
+                ) {
+                    compactedHiddenToDrop.add(key)
+                }
+            }
+        }
+        compactedHiddenToDrop.forEach { key ->
+            localByKey[key]?.let { dao.deleteBlockedArtist(it.name) }
+            dao.deleteSyncBaseline(uid, SyncEntityTypes.HIDDEN_ARTIST, key)
+        }
+
         val effectiveLocalHidden = localHiddenMerge.filterKeys { key ->
+            if (key in compactedHiddenToDrop) return@filterKeys false
             val item = localHiddenMerge.getValue(key)
             val base = hiddenBaselines[key]
             key in cloudHiddenMerge ||
@@ -1600,6 +1897,7 @@ class CloudSyncCoordinator(
 
                     syncMutex.withLock {
                         if (auth.currentUser?.uid != uid || isSigningOut.get() || suppressLocalPushCount.get() > 0) return@withLock
+                        if (prefsRepo.getActiveCloudUid() != uid) return@withLock
 
                         val now = System.currentTimeMillis()
                         val safePhotoUrl = SecurityValidators.sanitizeHttpsUrl(user.photoUrl?.toString(), 500)
@@ -1699,6 +1997,7 @@ class CloudSyncCoordinator(
                 if (auth.currentUser?.uid != uid || isSigningOut.get() || suppressLocalPushCount.get() > 0) return@collectLatest
                 syncMutex.withLock {
                     if (auth.currentUser?.uid != uid || isSigningOut.get() || suppressLocalPushCount.get() > 0) return@withLock
+                    if (prefsRepo.getActiveCloudUid() != uid) return@withLock
                     val currentMap = rows.filter { !it.videoId.startsWith(LOCAL_SONG_PREFIX) }.associateBy { it.videoId }
                     val baselines = dao.getSyncBaselinesByType(uid, SyncEntityTypes.LIKED).associateBy { it.entityKey }
 
@@ -1749,6 +2048,7 @@ class CloudSyncCoordinator(
                     if (auth.currentUser?.uid != uid || isSigningOut.get() || suppressLocalPushCount.get() > 0) return@collectLatest
                     syncMutex.withLock {
                         if (auth.currentUser?.uid != uid || isSigningOut.get() || suppressLocalPushCount.get() > 0) return@withLock
+                        if (prefsRepo.getActiveCloudUid() != uid) return@withLock
                         val baselines = dao.getSyncBaselinesByType(uid, SyncEntityTypes.PLAYLIST).associateBy { it.entityKey }
                         val activeKeys = mutableSetOf<String>()
                         val dirtyPlaylists = mutableListOf<Triple<LocalPlaylistEntity, List<SongItem>, String>>()
@@ -1758,8 +2058,10 @@ class CloudSyncCoordinator(
                             val tracks = dao.getPlaylistTracks(pl.id)
                                 .mapNotNull { repository.decodeSong(it.songJson) }
                                 .filter { !it.isLocal }
+                            val localRemoteCover = pl.remoteCoverUri
+                                ?: SecurityValidators.sanitizeHttpsUrl(pl.coverUri, 500)
                             val sig = SyncSignatureHelper.playlistSignature(
-                                pl.cloudKey, pl.title, pl.description, pl.coverUri, tracks
+                                pl.cloudKey, pl.title, pl.description, localRemoteCover, tracks, pl.coverRemoved
                             )
                             val base = baselines[pl.cloudKey]
                             if (base == null || base.deleted || pl.syncRevision > base.revision || base.signature != sig) {
@@ -1779,17 +2081,25 @@ class CloudSyncCoordinator(
                                 if (targetRev != pl.syncRevision) {
                                     dao.setPlaylistSyncRevision(pl.id, targetRev)
                                 }
+                                val localRemoteCover = pl.remoteCoverUri
+                                    ?: SecurityValidators.sanitizeHttpsUrl(pl.coverUri, 500)
                                 cloudRepo.upsertPlaylist(
                                     playlistKey = pl.cloudKey,
                                     title = pl.title,
                                     description = pl.description,
-                                    coverUri = pl.coverUri,
+                                    coverUri = localRemoteCover,
                                     tracks = tracks,
                                     clientUpdatedAt = pl.updatedAt,
-                                    syncRevision = targetRev
+                                    syncRevision = targetRev,
+                                    coverRemoved = pl.coverRemoved
                                 )
                                 dao.upsertSyncBaseline(
-                                    SyncBaselineEntity(uid, SyncEntityTypes.PLAYLIST, pl.cloudKey, targetRev, sig, pl.updatedAt, false, now)
+                                    SyncBaselineEntity(
+                                        uid, SyncEntityTypes.PLAYLIST, pl.cloudKey, targetRev, sig, pl.updatedAt, false, now,
+                                        snapshotJson = encodePlaylistSnapshotJson(
+                                            pl.title, pl.description, localRemoteCover, pl.coverRemoved, tracks
+                                        )
+                                    )
                                 )
                             }
                             for (delBase in deletedBaselines) {
@@ -1813,6 +2123,7 @@ class CloudSyncCoordinator(
                 if (auth.currentUser?.uid != uid || isSigningOut.get() || suppressLocalPushCount.get() > 0) return@collectLatest
                 syncMutex.withLock {
                     if (auth.currentUser?.uid != uid || isSigningOut.get() || suppressLocalPushCount.get() > 0) return@withLock
+                    if (prefsRepo.getActiveCloudUid() != uid) return@withLock
                     val byKey = rows
                         .filter { it.name.trim().isNotBlank() }
                         .associateBy { CloudSyncRepository.stableDocId("blk", it.name.lowercase().trim()) }
@@ -1932,6 +2243,6 @@ class CloudSyncCoordinator(
     companion object {
         private const val TAG = "CloudSyncCoordinator"
         private const val PROFILE_BASELINE_KEY = "profile"
-        private const val TOMBSTONE_RETENTION_MS = 30L * 24L * 3600L * 1000L
+        private const val TOMBSTONE_RETENTION_MS = 90L * 24L * 3600L * 1000L
     }
 }

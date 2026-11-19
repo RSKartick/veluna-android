@@ -24,6 +24,19 @@ data class ListenTotalsRow(
     val totalSecs: Long
 )
 
+data class LibraryRestoreSnapshot(
+    val likedSongs: List<LikedSongEntity>,
+    val blockedArtists: List<BlockedArtistEntity>,
+    val savedAlbums: List<SavedAlbumEntity>,
+    val followedArtists: List<FollowedArtistEntity>,
+    val shortcuts: List<ShortcutEntity>,
+    val searchHistory: List<SearchHistoryEntity>,
+    val listenSongs: List<ListenSongEntity>,
+    val listens: List<ListenEntity>,
+    val playlists: List<LocalPlaylistEntity>,
+    val playlistTracks: List<LocalPlaylistTrackEntity>
+)
+
 @Dao
 interface VelunaDao {
     // --- Listens & Stats ---
@@ -106,8 +119,36 @@ interface VelunaDao {
     @Query("UPDATE local_playlists SET title = :title, description = :description, coverUri = :coverUri, updatedAt = :updatedAt, syncRevision = syncRevision + 1 WHERE id = :id")
     suspend fun updatePlaylist(id: Long, title: String, description: String, coverUri: String?, updatedAt: Long)
 
-    @Query("UPDATE local_playlists SET title = :title, description = :description, coverUri = :coverUri, updatedAt = :updatedAt, syncRevision = :syncRevision WHERE id = :id")
-    suspend fun updatePlaylistFromCloud(id: Long, title: String, description: String, coverUri: String?, updatedAt: Long, syncRevision: Long)
+    @Query(
+        "UPDATE local_playlists SET title = :title, description = :description, coverUri = :coverUri, " +
+            "remoteCoverUri = :remoteCoverUri, coverRemoved = :coverRemoved, updatedAt = :updatedAt, " +
+            "syncRevision = syncRevision + 1 WHERE id = :id"
+    )
+    suspend fun updatePlaylistWithCoverMeta(
+        id: Long,
+        title: String,
+        description: String,
+        coverUri: String?,
+        remoteCoverUri: String?,
+        coverRemoved: Boolean,
+        updatedAt: Long
+    )
+
+    @Query(
+        "UPDATE local_playlists SET title = :title, description = :description, coverUri = :coverUri, " +
+            "remoteCoverUri = :remoteCoverUri, coverRemoved = :coverRemoved, updatedAt = :updatedAt, " +
+            "syncRevision = :syncRevision WHERE id = :id"
+    )
+    suspend fun updatePlaylistFromCloud(
+        id: Long,
+        title: String,
+        description: String,
+        coverUri: String?,
+        remoteCoverUri: String?,
+        coverRemoved: Boolean,
+        updatedAt: Long,
+        syncRevision: Long
+    )
 
     @Query("UPDATE local_playlists SET updatedAt = :updatedAt, syncRevision = syncRevision + 1 WHERE id = :id")
     suspend fun touchPlaylistRevision(id: Long, updatedAt: Long)
@@ -271,6 +312,8 @@ interface VelunaDao {
         title: String,
         description: String,
         coverUri: String?,
+        remoteCoverUri: String? = coverUri?.takeIf { it.startsWith("https://") },
+        coverRemoved: Boolean = false,
         updatedAt: Long,
         syncRevision: Long,
         tracks: List<LocalPlaylistTrackEntity>
@@ -280,6 +323,8 @@ interface VelunaDao {
             title = title,
             description = description,
             coverUri = coverUri,
+            remoteCoverUri = remoteCoverUri,
+            coverRemoved = coverRemoved,
             updatedAt = updatedAt,
             syncRevision = syncRevision
         )
@@ -535,6 +580,77 @@ interface VelunaDao {
 
     @Query("DELETE FROM pending_scrobbles")
     suspend fun clearPendingScrobbles()
+
+    @Query("SELECT * FROM local_playlist_tracks ORDER BY playlistId ASC, position ASC, addedAt ASC")
+    suspend fun getAllPlaylistTracksOnce(): List<LocalPlaylistTrackEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertPlaylists(playlists: List<LocalPlaylistEntity>)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertLikedSongs(songs: List<LikedSongEntity>)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertBlockedArtists(artists: List<BlockedArtistEntity>)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertSavedAlbums(albums: List<SavedAlbumEntity>)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertFollowedArtists(artists: List<FollowedArtistEntity>)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertShortcuts(shortcuts: List<ShortcutEntity>)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertSearchHistoryList(entries: List<SearchHistoryEntity>)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertListenSongs(songs: List<ListenSongEntity>)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertListens(listens: List<ListenEntity>)
+
+    @Transaction
+    suspend fun captureLibrarySnapshot(): LibraryRestoreSnapshot {
+        return LibraryRestoreSnapshot(
+            likedSongs = getLikedSongsOnce(),
+            blockedArtists = getBlockedArtistsOnce(),
+            savedAlbums = getSavedAlbumsOnce(),
+            followedArtists = getFollowedArtistsOnce(),
+            shortcuts = getShortcutsOnce(),
+            searchHistory = getSearchHistoryOnce(10_000),
+            listenSongs = getAllListenSongs(),
+            listens = getAllListensAsc(),
+            playlists = getPlaylistsOnce(),
+            playlistTracks = getAllPlaylistTracksOnce()
+        )
+    }
+
+    @Transaction
+    suspend fun restoreLibrarySnapshotAtomic(snapshot: LibraryRestoreSnapshot) {
+        clearLikedSongs()
+        clearBlockedArtists()
+        clearSavedAlbums()
+        clearFollowedArtists()
+        clearShortcuts()
+        clearSearchHistory()
+        clearListens()
+        clearListenSongs()
+        clearAllPlaylistTracks()
+        clearPlaylists()
+
+        if (snapshot.likedSongs.isNotEmpty()) insertLikedSongs(snapshot.likedSongs)
+        if (snapshot.blockedArtists.isNotEmpty()) insertBlockedArtists(snapshot.blockedArtists)
+        if (snapshot.savedAlbums.isNotEmpty()) insertSavedAlbums(snapshot.savedAlbums)
+        if (snapshot.followedArtists.isNotEmpty()) insertFollowedArtists(snapshot.followedArtists)
+        if (snapshot.shortcuts.isNotEmpty()) insertShortcuts(snapshot.shortcuts)
+        if (snapshot.searchHistory.isNotEmpty()) insertSearchHistoryList(snapshot.searchHistory)
+        if (snapshot.listenSongs.isNotEmpty()) insertListenSongs(snapshot.listenSongs)
+        if (snapshot.listens.isNotEmpty()) insertListens(snapshot.listens)
+        if (snapshot.playlists.isNotEmpty()) insertPlaylists(snapshot.playlists)
+        if (snapshot.playlistTracks.isNotEmpty()) insertPlaylistTracks(snapshot.playlistTracks)
+    }
 
     /**
      * Transactionally clears ONLY cloud-synced account tables on sign-out.

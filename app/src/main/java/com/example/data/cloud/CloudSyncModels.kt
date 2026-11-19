@@ -27,6 +27,8 @@ data class CloudUserProfile(
     val selectedGenres: List<String> = emptyList(),
     val onboardingCompleted: Boolean = false,
     val prefsUpdatedAt: Long = 0L,
+    val tombstoneCompactedBeforeMs: Long = 0L,
+    val syncGeneration: Long = 0L,
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
 )
@@ -133,6 +135,7 @@ data class CloudPlaylist(
     val title: String = "",
     val description: String = "",
     val coverUri: String? = null,
+    val coverRemoved: Boolean = false,
     // Legacy array kept readable for one-time migration to subcollection tracks
     val tracks: List<Map<String, Any?>> = emptyList(),
     val deleted: Boolean = false,

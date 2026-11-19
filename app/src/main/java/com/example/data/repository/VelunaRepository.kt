@@ -2,9 +2,11 @@ package com.example.data.repository
 
 import android.content.Context
 import android.content.Intent
+import android.graphics.BitmapFactory
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.provider.DocumentsContract
+import android.util.Base64
 import androidx.core.net.toUri
 import androidx.room.withTransaction
 import com.example.data.local.BlockedArtistEntity
@@ -59,6 +61,7 @@ import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.time.Instant
 import java.time.LocalDate
@@ -133,7 +136,8 @@ data class BackupPlaylist(
     val description: String,
     val tracks: List<SongItem>,
     val coverUri: String? = null,
-    val cloudKey: String? = null
+    val cloudKey: String? = null,
+    val coverImageBase64: String? = null
 )
 
 data class BackupRestoreResult(
@@ -149,6 +153,9 @@ class VelunaRepository(
     private val database: VelunaDatabase? = null
 ) {
     private val json = Json { ignoreUnknownKeys = true }
+
+    internal var onBeforeDataStoreRestore: (suspend () -> Unit)? = null
+    var runWithSyncSuppressed: (suspend (suspend () -> Unit) -> Unit)? = null
 
     fun encodeSong(song: SongItem): String = json.encodeToString(song)
     fun decodeSong(raw: String): SongItem? = runCatching { json.decodeFromString<SongItem>(raw) }.getOrNull()
@@ -334,10 +341,27 @@ class VelunaRepository(
 
     suspend fun updatePlaylist(playlistId: Long, title: String, description: String, coverUri: String?) =
         withContext(Dispatchers.IO) {
-            val previousCover = dao.getPlaylistById(playlistId)?.coverUri
-            val persistedCover = persistPlaylistCoverIfNeeded(playlistId, coverUri)
-            dao.updatePlaylist(playlistId, title.trim(), description.trim(), persistedCover, System.currentTimeMillis())
-            if (previousCover != null && previousCover != persistedCover) {
+            val existing = dao.getPlaylistById(playlistId) ?: return@withContext
+            val previousCover = existing.coverUri
+            val explicitClear = coverUri.isNullOrBlank()
+            val persistedCover = if (explicitClear) null else persistPlaylistCoverIfNeeded(playlistId, coverUri)
+            val resolvedCover = if (explicitClear) null else persistedCover
+            val newRemoteCoverUri = when {
+                explicitClear -> null
+                resolvedCover != null && resolvedCover.startsWith("https://") -> resolvedCover
+                else -> existing.remoteCoverUri
+            }
+            val newCoverRemoved = explicitClear
+            dao.updatePlaylistWithCoverMeta(
+                id = playlistId,
+                title = title.trim(),
+                description = description.trim(),
+                coverUri = resolvedCover,
+                remoteCoverUri = newRemoteCoverUri,
+                coverRemoved = newCoverRemoved,
+                updatedAt = System.currentTimeMillis()
+            )
+            if (previousCover != null && previousCover != resolvedCover) {
                 deleteManagedPlaylistCover(previousCover)
             }
         }
@@ -350,45 +374,130 @@ class VelunaRepository(
 
     private fun persistPlaylistCoverIfNeeded(playlistId: Long, rawUri: String?): String? {
         val trimmed = rawUri?.trim()?.takeIf { it.isNotEmpty() } ?: return null
-        val parsed = runCatching { trimmed.toUri() }.getOrNull() ?: return trimmed
-        if (parsed.scheme != "content") return trimmed
-        return runCatching {
-            val coversDir = File(context.filesDir, "playlist_covers").apply { mkdirs() }
-            val outFile = File(coversDir, "pl_${playlistId}_${System.currentTimeMillis()}.jpg")
-            var copied = 0L
-            context.contentResolver.openInputStream(parsed)?.use { input ->
-                outFile.outputStream().use { output ->
-                    val buf = ByteArray(8192)
-                    while (true) {
-                        val read = input.read(buf)
-                        if (read <= 0) break
-                        copied += read
-                        if (copied > MAX_COVER_BYTES) {
-                            throw IllegalStateException("Cover image exceeds maximum size")
-                        }
-                        output.write(buf, 0, read)
-                    }
-                }
-            } ?: return trimmed
-            if (copied == 0L) {
-                outFile.delete()
-                return trimmed
+        val parsed = runCatching { trimmed.toUri() }.getOrNull() ?: return null
+        return when (parsed.scheme?.lowercase()) {
+            "https" -> SecurityValidators.sanitizeHttpsUrl(trimmed, 500)
+            "file" -> {
+                val managed = resolveManagedCoverFile(trimmed) ?: return null
+                if (!managed.isFile || managed.length() !in 1L..MAX_COVER_BYTES.toLong()) return null
+                val bytes = runCatching { managed.readBytes() }.getOrNull() ?: return null
+                if (validateImageBytes(bytes) == null) null else Uri.fromFile(managed).toString()
             }
-            Uri.fromFile(outFile).toString()
-        }.getOrElse { trimmed }
+            "content" -> {
+                val bytes = readLimitedContentBytes(parsed, MAX_COVER_BYTES) ?: return null
+                val ext = validateImageBytes(bytes) ?: return null
+                writeCoverBytesAtomically(playlistId, ext, bytes)?.let { Uri.fromFile(it).toString() }
+            }
+            else -> null
+        }
     }
 
-    internal fun deleteManagedPlaylistCover(coverUri: String) {
-        runCatching {
-            val parsed = coverUri.toUri()
-            if (parsed.scheme == "file") {
-                val coversDir = File(context.filesDir, "playlist_covers").canonicalFile
-                val targetFile = parsed.path?.let { File(it).canonicalFile }
-                if (targetFile != null && targetFile.path.startsWith(coversDir.path + File.separator)) {
-                    targetFile.delete()
+    private fun resolveManagedCoverFile(rawUri: String): File? {
+        return runCatching {
+            val parsed = rawUri.toUri()
+            if (parsed.scheme != "file") return@runCatching null
+            val coversDir = File(context.filesDir, "playlist_covers").canonicalFile
+            val targetFile = parsed.path?.let { File(it).canonicalFile }
+            if (targetFile != null && targetFile.path.startsWith(coversDir.path + File.separator)) {
+                targetFile
+            } else {
+                null
+            }
+        }.getOrNull()
+    }
+
+    private fun readLimitedContentBytes(uri: Uri, maxBytes: Int): ByteArray? {
+        return runCatching {
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                val out = ByteArrayOutputStream()
+                val buf = ByteArray(8192)
+                var total = 0
+                while (true) {
+                    val read = input.read(buf)
+                    if (read <= 0) break
+                    total += read
+                    if (total > maxBytes) return null
+                    out.write(buf, 0, read)
+                }
+                val bytes = out.toByteArray()
+                if (bytes.isEmpty()) null else bytes
+            }
+        }.getOrNull()
+    }
+
+    private fun writeCoverBytesAtomically(playlistId: Long, ext: String, bytes: ByteArray): File? {
+        return runCatching {
+            val coversDir = File(context.filesDir, "playlist_covers").apply { mkdirs() }
+            val stamp = "${System.currentTimeMillis()}_${java.util.UUID.randomUUID().toString().take(8)}"
+            val tmpFile = File(coversDir, "pl_${playlistId}_${stamp}.$ext.tmp")
+            val outFile = File(coversDir, "pl_${playlistId}_${stamp}.$ext")
+            try {
+                tmpFile.outputStream().use {
+                    it.write(bytes)
+                    it.fd.sync()
+                }
+                if (!tmpFile.renameTo(outFile)) {
+                    bytes.inputStream().use { src ->
+                        outFile.outputStream().use { dst -> src.copyTo(dst) }
+                    }
+                    tmpFile.delete()
+                }
+                outFile
+            } catch (t: Throwable) {
+                tmpFile.delete()
+                outFile.delete()
+                throw t
+            }
+        }.getOrNull()
+    }
+
+    internal fun validateImageBytes(bytes: ByteArray): String? {
+        if (bytes.size < 8 || bytes.size > MAX_COVER_BYTES) return null
+        val ext = when {
+            bytes[0] == 0xFF.toByte() && bytes[1] == 0xD8.toByte() && bytes[2] == 0xFF.toByte() -> "jpg"
+            bytes[0] == 0x89.toByte() && bytes[1] == 0x50.toByte() &&
+                bytes[2] == 0x4E.toByte() && bytes[3] == 0x47.toByte() &&
+                bytes[4] == 0x0D.toByte() && bytes[5] == 0x0A.toByte() &&
+                bytes[6] == 0x1A.toByte() && bytes[7] == 0x0A.toByte() -> "png"
+            bytes.size >= 12 &&
+                bytes[0] == 'R'.code.toByte() && bytes[1] == 'I'.code.toByte() &&
+                bytes[2] == 'F'.code.toByte() && bytes[3] == 'F'.code.toByte() &&
+                bytes[8] == 'W'.code.toByte() && bytes[9] == 'E'.code.toByte() &&
+                bytes[10] == 'B'.code.toByte() && bytes[11] == 'P'.code.toByte() -> "webp"
+            bytes[0] == 'G'.code.toByte() && bytes[1] == 'I'.code.toByte() &&
+                bytes[2] == 'F'.code.toByte() && bytes[3] == '8'.code.toByte() &&
+                (bytes[4] == '7'.code.toByte() || bytes[4] == '9'.code.toByte()) &&
+                bytes[5] == 'a'.code.toByte() -> "gif"
+            else -> return null
+        }
+        val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+        if (opts.outWidth !in 1..MAX_COVER_DIMENSION || opts.outHeight !in 1..MAX_COVER_DIMENSION) {
+            return null
+        }
+        return ext
+    }
+
+    suspend fun pruneOrphanPlaylistCovers(): Int = withContext(Dispatchers.IO) {
+        val coversDir = File(context.filesDir, "playlist_covers")
+        if (!coversDir.isDirectory) return@withContext 0
+        val referencedPaths = dao.getPlaylistsOnce()
+            .mapNotNull { it.coverUri?.let(::resolveManagedCoverFile)?.canonicalPath }
+            .toHashSet()
+        var deleted = 0
+        coversDir.listFiles()?.forEach { file ->
+            if (file.isFile) {
+                val canonical = runCatching { file.canonicalPath }.getOrNull()
+                if (canonical == null || canonical !in referencedPaths) {
+                    if (file.delete()) deleted++
                 }
             }
         }
+        deleted
+    }
+
+    internal fun deleteManagedPlaylistCover(coverUri: String) {
+        resolveManagedCoverFile(coverUri)?.delete()
     }
 
     suspend fun addTrackToPlaylist(playlistId: Long, song: SongItem, skipDuplicates: Boolean = true): Boolean {
@@ -770,12 +879,20 @@ class VelunaRepository(
 
         val playlists = playlistRows.map { pl ->
             val tracks = dao.getPlaylistTracks(pl.id).mapNotNull { decodeSong(it.songJson) }
+            val portableBase64 = pl.coverUri?.let(::resolveManagedCoverFile)?.takeIf {
+                it.isFile && it.length() in 1L..MAX_BACKUP_COVER_BYTES.toLong()
+            }?.let { file ->
+                runCatching { file.readBytes() }.getOrNull()
+                    ?.takeIf { validateImageBytes(it) != null }
+                    ?.let { Base64.encodeToString(it, Base64.NO_WRAP) }
+            }
             BackupPlaylist(
                 title = pl.title,
                 description = pl.description,
                 tracks = tracks,
-                coverUri = SecurityValidators.sanitizeHttpsUrl(pl.coverUri, 500),
-                cloudKey = pl.cloudKey
+                coverUri = pl.remoteCoverUri ?: SecurityValidators.sanitizeHttpsUrl(pl.coverUri, 500),
+                cloudKey = pl.cloudKey,
+                coverImageBase64 = portableBase64
             )
         }
 
@@ -799,165 +916,247 @@ class VelunaRepository(
 
     suspend fun importBackupJson(rawJson: String): Result<BackupRestoreResult> = withContext(Dispatchers.IO) {
         suspendRunCatching {
-            require(rawJson.length <= MAX_BACKUP_JSON_CHARS) { "Backup file exceeds maximum supported size." }
-            val payload = json.decodeFromString<VelunaBackupPayload>(rawJson)
-            val preImportSnapshot = prefsRepo.captureRawPreferencesSnapshot()
-            val insertedPlaylistIds = mutableListOf<Long>()
+            val suppressor = runWithSyncSuppressed
+            if (suppressor != null) {
+                var imported: BackupRestoreResult? = null
+                suppressor { imported = performRecoverableImport(rawJson) }
+                imported!!
+            } else {
+                performRecoverableImport(rawJson)
+            }
+        }
+    }
 
-            val blockWrite: suspend () -> Int = {
-                payload.likedSongs
-                    .take(5_000)
-                    .mapNotNull(::sanitizeBackupSong)
-                    .forEach { song ->
-                        dao.insertLikedSong(LikedSongEntity(song.videoId, encodeSong(song)))
-                    }
-                payload.blockedArtists.take(500).forEach { name ->
-                    val clean = name.trim().take(160)
-                    if (clean.isNotEmpty()) {
-                        dao.insertBlockedArtist(BlockedArtistEntity(clean))
-                    }
-                }
-                payload.savedAlbums.take(1_000).forEach { al ->
-                    val cleanId = al.albumId.trim().takeIf { it.isNotEmpty() && it.length <= 128 } ?: return@forEach
-                    dao.insertSavedAlbum(
-                        SavedAlbumEntity(
-                            albumId = cleanId,
-                            title = al.title.trim().ifBlank { "Album" }.take(200),
-                            subtitle = al.subtitle?.take(200),
-                            thumbnail = SecurityValidators.sanitizeHttpsUrl(al.thumbnail, 2048),
-                            savedAt = al.savedAt.coerceAtLeast(0L)
-                        )
-                    )
-                }
-                payload.followedArtists.take(1_000).forEach { ar ->
-                    val cleanId = ar.channelId.trim().takeIf { it.isNotEmpty() && it.length <= 128 } ?: return@forEach
-                    dao.insertFollowedArtist(
-                        FollowedArtistEntity(
-                            channelId = cleanId,
-                            name = ar.name.trim().ifBlank { "Artist" }.take(160),
-                            thumbnail = SecurityValidators.sanitizeHttpsUrl(ar.thumbnail, 2048),
-                            subscribers = ar.subscribers?.take(64),
-                            followedAt = ar.followedAt.coerceAtLeast(0L)
-                        )
-                    )
-                }
-                payload.shortcuts.take(100).forEach { sc ->
-                    val cleanId = sc.id.trim().takeIf { it.isNotEmpty() && it.length <= 128 } ?: return@forEach
-                    val safeKind = runCatching { BrowseKind.valueOf(sc.kind) }.getOrDefault(BrowseKind.PLAYLIST).name
-                    dao.upsertShortcut(
-                        ShortcutEntity(
-                            id = cleanId,
-                            kind = safeKind,
-                            title = sc.title.trim().ifBlank { "Shortcut" }.take(160),
-                            subtitle = sc.subtitle?.take(160),
-                            thumbnail = SecurityValidators.sanitizeHttpsUrl(sc.thumbnail, 2048),
-                            position = sc.position.coerceIn(0, 1_000)
-                        )
-                    )
-                }
-                payload.searchHistory.take(100).forEach { sh ->
-                    val cleanQuery = sh.query.trim().take(200)
-                    if (cleanQuery.isNotEmpty()) {
-                        dao.upsertSearchHistory(SearchHistoryEntity(cleanQuery, sh.searchedAt.coerceAtLeast(0L)))
-                    }
-                }
-                payload.listens.take(10_000).forEach { l ->
-                    val cleanVid = l.videoId.trim().takeIf { SecurityValidators.isValidYouTubeId(it) } ?: return@forEach
-                    l.song?.let(::sanitizeBackupSong)?.let { song ->
-                        dao.upsertListenSong(ListenSongEntity(cleanVid, encodeSong(song)))
-                    }
-                    dao.insertListen(
-                        ListenEntity(
-                            videoId = cleanVid,
-                            playedAt = l.playedAt.coerceAtLeast(0L),
-                            secs = l.secs.coerceIn(0L, 86_400L)
-                        )
-                    )
-                }
+    private data class DecodedBackupCover(
+        val ext: String,
+        val bytes: ByteArray
+    )
 
-                // Deduplicate playlists against existing ones using cloudKey and (normalizedTitle, trackSignature)
-                val existingPlaylists = dao.getPlaylistsOnce()
-                val existingCloudKeys = existingPlaylists.mapTo(HashSet()) { it.cloudKey }
-                val existingSignatures = existingPlaylists.map { existing ->
-                    val existingTracks = dao.getPlaylistTracks(existing.id).map { it.videoId }
-                    normalizePlaylistTitle(existing.title) to playlistTrackSignature(existingTracks)
-                }.toMutableSet()
+    private fun validateBackupPayloadUpfront(payload: VelunaBackupPayload): Map<Int, DecodedBackupCover> {
+        require(payload.version in 1..4) { "Unsupported backup version: ${payload.version}" }
+        require(payload.playlists.size <= 1_000) { "Backup contains too many playlists." }
+        require(payload.likedSongs.size <= 20_000) { "Backup contains too many liked songs." }
+        require(payload.blockedArtists.size <= 2_000) { "Backup contains too many blocked artists." }
+        require(payload.savedAlbums.size <= 5_000) { "Backup contains too many saved albums." }
+        require(payload.followedArtists.size <= 5_000) { "Backup contains too many followed artists." }
+        require(payload.shortcuts.size <= 500) { "Backup contains too many shortcuts." }
+        require(payload.searchHistory.size <= 1_000) { "Backup contains too many search history entries." }
+        require(payload.listens.size <= 50_000) { "Backup contains too many listen entries." }
+        require(payload.prefs.playbackSpeed.isFinite()) { "Backup preferences contain invalid playback speed." }
+        require(payload.prefs.eqBandsDb.all { it.isFinite() }) { "Backup preferences contain invalid equalizer bands." }
 
-                var count = 0
-                payload.playlists.take(500).forEach { pl ->
-                    val cleanTracks = pl.tracks.take(5_000).mapNotNull(::sanitizeBackupSong)
-                    val cleanTitle = pl.title.trim().ifBlank { "Playlist" }.take(120)
-                    val requestedKey = pl.cloudKey?.trim()?.takeIf {
-                        it.length in 1..128 &&
-                            it.matches(VALID_CLOUD_KEY_REGEX) &&
-                            !it.startsWith("LOCAL", ignoreCase = true)
-                    }
-                    if (requestedKey != null && requestedKey in existingCloudKeys) {
-                        return@forEach
-                    }
-                    val sigKey = normalizePlaylistTitle(cleanTitle) to playlistTrackSignature(cleanTracks.map { it.videoId })
-                    if (existingSignatures.add(sigKey)) {
-                        val now = System.currentTimeMillis()
-                        val resolvedKey = requestedKey ?: newCloudPlaylistKey()
-                        existingCloudKeys.add(resolvedKey)
-                        val trackEntities = cleanTracks.mapIndexed { idx, song ->
-                            LocalPlaylistTrackEntity(
-                                playlistId = 0,
-                                videoId = song.videoId,
-                                songJson = encodeSong(song),
-                                position = idx,
-                                addedAt = now
-                            )
-                        }
-                        val id = dao.createPlaylistWithTracks(
-                            LocalPlaylistEntity(
-                                cloudKey = resolvedKey,
-                                title = cleanTitle,
-                                description = pl.description.trim().take(500),
-                                coverUri = SecurityValidators.sanitizeHttpsUrl(pl.coverUri, 500),
-                                createdAt = now,
-                                updatedAt = now,
-                                syncRevision = 1L
-                            ),
-                            trackEntities
-                        )
-                        insertedPlaylistIds.add(id)
-                        count++
+        payload.likedSongs.forEach { song ->
+            if (!song.isLocal && !song.videoId.startsWith(LOCAL_SONG_PREFIX)) {
+                require(SecurityValidators.isValidYouTubeId(song.videoId.trim())) {
+                    "Backup contains invalid liked song identifier."
+                }
+            }
+        }
+        payload.listens.forEach { entry ->
+            require(SecurityValidators.isValidYouTubeId(entry.videoId.trim())) {
+                "Backup contains invalid listen history identifier."
+            }
+        }
+
+        val seenCloudKeys = HashSet<String>()
+        val decodedCovers = HashMap<Int, DecodedBackupCover>()
+        payload.playlists.forEachIndexed { idx, pl ->
+            require(pl.tracks.size <= 5_000) { "Backup playlist exceeds maximum track limit." }
+            pl.tracks.forEach { trk ->
+                if (!trk.isLocal && !trk.videoId.startsWith(LOCAL_SONG_PREFIX)) {
+                    require(SecurityValidators.isValidYouTubeId(trk.videoId.trim())) {
+                        "Backup playlist contains invalid track identifier."
                     }
                 }
-                count
+            }
+            val rawKey = pl.cloudKey
+            if (rawKey != null) {
+                val cleanKey = rawKey.trim()
+                require(
+                    cleanKey.length in 1..128 &&
+                        cleanKey.matches(VALID_CLOUD_KEY_REGEX) &&
+                        !cleanKey.startsWith("LOCAL", ignoreCase = true)
+                ) { "Backup playlist contains invalid cloudKey." }
+                require(seenCloudKeys.add(cleanKey)) { "Backup contains duplicate playlist cloudKey." }
+            }
+            val rawB64 = pl.coverImageBase64
+            if (rawB64 != null) {
+                require(rawB64.length <= MAX_BACKUP_COVER_BASE64_CHARS) { "Backup playlist cover exceeds size limit." }
+                val bytes = runCatching { Base64.decode(rawB64, Base64.DEFAULT) }.getOrNull()
+                    ?: throw IllegalArgumentException("Backup playlist cover contains invalid Base64.")
+                require(bytes.size in 1..MAX_BACKUP_COVER_BYTES) { "Backup playlist cover exceeds byte limit." }
+                val ext = validateImageBytes(bytes)
+                    ?: throw IllegalArgumentException("Backup playlist cover is not a supported image.")
+                decodedCovers[idx] = DecodedBackupCover(ext, bytes)
+            }
+        }
+        return decodedCovers
+    }
+
+    private suspend fun performRecoverableImport(rawJson: String): BackupRestoreResult {
+        require(rawJson.length <= MAX_BACKUP_JSON_CHARS) { "Backup file exceeds maximum supported size." }
+        val payload = json.decodeFromString<VelunaBackupPayload>(rawJson)
+        val decodedCovers = validateBackupPayloadUpfront(payload)
+        val clampedPrefs = clampBackupPrefs(payload.prefs)
+        val sanitizedTaste = payload.tasteProfile?.let(::sanitizeBackupTasteProfile)
+
+        val preRoomSnapshot = dao.captureLibrarySnapshot()
+        val prePrefsSnapshot = prefsRepo.captureRawPreferencesSnapshot()
+        val createdCoverFiles = mutableListOf<File>()
+
+        val blockWrite: suspend () -> Int = {
+            payload.likedSongs
+                .take(5_000)
+                .mapNotNull(::sanitizeBackupSong)
+                .forEach { song ->
+                    dao.insertLikedSong(LikedSongEntity(song.videoId, encodeSong(song)))
+                }
+            payload.blockedArtists.take(500).forEach { name ->
+                val clean = name.trim().take(160)
+                if (clean.isNotEmpty()) {
+                    dao.insertBlockedArtist(BlockedArtistEntity(clean))
+                }
+            }
+            payload.savedAlbums.take(1_000).forEach { al ->
+                val cleanId = al.albumId.trim().takeIf { it.isNotEmpty() && it.length <= 128 } ?: return@forEach
+                dao.insertSavedAlbum(
+                    SavedAlbumEntity(
+                        albumId = cleanId,
+                        title = al.title.trim().ifBlank { "Album" }.take(200),
+                        subtitle = al.subtitle?.take(200),
+                        thumbnail = SecurityValidators.sanitizeHttpsUrl(al.thumbnail, 2048),
+                        savedAt = al.savedAt.coerceAtLeast(0L)
+                    )
+                )
+            }
+            payload.followedArtists.take(1_000).forEach { ar ->
+                val cleanId = ar.channelId.trim().takeIf { it.isNotEmpty() && it.length <= 128 } ?: return@forEach
+                dao.insertFollowedArtist(
+                    FollowedArtistEntity(
+                        channelId = cleanId,
+                        name = ar.name.trim().ifBlank { "Artist" }.take(160),
+                        thumbnail = SecurityValidators.sanitizeHttpsUrl(ar.thumbnail, 2048),
+                        subscribers = ar.subscribers?.take(64),
+                        followedAt = ar.followedAt.coerceAtLeast(0L)
+                    )
+                )
+            }
+            payload.shortcuts.take(100).forEach { sc ->
+                val cleanId = sc.id.trim().takeIf { it.isNotEmpty() && it.length <= 128 } ?: return@forEach
+                val safeKind = runCatching { BrowseKind.valueOf(sc.kind) }.getOrDefault(BrowseKind.PLAYLIST).name
+                dao.upsertShortcut(
+                    ShortcutEntity(
+                        id = cleanId,
+                        kind = safeKind,
+                        title = sc.title.trim().ifBlank { "Shortcut" }.take(160),
+                        subtitle = sc.subtitle?.take(160),
+                        thumbnail = SecurityValidators.sanitizeHttpsUrl(sc.thumbnail, 2048),
+                        position = sc.position.coerceIn(0, 1_000)
+                    )
+                )
+            }
+            payload.searchHistory.take(100).forEach { sh ->
+                val cleanQuery = sh.query.trim().take(200)
+                if (cleanQuery.isNotEmpty()) {
+                    dao.upsertSearchHistory(SearchHistoryEntity(cleanQuery, sh.searchedAt.coerceAtLeast(0L)))
+                }
+            }
+            payload.listens.take(10_000).forEach { l ->
+                val cleanVid = l.videoId.trim().takeIf { SecurityValidators.isValidYouTubeId(it) } ?: return@forEach
+                l.song?.let(::sanitizeBackupSong)?.let { song ->
+                    dao.upsertListenSong(ListenSongEntity(cleanVid, encodeSong(song)))
+                }
+                dao.insertListen(
+                    ListenEntity(
+                        videoId = cleanVid,
+                        playedAt = l.playedAt.coerceAtLeast(0L),
+                        secs = l.secs.coerceIn(0L, 86_400L)
+                    )
+                )
             }
 
-            // Room writes commit FIRST inside a single transaction before DataStore is modified
+            // Deduplicate playlists against existing ones using cloudKey and (normalizedTitle, trackSignature)
+            val existingPlaylists = dao.getPlaylistsOnce()
+            val existingCloudKeys = existingPlaylists.mapTo(HashSet()) { it.cloudKey }
+            val existingSignatures = existingPlaylists.map { existing ->
+                val existingTracks = dao.getPlaylistTracks(existing.id).map { it.videoId }
+                normalizePlaylistTitle(existing.title) to playlistTrackSignature(existingTracks)
+            }.toMutableSet()
+
+            var count = 0
+            payload.playlists.take(500).forEachIndexed { plIdx, pl ->
+                val cleanTracks = pl.tracks.take(5_000).mapNotNull(::sanitizeBackupSong)
+                val cleanTitle = pl.title.trim().ifBlank { "Playlist" }.take(120)
+                val requestedKey = pl.cloudKey?.trim()?.takeIf {
+                    it.length in 1..128 &&
+                        it.matches(VALID_CLOUD_KEY_REGEX) &&
+                        !it.startsWith("LOCAL", ignoreCase = true)
+                }
+                if (requestedKey != null && requestedKey in existingCloudKeys) {
+                    return@forEachIndexed
+                }
+                val sigKey = normalizePlaylistTitle(cleanTitle) to playlistTrackSignature(cleanTracks.map { it.videoId })
+                if (existingSignatures.add(sigKey)) {
+                    val now = System.currentTimeMillis()
+                    val resolvedKey = requestedKey ?: newCloudPlaylistKey()
+                    existingCloudKeys.add(resolvedKey)
+                    val safeRemoteCover = SecurityValidators.sanitizeHttpsUrl(pl.coverUri, 500)
+                    val materializedFile = decodedCovers[plIdx]?.let { cov ->
+                        writeCoverBytesAtomically(0L, cov.ext, cov.bytes)?.also { createdCoverFiles.add(it) }
+                    }
+                    val resolvedCover = materializedFile?.let { Uri.fromFile(it).toString() } ?: safeRemoteCover
+                    val trackEntities = cleanTracks.mapIndexed { idx, song ->
+                        LocalPlaylistTrackEntity(
+                            playlistId = 0,
+                            videoId = song.videoId,
+                            songJson = encodeSong(song),
+                            position = idx,
+                            addedAt = now
+                        )
+                    }
+                    dao.createPlaylistWithTracks(
+                        LocalPlaylistEntity(
+                            cloudKey = resolvedKey,
+                            title = cleanTitle,
+                            description = pl.description.trim().take(500),
+                            coverUri = resolvedCover,
+                            remoteCoverUri = safeRemoteCover,
+                            coverRemoved = false,
+                            createdAt = now,
+                            updatedAt = now,
+                            syncRevision = 1L
+                        ),
+                        trackEntities
+                    )
+                    count++
+                }
+            }
+            count
+        }
+
+        return try {
             val restoredCount = if (database != null) {
                 database.withTransaction { blockWrite() }
             } else {
                 blockWrite()
             }
-
-            val clampedPrefs = clampBackupPrefs(payload.prefs)
-            val sanitizedTaste = payload.tasteProfile?.let(::sanitizeBackupTasteProfile)
-            try {
-                prefsRepo.applyBackupWithTaste(clampedPrefs, sanitizedTaste)
-            } catch (dsErr: Throwable) {
-                // Compensate Room and DataStore if DataStore persistence fails
-                runCatching {
-                    val compensate: suspend () -> Unit = {
-                        insertedPlaylistIds.forEach { plId ->
-                            dao.clearPlaylistTracks(plId)
-                            dao.deletePlaylist(plId)
-                        }
-                    }
-                    if (database != null) {
-                        database.withTransaction { compensate() }
-                    } else {
-                        compensate()
-                    }
-                }
-                runCatching { prefsRepo.restoreRawPreferencesSnapshot(preImportSnapshot) }
-                throw dsErr
-            }
+            onBeforeDataStoreRestore?.invoke()
+            prefsRepo.applyBackupWithTaste(clampedPrefs, sanitizedTaste)
             BackupRestoreResult(restoredPlaylists = restoredCount, sourceVersion = payload.version)
+        } catch (err: Throwable) {
+            runCatching {
+                val restoreRoom: suspend () -> Unit = {
+                    dao.restoreLibrarySnapshotAtomic(preRoomSnapshot)
+                }
+                if (database != null) {
+                    database.withTransaction { restoreRoom() }
+                } else {
+                    restoreRoom()
+                }
+            }
+            runCatching { prefsRepo.restoreRawPreferencesSnapshot(prePrefsSnapshot) }
+            createdCoverFiles.forEach { file -> runCatching { file.delete() } }
+            throw err
         }
     }
 
@@ -1208,6 +1407,9 @@ class VelunaRepository(
     companion object {
         private const val MAX_PLAYLIST_IMPORT_BYTES = 5 * 1024 * 1024
         private const val MAX_COVER_BYTES = 8 * 1024 * 1024
+        private const val MAX_COVER_DIMENSION = 4096
+        private const val MAX_BACKUP_COVER_BYTES = 512 * 1024
+        private const val MAX_BACKUP_COVER_BASE64_CHARS = 700_000
         private const val MAX_BACKUP_JSON_CHARS = 16 * 1024 * 1024
         private val VALID_CLOUD_KEY_REGEX = Regex("^[a-zA-Z0-9_\\-]+$")
 

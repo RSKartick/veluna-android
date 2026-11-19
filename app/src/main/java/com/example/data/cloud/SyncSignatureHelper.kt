@@ -27,14 +27,16 @@ internal object SyncSignatureHelper {
         title: String,
         description: String,
         coverUri: String?,
-        tracks: List<SongItem>
+        tracks: List<SongItem>,
+        coverRemoved: Boolean = false
     ): String {
-        val safeCover = SecurityValidators.sanitizeHttpsUrl(coverUri, 500).orEmpty()
+        val safeCover = if (coverRemoved) "" else SecurityValidators.sanitizeHttpsUrl(coverUri, 500).orEmpty()
         val raw = listOf(
             cloudKey.trim(),
             title.trim(),
             description.trim(),
             safeCover,
+            coverRemoved.toString(),
             tracks.joinToString(",") { it.videoId.trim() }
         ).joinToString("|")
         return sha256Hex(raw)

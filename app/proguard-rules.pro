@@ -11,6 +11,7 @@
 -keep class com.example.model.** { *; }
 -keep class com.example.data.local.VelunaUserPrefs { *; }
 -keep class com.example.data.repository.VelunaBackupPayload { *; }
+-keep class com.example.data.cloud.PlaylistBaselineSnapshot { *; }
 -keep class com.example.data.network.QueuedScrobbleTrack { *; }
 -keep class com.example.data.repository.Backup** { *; }
 -keepclassmembers class * {

@@ -206,15 +206,20 @@ class CloudSyncCoordinatorTest : FirestoreEmulatorTestBase() {
         val cloudKey = devA.dao.getPlaylistsOnce().single().cloudKey
         val plIdB = devB.dao.getPlaylistsOnce().single().id
 
+        val baseTs = maxOf(
+            devA.dao.getPlaylistById(plIdA)!!.updatedAt,
+            devB.dao.getPlaylistById(plIdB)!!.updatedAt
+        )
+
         // Device B edits earlier while offline (and syncs once on reconnect)
-        val earlier = System.currentTimeMillis() - 5_000L
+        val earlier = baseTs + 1_000L
         devB.dao.updatePlaylist(plIdB, "Device B Earlier", "B won rev", null, earlier)
         val coordB2 = devB.createCoordinator()
         withTimeout(SYNC_TIMEOUT_MS) { assertThat(coordB2.syncNowAndAwait()).isTrue() }
         coordB2.shutdown()
 
         // Device A edits with a strictly newer timestamp while still at equal or lower revision
-        val newer = earlier + 4_000L
+        val newer = baseTs + 5_000L
         devA.dao.updatePlaylist(plIdA, "Device A Newer Winner", "Newer timestamp", null, newer)
         val coordA2 = devA.createCoordinator()
         withTimeout(SYNC_TIMEOUT_MS) { assertThat(coordA2.syncNowAndAwait()).isTrue() }
@@ -477,7 +482,260 @@ class CloudSyncCoordinatorTest : FirestoreEmulatorTestBase() {
         assertThat(dev.dao.getLyricsCache("trk_l")).isNotNull()
     }
 
+    @Test
+    fun threeWayPlaylistMerge_preservesConcurrentOfflineTrackAdditionsAndRemovalsIdempotently(): Unit = runBlocking {
+        val email = "threeway_${UUID.randomUUID()}@test.com"
+        signInTestUser(email)
+
+        val devA = TestDevice("3WayA")
+        val devB = TestDevice("3WayB")
+
+        val plIdA = devA.repo.createPlaylist("Collab Mix", "Base")
+        val t1 = SongItem(videoId = "trk_1", title = "Track 1", artists = "Artist")
+        val t2 = SongItem(videoId = "trk_2", title = "Track 2", artists = "Artist")
+        val tA = SongItem(videoId = "trk_a_add", title = "Added by A", artists = "Artist")
+        val tB = SongItem(videoId = "trk_b_add", title = "Added by B", artists = "Artist")
+        devA.repo.addTrackToPlaylist(plIdA, t1)
+        devA.repo.addTrackToPlaylist(plIdA, t2)
+
+        val coordA1 = devA.createCoordinator()
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(coordA1.syncNowAndAwait()).isTrue() }
+        coordA1.shutdown()
+
+        val coordB1 = devB.createCoordinator()
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(coordB1.syncNowAndAwait()).isTrue() }
+        coordB1.shutdown()
+        val plIdB = devB.dao.getPlaylistsOnce().single().id
+
+        // Both devices edit offline independently:
+        // Device A adds tA; Device B removes t2 and adds tB
+        devA.repo.addTrackToPlaylist(plIdA, tA)
+        devB.repo.removeTrackFromPlaylist(plIdB, "trk_2")
+        devB.repo.addTrackToPlaylist(plIdB, tB)
+
+        // Device B syncs first -> cloud has [trk_1, trk_b_add]
+        val coordB2 = devB.createCoordinator()
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(coordB2.syncNowAndAwait()).isTrue() }
+        coordB2.shutdown()
+
+        // Device A syncs while dirty locally and dirty remotely -> 3-way merge retains trk_1, removes trk_2, keeps BOTH trk_b_add and trk_a_add!
+        val coordA2 = devA.createCoordinator()
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(coordA2.syncNowAndAwait()).isTrue() }
+        coordA2.shutdown()
+
+        // Device B syncs again -> both converge idempotently with zero duplicates
+        val coordB3 = devB.createCoordinator()
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(coordB3.syncNowAndAwait()).isTrue() }
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(coordB3.syncNowAndAwait()).isTrue() }
+        coordB3.shutdown()
+
+        val idsA = devA.dao.getPlaylistTracks(plIdA).map { it.videoId }
+        val idsB = devB.dao.getPlaylistTracks(plIdB).map { it.videoId }
+        assertThat(idsA).containsExactly("trk_1", "trk_b_add", "trk_a_add").inOrder()
+        assertThat(idsB).isEqualTo(idsA)
+    }
+
+    @Test
+    fun playlistCoverLifecycle_preservesRemoteHttpsCoverWithLocalFileCover_andPropagatesRemoval(): Unit = runBlocking {
+        val email = "cover_life_${UUID.randomUUID()}@test.com"
+        val uid = signInTestUser(email)
+
+        val devA = TestDevice("CovA")
+        val devB = TestDevice("CovB")
+        val coversDir = File(devB.context.filesDir, "playlist_covers").apply { mkdirs() }
+        val bmp = android.graphics.Bitmap.createBitmap(1, 1, android.graphics.Bitmap.Config.ARGB_8888)
+        val baos = java.io.ByteArrayOutputStream().also {
+            bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)
+            bmp.recycle()
+        }
+        val localCoverFile = File(coversDir, "devb_cover_${UUID.randomUUID()}.png").apply {
+            writeBytes(baos.toByteArray())
+        }
+        val localFileUri = android.net.Uri.fromFile(localCoverFile).toString()
+
+        val plIdA = devA.repo.createPlaylist("Cover Sync", "With art")
+        devA.repo.updatePlaylist(plIdA, "Cover Sync", "With art", "https://cdn.example.com/shared.jpg")
+        val coordA1 = devA.createCoordinator()
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(coordA1.syncNowAndAwait()).isTrue() }
+        coordA1.shutdown()
+
+        val coordB1 = devB.createCoordinator()
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(coordB1.syncNowAndAwait()).isTrue() }
+        val plB = devB.dao.getPlaylistsOnce().single()
+        assertThat(plB.remoteCoverUri).isEqualTo("https://cdn.example.com/shared.jpg")
+
+        // Attach local file cover on Device B and sync -> remoteCoverUri in cloud stays intact and unsynced count reaches 0
+        devB.repo.updatePlaylist(plB.id, plB.title, plB.description, localFileUri)
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(coordB1.syncNowAndAwait()).isTrue() }
+        assertThat(coordB1.countUnsyncedChangesFor(uid)).isEqualTo(0)
+        val plBAfterLocalCover = devB.dao.getPlaylistById(plB.id)!!
+        assertThat(plBAfterLocalCover.coverUri).isEqualTo(localFileUri)
+        assertThat(plBAfterLocalCover.remoteCoverUri).isEqualTo("https://cdn.example.com/shared.jpg")
+
+        val cloudAfterLocalCover = CloudSyncRepository(firestore, auth).fetchAccountSnapshot().playlists.single().playlist
+        assertThat(cloudAfterLocalCover.coverUri).isEqualTo("https://cdn.example.com/shared.jpg")
+        coordB1.shutdown()
+
+        // Device A clears cover -> coverRemoved propagates to Device B and removes its coverUri
+        devA.repo.updatePlaylist(plIdA, "Cover Sync", "Removed art", null)
+        val coordA2 = devA.createCoordinator()
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(coordA2.syncNowAndAwait()).isTrue() }
+        coordA2.shutdown()
+
+        val coordB2 = devB.createCoordinator()
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(coordB2.syncNowAndAwait()).isTrue() }
+        coordB2.shutdown()
+
+        val plBAfterRemove = devB.dao.getPlaylistById(plB.id)!!
+        assertThat(plBAfterRemove.coverUri).isNull()
+        assertThat(plBAfterRemove.remoteCoverUri).isNull()
+        assertThat(plBAfterRemove.coverRemoved).isTrue()
+        localCoverFile.delete()
+    }
+
+    @Test
+    fun accountTransition_wipesPreviousAccountSyncedDataBeforeSyncingNewAccount(): Unit = runBlocking {
+        val emailA = "acc_a_${UUID.randomUUID()}@test.com"
+        val emailB = "acc_b_${UUID.randomUUID()}@test.com"
+        signInTestUser(emailA)
+
+        val dev = TestDevice("SwitchAcc")
+        val plId = dev.repo.createPlaylist("Alice Private List", "Only Alice")
+        dev.repo.addTrackToPlaylist(plId, SongItem(videoId = "alice_trk", title = "Alice Song", artists = "Alice"))
+        dev.repo.toggleLike(SongItem(videoId = "alice_like", title = "Alice Like", artists = "Alice"))
+        dev.dao.insertSavedAlbum(SavedAlbumEntity("device_alb", "Device Album", "Keep", null))
+
+        val coordA = dev.createCoordinator()
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(coordA.syncNowAndAwait()).isTrue() }
+        coordA.shutdown()
+
+        // Sign directly into Account B on the same local database without running explicit signOut() first
+        val uidB = signInTestUser(emailB)
+        val coordB = dev.createCoordinator()
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(coordB.syncNowAndAwait()).isTrue() }
+        coordB.shutdown()
+
+        assertThat(dev.prefsRepo.getActiveCloudUid()).isEqualTo(uidB)
+        assertThat(dev.dao.getPlaylistsOnce()).isEmpty()
+        assertThat(dev.dao.getLikedSongsOnce()).isEmpty()
+        assertThat(dev.dao.getSavedAlbumsOnce().map { it.albumId }).containsExactly("device_alb")
+
+        // Account B's cloud must NEVER contain Account A's playlist or liked songs
+        val snapB = CloudSyncRepository(firestore, auth).fetchAccountSnapshot()
+        assertThat(snapB.playlists).isEmpty()
+        assertThat(snapB.likedSongs).isEmpty()
+
+        // Account A's cloud data remains completely intact
+        signInTestUser(emailA)
+        val snapA = CloudSyncRepository(firestore, auth).fetchAccountSnapshot()
+        assertThat(snapA.playlists.map { it.playlist.title }).containsExactly("Alice Private List")
+        assertThat(snapA.likedSongs.map { it.videoId }).containsExactly("alice_like")
+    }
+
+    @Test
+    fun staleOfflineClient_forcesFullFetchAfterCloudCompaction_andPrunesUnchangedDeletedItems(): Unit = runBlocking {
+        val email = "stale_compact_${UUID.randomUUID()}@test.com"
+        val uid = signInTestUser(email)
+
+        val devA = TestDevice("StaleA")
+        val plCompactedId = devA.repo.createPlaylist("Compacted Away", "Should prune")
+        val plEditedId = devA.repo.createPlaylist("Edited Offline", "Should keep")
+        val sCompact = SongItem(videoId = "trk_compact", title = "Compact Like", artists = "A")
+        val sKeep = SongItem(videoId = "trk_keep", title = "Keep Like", artists = "B")
+        devA.repo.toggleLike(sCompact)
+        devA.repo.toggleLike(sKeep)
+        devA.repo.blockArtist("Compacted Band")
+        devA.prefsRepo.saveTasteProfile(
+            TasteProfile(
+                onboardingCompleted = true,
+                selectedGenres = listOf("Rock"),
+                seedArtists = listOf(
+                    TasteSeed(id = "art_keep", name = "Kept Seed", updatedAtMs = System.currentTimeMillis() - 10_000L),
+                    TasteSeed(id = "art_gone", name = "Gone Seed", updatedAtMs = System.currentTimeMillis() - 10_000L)
+                )
+            ),
+            touchProfileTimestamp = true
+        )
+
+        val coordA1 = devA.createCoordinator()
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(coordA1.syncNowAndAwait()).isTrue() }
+        coordA1.shutdown()
+
+        val compactedPlKey = devA.dao.getPlaylistById(plCompactedId)!!.cloudKey
+        val lastSuccessA = devA.prefsRepo.getLastSuccessfulSyncAtMs(uid)
+        assertThat(lastSuccessA).isGreaterThan(0L)
+
+        // Cloud side deletes & compacts tombstones older than cutoff (advance compaction boundary past lastSuccessA within skew)
+        val cloudRepo = CloudSyncRepository(firestore, auth)
+        val oldTombTs = lastSuccessA - 35L * 24L * 3600L * 1000L
+        cloudRepo.deletePlaylist(compactedPlKey, clientUpdatedAt = oldTombTs, syncRevision = 2L)
+        cloudRepo.syncLikedSong(sCompact, liked = false, likedAtMs = oldTombTs, clientUpdatedAtMs = oldTombTs)
+        cloudRepo.syncHiddenArtist("Compacted Band", null, blocked = false, blockedAtMs = oldTombTs, clientUpdatedAtMs = oldTombTs)
+        cloudRepo.writeTasteSeedTombstone("art_gone", clientUpdatedAt = oldTombTs)
+        val compactWatermark = lastSuccessA + 60_000L
+        cloudRepo.purgeExpiredCloudTombstones(uid, compactWatermark)
+
+        // Meanwhile offline Device A modifies "Edited Offline" legitimately before reconnecting
+        devA.repo.updatePlaylist(plEditedId, "Edited While Offline", "Updated", null)
+
+        val coordA2 = devA.createCoordinator()
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(coordA2.syncNowAndAwait()).isTrue() }
+        coordA2.shutdown()
+
+        // Compaction-pruned items are removed locally and NOT resurrected in Firestore
+        assertThat(devA.dao.getPlaylistsOnce().map { it.title }).containsExactly("Edited While Offline")
+        assertThat(devA.dao.getLikedSongsOnce().map { it.videoId }).containsExactly("trk_keep")
+        assertThat(devA.dao.getBlockedArtistsOnce()).isEmpty()
+        assertThat(devA.prefsRepo.tasteProfileFlow.first().seedArtists.map { it.name }).containsExactly("Kept Seed")
+
+        val finalCloud = cloudRepo.fetchAccountSnapshot()
+        assertThat(finalCloud.playlists.filter { !it.playlist.deleted }.map { it.playlist.title })
+            .containsExactly("Edited While Offline")
+        assertThat(finalCloud.likedSongs.filter { !it.deleted }.map { it.videoId }).containsExactly("trk_keep")
+    }
+
+    @Test
+    fun signOutTimeout_surfacesConfirmCount_supportsDismissAndConfirmDiscard(): Unit = runBlocking {
+        val email = "signout_to_${UUID.randomUUID()}@test.com"
+        signInTestUser(email)
+
+        val dev = TestDevice("SignOutTimeout")
+        dev.repo.createPlaylist("Initial Synced", "")
+        val coord = dev.createCoordinator()
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(coord.syncNowAndAwait()).isTrue() }
+
+        // Create an offline change that would be lost, then force immediate flush timeout
+        dev.repo.createPlaylist("Unsynced Pending", "")
+        coord.signOutFlushTimeoutMs = 0L
+        coord.signOut()
+
+        val deadline1 = System.currentTimeMillis() + 5_000L
+        while (coord.authState.value.pendingSignOutConfirmCount == null && System.currentTimeMillis() < deadline1) {
+            kotlinx.coroutines.delay(25L)
+        }
+        assertThat(coord.authState.value.pendingSignOutConfirmCount).isAtLeast(1)
+        assertThat(coord.authState.value.isSignedIn).isTrue()
+        assertThat(dev.dao.getPlaylistsOnce().map { it.title }).contains("Unsynced Pending")
+
+        // Dismiss preserves session, local unsynced playlist, and clears pending confirmation prompt
+        coord.dismissSignOutConfirm()
+        assertThat(coord.authState.value.pendingSignOutConfirmCount).isNull()
+        assertThat(coord.authState.value.isSignedIn).isTrue()
+        assertThat(dev.dao.getPlaylistsOnce().map { it.title }).contains("Unsynced Pending")
+
+        // Confirm discard completes sign-out and wipes synced tables cleanly
+        coord.confirmSignOutDiscard()
+        val deadline2 = System.currentTimeMillis() + 8_000L
+        while ((coord.authState.value.isSignedIn || coord.authState.value.isAuthBusy) && System.currentTimeMillis() < deadline2) {
+            kotlinx.coroutines.delay(25L)
+        }
+        assertThat(coord.authState.value.isSignedIn).isFalse()
+        assertThat(dev.dao.getPlaylistsOnce()).isEmpty()
+        coord.shutdown()
+    }
+
     private companion object {
         const val SYNC_TIMEOUT_MS = 15_000L
     }
 }
+

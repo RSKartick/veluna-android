@@ -33,6 +33,8 @@ data class LocalPlaylistEntity(
     val title: String,
     val description: String = "",
     val coverUri: String? = null,
+    val remoteCoverUri: String? = null,
+    val coverRemoved: Boolean = false,
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = System.currentTimeMillis(),
     val syncRevision: Long = 0L
@@ -165,7 +167,8 @@ data class SyncBaselineEntity(
     val signature: String = "",
     val clientUpdatedAt: Long = 0L,
     val deleted: Boolean = false,
-    val updatedAt: Long = System.currentTimeMillis()
+    val updatedAt: Long = System.currentTimeMillis(),
+    val snapshotJson: String = ""
 )
 
 @Entity(

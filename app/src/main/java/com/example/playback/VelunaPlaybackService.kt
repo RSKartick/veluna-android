@@ -248,7 +248,9 @@ class VelunaPlaybackService : MediaSessionService() {
     override fun onDestroy() {
         instance = null
         runCatching { equalizer?.release() }
+        equalizer = null
         runCatching { loudnessEnhancer?.release() }
+        loudnessEnhancer = null
         mediaSession?.run {
             player.release()
             release()

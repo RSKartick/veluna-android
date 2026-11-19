@@ -51,21 +51,22 @@ The following stay strictly on your device and are never uploaded to Firestore:
 - Device-specific preferences (`playbackSpeed`, `classicPlayerLayout`, `equalizer`, `lyricsProviderOrder`, `romanizeLyrics`, `allowMirrorFallbacks`, `showMoodChips`, `showHeroArtworkBackdrop`, `scrobblingEnabled`)
 - Scrobble credentials (API key, API secret, session key, ListenBrainz token), stored in `SecretVault` (`noBackupFilesDir/secrets.bin`) encrypted with Android Keystore AES-256-GCM and excluded from Android Auto Backup and Device Transfer
 
-### Sync Baselines & Tombstone Limitations
+### Sync Baselines, Conflict Merge & Tombstone Retention
 
-- Local Room `sync_baselines` (scoped by `userId`) durably record the last synced signature, `revision`, `deleted` flag, and `clientUpdatedAt` for each entity so offline edits and deletions always sync on reconnect and increment the pre-sign-out unsynced change counter accurately.
-- Conflict resolution uses per-item **last-write-wins (`clientUpdatedAt` / `prefsUpdatedAt`)** with monotonic `syncRevision` transactions on playlist snapshots, guarded against large future clock skew (`<= request.time + 5m`). A device with an inaccurate clock significantly behind real time may lose writes in conflicts.
-- Deletions write soft tombstones that are automatically purged after **30 days**. A device kept offline longer than 30 days can resurrect items whose tombstones were already purged.
+- **Strict UID Isolation & Sync Baselines**: Active cloud session ownership is tracked via `ACTIVE_CLOUD_UID`. Switching Google accounts without an intermediate sign-out automatically clears synced local tables and watermarks before syncing the incoming account. Room `sync_baselines` (scoped by `userId` and carrying `snapshotJson` baselines) durably track the last synced state, `revision`, `deleted` flag, and `clientUpdatedAt` for each entity so offline edits and deletions survive restarts and increment the pre-sign-out unsynced change counter accurately.
+- **3-Way Playlist Merge & Versioned Snapshots**: Concurrent offline edits to the same playlist resolve via baseline-aware 3-way merge (`PlaylistThreeWayMerger`), preserving concurrent track additions and deletions across devices while publishing immutable `COMMITTED` snapshots (`snapshots/{snapshotId}/tracks`) before advancing the parent `activeSnapshotId` pointer inside a Firestore transaction. Readers validate snapshot `COMMITTED` state and `trackCount` before accepting a playlist revision.
+- **Cover Lifecycle & Backup Exclusion**: Local Photo Picker playlist covers are validated by magic bytes and decoded bounds (`<= 8 MB`, `<= 4096×4096`), written atomically under `filesDir/playlist_covers`, and excluded from Android Auto Backup and Device Transfer (`backup_rules.xml`, `data_extraction_rules.xml`). Local `file://` covers preserve any existing remote HTTPS `remoteCoverUri` rather than blanking cloud artwork, while explicit cover removals set `coverRemoved = true` and propagate across devices.
+- **Tombstone Retention, Watermark Overlap & Compaction Recovery**: Incremental queries apply a 10-second `updatedAt` overlap window so near-simultaneous writes are never skipped. Soft tombstones are retained for **90 days** before cleanup, and purge operations advance monotonic `tombstoneCompactedBeforeMs` / `syncGeneration` metadata on `users/{uid}` so stale offline clients force a full fetch and prune unchanged compacted items without resurrecting deleted records. Conflict LWW timestamps remain bounded against future clock skew (`<= request.time + 5m`).
 
-### Backup v3 (JSON Export & Restore)
+### Backup v3 (JSON Export & Recoverable Restore)
 
-- Exports playlists (including `cloudKey` and sanitized `https://` `coverUri`), liked tracks, taste profile, saved albums, followed artists, shortcuts, recent search history (up to 100), listening history (last 90 days), and theme/playback preferences.
-- **Scrobble secrets are never exported.** Preferences are clamped to valid bounds, playlists are deduplicated by `cloudKey` and `(normalizedTitle, trackSignature)` on restore, and DataStore failures trigger a compensating Room rollback.
+- Exports playlists (`cloudKey`, sanitized `https://` `coverUri`, and portable `coverImageBase64` for local covers `<= 512 KB`), liked tracks, taste profile, saved albums, followed artists, shortcuts, recent search history (up to 100), listening history (last 90 days), and theme/playback preferences.
+- **Scrobble secrets are never exported.** All payloads, track/playlist identifiers, and `coverImageBase64` image bytes are validated upfront before modifying storage; restore snapshots all 10 Room tables and DataStore preferences and rolls back atomically (and deletes newly created cover files) on any write failure. Preferences are clamped to valid bounds and playlists deduplicate by `cloudKey` and `(normalizedTitle, trackSignature)`.
 - Legacy v1 and v2 backups remain importable; v1 backups trigger an in-app warning banner advising you to delete unredacted v1 files.
 
 ### Account Sign-Out & Deletion
 
-- **Ordinary Sign-Out**: Cancels background debounce watchers, flushes pending sync changes (or counts remaining unsynced changes from `sync_baselines` and prompts before discarding), wipes synced account tables (`liked_songs`, `local_playlists`, `blocked_artists`, `sync_tombstones`, `sync_baselines`) and cloud sync watermarks/display name, and signs out of Firebase and Credential Manager. **Device-local history, saved albums, followed artists, shortcuts, offline downloads, local audio files, scrobbling settings, and `SecretVault` scrobble credentials remain intact on the device.**
+- **Ordinary Sign-Out**: Cancels background debounce watchers, flushes pending sync changes (bounded by timeout; if changes remain or flush times out, surfaces the unsynced count dialog to either keep working or discard), wipes synced account tables (`liked_songs`, `local_playlists`, `blocked_artists`, `sync_tombstones`, `sync_baselines`) and cloud sync watermarks/display name, and signs out of Firebase and Credential Manager. **Device-local history, saved albums, followed artists, shortcuts, offline downloads, local audio files, scrobbling settings, and `SecretVault` scrobble credentials remain intact on the device.**
 - **In-App Deletion**: Open **Settings → Profile & Cloud Sync → Delete Account & Cloud Data** for a two-step confirmation that re-authenticates with Google (if required), removes all Firestore documents and subcollections under `users/{uid}`, deletes the Firebase Auth user, and wipes all account Room tables (including `listens`, `saved_albums`, `followed_artists`, `shortcuts`, `search_history`, `pending_scrobbles`) plus `SecretVault` while still keeping offline downloaded media, local audio files, and `lyrics_cache` intact.
 - **Web Deletion Path**: If distributing publicly on Google Play or an external store, host a static account-deletion instruction page referencing **Veluna** and the in-app path above (along with a support contact) and link it in your store listing's Data Safety / Account Deletion URL field.
 
@@ -85,7 +86,7 @@ Veluna communicates with the following external services depending on features y
 
 ### Prerequisites
 
-- **JDK 21** and **Gradle 9.3.1** (or Android Studio with Gradle 9.3.1; maintainers can optionally generate a local wrapper via `gradle wrapper --gradle-version 9.3.1`)
+- **JDK 21** and the committed **Gradle Wrapper (`./gradlew`, Gradle 9.3.1)**
 - **Android SDK** (`compileSdk 36`, `minSdk 26`, `targetSdk 36`)
 - **Node.js 20+** and **Firebase CLI** (for Firestore security rules emulator tests & deploying `firestore.rules` + `firestore.indexes.json`)
 - A Firebase project config at `app/google-services.json` (gitignored):
@@ -101,20 +102,23 @@ Veluna communicates with the following external services depending on features y
 
 ```bash
 # Signed Release APK (requires RELEASE_KEYSTORE_* environment variables; R8 minified, non-debuggable)
-gradle :app:assembleRelease
+./gradlew :app:assembleRelease
 
 # Android Lint (HardcodedText is enforced as an error)
-gradle :app:lintDebug
+./gradlew :app:lintDebug
 ```
 
 ### Running Tests
 
 ```bash
-# 1. Install Node test dependencies for Firestore rules testing
-npm install
+# 1. Install locked Node test dependencies for Firestore rules testing
+npm ci
 
 # 2. Run Firestore security rules & Android unit/Robolectric/Room migration tests + instrumentation test compilation
-npx firebase emulators:exec --only firestore,auth "node --test firestore.test.js && gradle :app:testDebugUnitTest :app:compileDebugAndroidTestKotlin --stacktrace"
+npx firebase emulators:exec --only firestore,auth "node --test firestore.test.js && ./gradlew :app:testDebugUnitTest :app:compileDebugAndroidTestKotlin --stacktrace"
+
+# 3. Run Android Keystore hardware-backed instrumentation tests (on an attached device/emulator)
+./gradlew :app:connectedDebugAndroidTest
 ```
 
 ## License

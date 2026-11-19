@@ -56,7 +56,8 @@ service cloud.firestore {
       return isTombstone(data) &&
              (!('syncRevision' in data) || (data.syncRevision is int && data.syncRevision >= 0)) &&
              (!('activeSnapshotId' in data) || data.activeSnapshotId == null) &&
-             (!('trackCount' in data) || data.trackCount == 0);
+             (!('trackCount' in data) || data.trackCount == 0) &&
+             (!('coverRemoved' in data) || data.coverRemoved is bool);
     }
 
     function isValidUserProfile(data) {
@@ -77,6 +78,8 @@ service cloud.firestore {
              (data.selectedGenres.size() == 0 || data.selectedGenres[0] is string) &&
              data.onboardingCompleted is bool &&
              (!('prefsUpdatedAt' in data) || isValidClientTimestamp(data.prefsUpdatedAt)) &&
+             (!('tombstoneCompactedBeforeMs' in data) || isValidClientTimestamp(data.tombstoneCompactedBeforeMs)) &&
+             (!('syncGeneration' in data) || (data.syncGeneration is int && data.syncGeneration >= 0)) &&
              isNotFutureTimestamp(data.createdAt) &&
              isNotFutureTimestamp(data.updatedAt);
     }
@@ -112,6 +115,7 @@ service cloud.firestore {
              data.title is string && data.title.size() >= 1 && data.title.size() <= 120 &&
              data.description is string && data.description.size() <= 500 &&
              isValidOptionalString(data, 'coverUri', 500) &&
+             (!('coverRemoved' in data) || data.coverRemoved is bool) &&
              !('tracks' in data) &&
              (!('syncRevision' in data) || (data.syncRevision is int && data.syncRevision >= 0)) &&
              (!('activeSnapshotId' in data) || data.activeSnapshotId == null || isValidId(data.activeSnapshotId)) &&
@@ -179,7 +183,8 @@ service cloud.firestore {
                          'userId', 'displayName', 'email', 'photoUrl', 'themePreset', 'themeMode',
                          'customAccentHex', 'adaptToArtwork', 'cornerRadiusDp', 'audioQuality',
                          'autoplay', 'loudnessNormalization', 'hideMusicVideos',
-                         'selectedGenres', 'onboardingCompleted', 'prefsUpdatedAt', 'createdAt', 'updatedAt'
+                         'selectedGenres', 'onboardingCompleted', 'prefsUpdatedAt',
+                         'tombstoneCompactedBeforeMs', 'syncGeneration', 'createdAt', 'updatedAt'
                        ]) &&
                        isValidUserProfile(incoming());
 
@@ -188,11 +193,15 @@ service cloud.firestore {
                        incoming().userId == existing().userId &&
                        incoming().createdAt == existing().createdAt &&
                        isValidUserProfile(incoming()) &&
+                       (!('tombstoneCompactedBeforeMs' in existing()) ||
+                        !('tombstoneCompactedBeforeMs' in incoming()) ||
+                        incoming().tombstoneCompactedBeforeMs >= existing().tombstoneCompactedBeforeMs) &&
                        incoming().diff(existing()).affectedKeys().hasOnly([
                          'displayName', 'email', 'photoUrl', 'themePreset', 'themeMode',
                          'customAccentHex', 'adaptToArtwork', 'cornerRadiusDp', 'audioQuality',
                          'autoplay', 'loudnessNormalization', 'hideMusicVideos',
-                         'selectedGenres', 'onboardingCompleted', 'prefsUpdatedAt', 'updatedAt'
+                         'selectedGenres', 'onboardingCompleted', 'prefsUpdatedAt',
+                         'tombstoneCompactedBeforeMs', 'syncGeneration', 'updatedAt'
                        ]);
 
       allow delete: if isOwner(userId) && isValidId(userId);
@@ -273,6 +282,22 @@ service cloud.firestore {
       }
 
       match /playlists/{playlistKey} {
+        function isCommittedSnapshotTarget(snapId) {
+          let snapPath = /databases/$(database)/documents/users/$(userId)/playlists/$(playlistKey)/snapshots/$(snapId);
+          return exists(snapPath) &&
+                 get(snapPath).data.state == 'COMMITTED' &&
+                 (!('syncRevision' in incoming()) || get(snapPath).data.syncRevision == incoming().syncRevision);
+        }
+
+        function isMonotonicPlaylistUpdate() {
+          let prevRev = existing().get('syncRevision', 0);
+          return (!('syncRevision' in existing()) ||
+                  !('syncRevision' in incoming()) ||
+                  incoming().syncRevision >= prevRev) &&
+                 (!(existing().deleted == true && incoming().deleted == false) ||
+                  ('syncRevision' in incoming() && incoming().syncRevision > prevRev));
+        }
+
         allow get: if isOwner(userId) && isValidId(playlistKey);
         allow list: if isOwner(userId);
 
@@ -284,14 +309,17 @@ service cloud.firestore {
                               'title', 'description', 'deleted', 'clientUpdatedAt', 'createdAt', 'updatedAt'
                             ]) &&
                             incoming().keys().hasOnly([
-                              'title', 'description', 'coverUri', 'deleted',
+                              'title', 'description', 'coverUri', 'coverRemoved', 'deleted',
                               'syncRevision', 'activeSnapshotId', 'trackCount',
                               'clientUpdatedAt', 'createdAt', 'updatedAt'
                             ]) &&
-                            isValidSyncedPlaylist(incoming())) ||
+                            isValidSyncedPlaylist(incoming()) &&
+                            (!('activeSnapshotId' in incoming()) ||
+                             incoming().activeSnapshotId == null ||
+                             isCommittedSnapshotTarget(incoming().activeSnapshotId))) ||
                            (incoming().keys().hasAll(['deleted', 'clientUpdatedAt', 'createdAt', 'updatedAt']) &&
                             incoming().keys().hasOnly([
-                              'deleted', 'syncRevision', 'activeSnapshotId', 'trackCount',
+                              'deleted', 'syncRevision', 'activeSnapshotId', 'trackCount', 'coverRemoved',
                               'clientUpdatedAt', 'createdAt', 'updatedAt'
                             ]) &&
                             isValidPlaylistTombstone(incoming()))
@@ -300,16 +328,21 @@ service cloud.firestore {
         allow update: if isOwner(userId) &&
                          isValidId(playlistKey) &&
                          createdAtPreservedOnUpdate() &&
+                         isMonotonicPlaylistUpdate() &&
                          (
                            (isValidSyncedPlaylist(incoming()) &&
+                            (!('activeSnapshotId' in incoming()) ||
+                             incoming().activeSnapshotId == null ||
+                             (('activeSnapshotId' in existing()) && incoming().activeSnapshotId == existing().activeSnapshotId) ||
+                             isCommittedSnapshotTarget(incoming().activeSnapshotId)) &&
                             incoming().diff(existing()).affectedKeys().hasOnly([
-                              'title', 'description', 'coverUri', 'tracks', 'deleted',
+                              'title', 'description', 'coverUri', 'coverRemoved', 'tracks', 'deleted',
                               'syncRevision', 'activeSnapshotId', 'trackCount',
                               'clientUpdatedAt', 'updatedAt'
                             ])) ||
                            (isValidPlaylistTombstone(incoming()) &&
                             incoming().diff(existing()).affectedKeys().hasOnly([
-                              'tracks', 'deleted', 'syncRevision', 'activeSnapshotId', 'trackCount',
+                              'tracks', 'deleted', 'syncRevision', 'activeSnapshotId', 'trackCount', 'coverRemoved',
                               'clientUpdatedAt', 'updatedAt'
                             ]))
                          );

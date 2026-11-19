@@ -4,18 +4,20 @@ This document describes how Veluna Android release APKs are built, signed, verif
 
 ## 1. CI & Release Workflow Overview
 
-The workflow in [`.github/workflows/release-apk.yml`](.github/workflows/release-apk.yml) has two jobs:
+The workflow in [`.github/workflows/release-apk.yml`](.github/workflows/release-apk.yml) pins third-party GitHub Actions to immutable commit SHAs and runs three jobs:
 
 1. **`test`** *(runs on all PRs, pushes to `main`/`master`, and `v*` tags — requires zero repository secrets)*:
-   - Installs Node dependencies (`npm ci`).
+   - Installs locked Node dependencies (`npm ci`) and validates the Gradle wrapper (`./gradlew`, Gradle 9.3.1 with `distributionSha256Sum`).
    - Starts local Firebase Firestore and Auth emulators and runs:
      - `node --test firestore.test.js`
-     - `gradle :app:testDebugUnitTest :app:lintDebug :app:compileReleaseKotlin --stacktrace`
-   - Fork pull requests only execute the `test` job and never receive signing or Firebase credentials.
-2. **`build-release`** *(runs only on tag pushes matching `v*` after `test` passes)*:
-   - Fails fast if any required secret or variable is empty.
+     - `./gradlew :app:testDebugUnitTest :app:compileDebugAndroidTestKotlin :app:lintDebug :app:compileReleaseKotlin --no-daemon --stacktrace`
+   - Fork pull requests only execute the unprivileged `test` and `instrumentation-test` jobs and never receive signing or Firebase credentials.
+2. **`instrumentation-test`** *(runs on all PRs, pushes to `main`/`master`, and `v*` tags — requires zero repository secrets)*:
+   - Boots a KVM-accelerated Android emulator (`API 34`) and runs `./gradlew :app:connectedDebugAndroidTest` to verify hardware-backed `AndroidKeyStore` (`SecretVault`) encryption and tamper detection on a real Android runtime.
+3. **`build-release`** *(runs only on tag pushes on `main`/`master` matching `v*` after both `test` and `instrumentation-test` pass)*:
+   - Verifies the release tag belongs to `main` or `master` and fails fast if any required secret or variable is empty.
    - Materializes the release keystore and `app/google-services.json` exclusively in the runner workspace/temp directory (never committed to git).
-   - Runs `gradle :app:assembleRelease` (`isDebuggable = false`, `isMinifyEnabled = true`, `isShrinkResources = true`) with `velunaVersionCode = 100 + GITHUB_RUN_NUMBER` and `velunaVersionName = <tag without leading 'v'>`.
+   - Runs `./gradlew :app:assembleRelease` (`isDebuggable = false`, `isMinifyEnabled = true`, `isShrinkResources = true`) with `velunaVersionCode = 100 + GITHUB_RUN_NUMBER` and `velunaVersionName = <tag without leading 'v'>`.
    - Verifies with `aapt2` that the APK is not debuggable and verifies the signing certificate SHA-256 fingerprint using `apksigner verify --print-certs` against `RELEASE_CERT_SHA256` (failing the build on mismatch).
    - Publishes the signed GitHub Release for that tag with `veluna-android.apk`.
 
@@ -35,7 +37,7 @@ Configure these in **GitHub Repository → Settings → Secrets and variables �
 
 ## 3. Cutting a Tagged Release
 
-1. Ensure `main` passes all tests and `gradle :app:lintDebug` locally.
+1. Ensure `main` passes all tests and `./gradlew :app:lintDebug` locally.
 2. Create and push an annotated semantic version tag:
    ```bash
    git tag -a v1.2.0 -m "Veluna v1.2.0"

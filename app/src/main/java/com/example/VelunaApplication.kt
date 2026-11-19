@@ -61,6 +61,12 @@ class VelunaAppContainer(application: Application) {
         scrobbleClient = scrobbleClient,
         tasteEngine = tasteEngine
     )
+
+    init {
+        repository.runWithSyncSuppressed = { block ->
+            cloudSyncCoordinator.runWithLocalSyncSuppressed(block)
+        }
+    }
 }
 
 class VelunaApplication : Application(), ImageLoaderFactory {

@@ -71,6 +71,14 @@
           "type": "integer",
           "description": "Client LWW epoch milliseconds timestamp for syncable user preferences."
         },
+        "tombstoneCompactedBeforeMs": {
+          "type": "integer",
+          "description": "High-watermark epoch milliseconds before which cloud tombstones have been compacted."
+        },
+        "syncGeneration": {
+          "type": "integer",
+          "description": "Monotonic compaction generation counter incremented when expired tombstones are purged."
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time",
@@ -148,6 +156,7 @@
         "title": { "type": "string" },
         "description": { "type": "string" },
         "coverUri": { "type": "string" },
+        "coverRemoved": { "type": "boolean" },
         "deleted": { "type": "boolean" },
         "syncRevision": { "type": "integer" },
         "activeSnapshotId": { "type": "string" },
