@@ -1126,3 +1126,230 @@ test("Owner-only sync_meta/clock validates server timestamp and blocks cross-use
   await assertSucceeds(clockRef.delete());
 });
 
+test("Playlist activeSnapshotId requires matching syncRevision and trackCount on create and every update, while preserving legacy playlists", async () => {
+  const path = require("node:path");
+  const rutDir = path.dirname(require.resolve("@firebase/rules-unit-testing"));
+  const firebase = require(require.resolve("firebase/compat/app", { paths: [__dirname, rutDir] }));
+  require(require.resolve("firebase/compat/firestore", { paths: [__dirname, rutDir] }));
+  const { FieldValue } = firebase.firestore;
+
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const anonDb = testEnv.unauthenticatedContext().firestore();
+
+  const plRef = aliceDb.collection("users").doc(ALICE_UID).collection("playlists").doc("pl_meta_strict");
+  const snap1Ref = plRef.collection("snapshots").doc("snap_m1");
+  const snap2Ref = plRef.collection("snapshots").doc("snap_m2");
+  const snapStagingRef = plRef.collection("snapshots").doc("snap_m_stg");
+  const snapDeletingRef = plRef.collection("snapshots").doc("snap_m_del");
+
+  // Prepare STAGING, COMMITTED (rev 2, count 3 and rev 3, count 5), and DELETING snapshots
+  await assertSucceeds(
+    snap1Ref.set({
+      state: "STAGING",
+      syncRevision: 2,
+      trackCount: 3,
+      clientUpdatedAt: 1700000000000,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    })
+  );
+  await assertSucceeds(snap1Ref.update({ state: "COMMITTED", updatedAt: serverTimestamp() }));
+
+  await assertSucceeds(
+    snap2Ref.set({
+      state: "STAGING",
+      syncRevision: 3,
+      trackCount: 5,
+      clientUpdatedAt: 1700000001000,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    })
+  );
+  await assertSucceeds(snap2Ref.update({ state: "COMMITTED", updatedAt: serverTimestamp() }));
+
+  await assertSucceeds(
+    snapStagingRef.set({
+      state: "STAGING",
+      syncRevision: 4,
+      trackCount: 1,
+      clientUpdatedAt: 1700000002000,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  await assertSucceeds(
+    snapDeletingRef.set({
+      state: "STAGING",
+      syncRevision: 5,
+      trackCount: 1,
+      clientUpdatedAt: 1700000002500,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    })
+  );
+  await assertSucceeds(snapDeletingRef.update({ state: "DELETING", updatedAt: serverTimestamp() }));
+
+  // 1. Creating with activeSnapshotId missing syncRevision must fail
+  const baseNoRev = validPlaylistPayload({ activeSnapshotId: "snap_m1", trackCount: 3 });
+  delete baseNoRev.syncRevision;
+  await assertFails(plRef.set(baseNoRev));
+
+  // 2. Creating with activeSnapshotId missing trackCount must fail
+  const baseNoCount = validPlaylistPayload({ activeSnapshotId: "snap_m1", syncRevision: 2 });
+  delete baseNoCount.trackCount;
+  await assertFails(plRef.set(baseNoCount));
+
+  // 3. Creating with activeSnapshotId mismatched syncRevision or trackCount must fail
+  await assertFails(
+    plRef.set(validPlaylistPayload({ activeSnapshotId: "snap_m1", syncRevision: 99, trackCount: 3 }))
+  );
+  await assertFails(
+    plRef.set(validPlaylistPayload({ activeSnapshotId: "snap_m1", syncRevision: 2, trackCount: 99 }))
+  );
+
+  // 4. Creating pointing to missing, STAGING, or DELETING snapshot must fail
+  await assertFails(
+    plRef.set(validPlaylistPayload({ activeSnapshotId: "snap_missing", syncRevision: 2, trackCount: 3 }))
+  );
+  await assertFails(
+    plRef.set(validPlaylistPayload({ activeSnapshotId: "snap_m_stg", syncRevision: 4, trackCount: 1 }))
+  );
+  await assertFails(
+    plRef.set(validPlaylistPayload({ activeSnapshotId: "snap_m_del", syncRevision: 5, trackCount: 1 }))
+  );
+
+  // Valid create with matching COMMITTED snapshot metadata succeeds
+  await assertSucceeds(
+    plRef.set(validPlaylistPayload({ activeSnapshotId: "snap_m1", syncRevision: 2, trackCount: 3 }))
+  );
+
+  // Cross-user and unauthenticated reads/writes remain denied
+  const bobPlRef = bobDb.collection("users").doc(ALICE_UID).collection("playlists").doc("pl_meta_strict");
+  const anonPlRef = anonDb.collection("users").doc(ALICE_UID).collection("playlists").doc("pl_meta_strict");
+  await assertFails(bobPlRef.get());
+  await assertFails(anonPlRef.get());
+  await assertFails(bobPlRef.update({ title: "Hijacked", updatedAt: serverTimestamp() }));
+  await assertFails(anonPlRef.update({ title: "Hijacked", updatedAt: serverTimestamp() }));
+
+  // 5. Same-activeSnapshotId update changing syncRevision or trackCount without rotating snapshot must fail
+  await assertFails(
+    plRef.update({
+      syncRevision: 3,
+      clientUpdatedAt: 1700000003000,
+      updatedAt: serverTimestamp(),
+    })
+  );
+  await assertFails(
+    plRef.update({
+      trackCount: 4,
+      clientUpdatedAt: 1700000003000,
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  // 6. Deleting syncRevision or trackCount while retaining non-null activeSnapshotId must fail
+  await assertFails(
+    plRef.update({
+      syncRevision: FieldValue.delete(),
+      updatedAt: serverTimestamp(),
+    })
+  );
+  await assertFails(
+    plRef.update({
+      trackCount: FieldValue.delete(),
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  // 7. Same-activeSnapshotId metadata update succeeds when syncRevision and trackCount stay consistent
+  await assertSucceeds(
+    plRef.update({
+      title: "Metadata Updated Same Snapshot",
+      syncRevision: 2,
+      trackCount: 3,
+      clientUpdatedAt: 1700000003500,
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  // 8. Rotating to a different COMMITTED snapshot with mismatched metadata fails, matching metadata succeeds
+  await assertFails(
+    plRef.update({
+      activeSnapshotId: "snap_m2",
+      syncRevision: 3,
+      trackCount: 99,
+      clientUpdatedAt: 1700000004000,
+      updatedAt: serverTimestamp(),
+    })
+  );
+  await assertSucceeds(
+    plRef.update({
+      activeSnapshotId: "snap_m2",
+      syncRevision: 3,
+      trackCount: 5,
+      clientUpdatedAt: 1700000004500,
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  // 9. Legacy playlist without activeSnapshotId (or activeSnapshotId == null) remains readable & updateable
+  const legacyNoSnapRef = aliceDb.collection("users").doc(ALICE_UID).collection("playlists").doc("pl_legacy_nosnap");
+  await assertSucceeds(
+    legacyNoSnapRef.set(validPlaylistPayload({ title: "Legacy Playlist", syncRevision: 1 }))
+  );
+  await assertSucceeds(legacyNoSnapRef.get());
+  await assertSucceeds(
+    legacyNoSnapRef.update({
+      title: "Legacy Updated Title",
+      syncRevision: 1,
+      activeSnapshotId: null,
+      clientUpdatedAt: 1700000005000,
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  // 10. Maximal real-world update with activeSnapshotId rotation + all causal metadata + coverUri succeeds cleanly
+  const snapMaxRef = plRef.collection("snapshots").doc("snap_m3_max");
+  await assertSucceeds(
+    snapMaxRef.set({
+      state: "STAGING",
+      syncRevision: 4,
+      trackCount: 12,
+      clientUpdatedAt: 1700000006000,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    })
+  );
+  await assertSucceeds(snapMaxRef.update({ state: "COMMITTED", updatedAt: serverTimestamp() }));
+  await assertSucceeds(
+    plRef.update({
+      title: "Maximal Snapshot Rotate",
+      description: "Full causal payload",
+      coverUri: "https://cdn.example.com/max.jpg",
+      coverRemoved: false,
+      syncRevision: 4,
+      activeSnapshotId: "snap_m3_max",
+      trackCount: 12,
+      lastDeviceId: "dev_max",
+      lastOpSeq: 42,
+      lastOpId: "op_42",
+      fieldStamps: {
+        title: { timestampMs: 1700000005100, seq: 39, deviceId: "dev_max", opId: "op_39" },
+        description: { timestampMs: 1700000005200, seq: 40, deviceId: "dev_max", opId: "op_40" },
+        cover: { timestampMs: 1700000005300, seq: 41, deviceId: "dev_max", opId: "op_41" },
+        order: { timestampMs: 1700000005400, seq: 42, deviceId: "dev_max", opId: "op_42" },
+      },
+      trackTombstones: {
+        trk_old_1: { timestampMs: 1700000005000, seq: 37, deviceId: "dev_max", opId: "op_37" },
+        trk_old_2: { timestampMs: 1700000005050, seq: 38, deviceId: "dev_max", opId: "op_38" },
+      },
+      clientUpdatedAt: 1700000006000,
+      updatedAt: serverTimestamp(),
+    })
+  );
+});
+
+
+

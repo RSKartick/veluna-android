@@ -9,6 +9,7 @@ import com.example.data.local.DownloadedTrackEntity
 import com.example.data.local.FollowedArtistEntity
 import com.example.data.local.ListenEntity
 import com.example.data.local.ListenSongEntity
+import com.example.data.local.LocalDataProvenance
 import com.example.data.local.LocalTrackEntity
 import com.example.data.local.LyricsCacheEntity
 import com.example.data.local.PendingScrobbleEntity
@@ -47,7 +48,10 @@ class CloudSyncCoordinatorTest : FirestoreEmulatorTestBase() {
     private val openDbs = mutableListOf<VelunaDatabase>()
     private val coordinators = mutableListOf<CloudSyncCoordinator>()
 
-    private inner class TestDevice(val name: String) {
+    private inner class TestDevice(
+        val name: String,
+        freshInstall: Boolean = true
+    ) {
         val context: Context = ApplicationProvider.getApplicationContext()
         val dir: File = File(context.cacheDir, "coord_${name}_${UUID.randomUUID()}").also {
             it.mkdirs()
@@ -71,9 +75,18 @@ class CloudSyncCoordinatorTest : FirestoreEmulatorTestBase() {
             journalDir = File(dir, "journal")
         )
 
+        init {
+            if (freshInstall) {
+                runBlocking {
+                    prefsRepo.initializeInstallProvenanceIfClean(dao)
+                }
+            }
+        }
+
         fun createCoordinator(
             customCloudRepo: CloudSyncRepository? = null,
-            autoStartSync: Boolean = true
+            autoStartSync: Boolean = true,
+            awaitStartupProvenance: suspend () -> Unit = {}
         ): CloudSyncCoordinator {
             val cloudRepo = customCloudRepo ?: CloudSyncRepository(firestore, auth)
             return CloudSyncCoordinator(
@@ -85,7 +98,8 @@ class CloudSyncCoordinatorTest : FirestoreEmulatorTestBase() {
                 auth = auth,
                 ioDispatcher = Dispatchers.IO,
                 stateDir = File(dir, "sync_state"),
-                autoStartSync = autoStartSync
+                autoStartSync = autoStartSync,
+                awaitStartupProvenance = awaitStartupProvenance
             ).also { coordinators.add(it) }
         }
     }
@@ -1017,7 +1031,7 @@ class CloudSyncCoordinatorTest : FirestoreEmulatorTestBase() {
         )
 
         // Device 1: simulate legacy pre-ACTIVE_CLOUD_UID upgrade with pl_local_* + like + blocked + tombstone + device-only SavedAlbum
-        val devMerge = TestDevice("UpgradeMerge")
+        val devMerge = TestDevice("UpgradeMerge", freshInstall = false)
         devMerge.dao.createPlaylistWithTracks(
             playlist = com.example.data.local.LocalPlaylistEntity(
                 cloudKey = "pl_local_1",
@@ -1066,7 +1080,7 @@ class CloudSyncCoordinatorTest : FirestoreEmulatorTestBase() {
         coordMerge.shutdown()
 
         // Device 2: same unowned upgrade state, user chooses Discard & Sync Account
-        val devDiscard = TestDevice("UpgradeDiscard")
+        val devDiscard = TestDevice("UpgradeDiscard", freshInstall = false)
         devDiscard.dao.createPlaylistWithTracks(
             playlist = com.example.data.local.LocalPlaylistEntity(
                 cloudKey = "pl_local_99",
@@ -1099,7 +1113,7 @@ class CloudSyncCoordinatorTest : FirestoreEmulatorTestBase() {
         val uidA = signInTestUser(emailA)
 
         // Part 1: Device has baselines for uidA without ACTIVE_CLOUD_UID (corrupted/legacy prefs), signs in as B -> fails closed!
-        val devForeign = TestDevice("ForeignBase")
+        val devForeign = TestDevice("ForeignBase", freshInstall = false)
         devForeign.repo.createPlaylist("Alice UUID Pl", "")
         devForeign.dao.upsertSyncBaseline(
             com.example.data.local.SyncBaselineEntity(
@@ -1246,20 +1260,21 @@ class CloudSyncCoordinatorTest : FirestoreEmulatorTestBase() {
             syncRevision = 1L
         )
 
-        val dev = TestDevice("QMergeCrashPrefs")
+        val dev = TestDevice("QMergeCrashPrefs", freshInstall = false)
         val pl1 = dev.repo.createPlaylist("Offline Mix 1", "Desc 1")
         dev.repo.addTrackToPlaylist(pl1, SongItem("off_1", "Off One", "Artist 1"))
         val pl2 = dev.repo.createPlaylist("Offline Mix 2", "Desc 2")
         dev.repo.addTrackToPlaylist(pl2, SongItem("off_2", "Off Two", "Artist 2"))
         dev.repo.toggleLike(SongItem("off_like", "Off Like", "Artist L"))
         dev.repo.blockArtist("Off Blocked")
-        dev.prefsRepo.setUserDisplayName("Offline Listener")
-        dev.prefsRepo.setTasteProfile(
+        dev.prefsRepo.setDisplayName("Offline Listener")
+        dev.prefsRepo.saveTasteProfile(
             TasteProfile(
-                completed = true,
-                artists = listOf(TasteSeed("art_1", "Seed Artist", null, "Artist")),
-                songs = listOf(TasteSeed("sng_1", "Seed Song", "Seed Artist", "Song"))
-            )
+                onboardingCompleted = true,
+                seedArtists = listOf(TasteSeed("art_1", "Seed Artist", subtitle = "Artist")),
+                seedSongs = listOf(TasteSeed("sng_1", "Seed Song", subtitle = "Seed Artist"))
+            ),
+            touchProfileTimestamp = true
         )
         dev.dao.insertSavedAlbum(SavedAlbumEntity("keep_dev_alb", "Keep Album", "Local", null))
         assertThat(dev.prefsRepo.getActiveCloudUid()).isNull()
@@ -1289,6 +1304,7 @@ class CloudSyncCoordinatorTest : FirestoreEmulatorTestBase() {
         assertThat(cRestart.authState.value.hasUnownedDataConflict).isFalse()
         assertThat(cRestart.readQuarantineFile()).isNull()
         assertThat(cRestart.readQuarantineResolutionJournal()).isNull()
+        assertThat(cRestart.listRetainedPayloadFiles()).isEmpty()
         assertThat(dev.prefsRepo.getActiveCloudUid()).isEqualTo(uidA)
         assertThat(dev.prefsRepo.prefsFlow.first().userDisplayName).isEqualTo("Offline Listener")
         assertThat(dev.dao.getPlaylistsOnce().map { it.title })
@@ -1306,7 +1322,7 @@ class CloudSyncCoordinatorTest : FirestoreEmulatorTestBase() {
         val email = "q_merge_crash_del_${UUID.randomUUID()}@test.com"
         val uid = signInTestUser(email)
 
-        val dev = TestDevice("QMergeCrashDel")
+        val dev = TestDevice("QMergeCrashDel", freshInstall = false)
         val plId = dev.repo.createPlaylist("Offline Preserved", "")
         dev.repo.addTrackToPlaylist(plId, SongItem("trk_del_1", "Track One", "Artist"))
 
@@ -1329,6 +1345,7 @@ class CloudSyncCoordinatorTest : FirestoreEmulatorTestBase() {
         withTimeout(SYNC_TIMEOUT_MS) { assertThat(cRestart.syncNowAndAwait()).isTrue() }
         assertThat(cRestart.readQuarantineFile()).isNull()
         assertThat(cRestart.readQuarantineResolutionJournal()).isNull()
+        assertThat(cRestart.listRetainedPayloadFiles()).isEmpty()
         assertThat(cRestart.authState.value.hasUnownedDataConflict).isFalse()
         assertThat(dev.dao.getPlaylistsOnce().map { it.title }).containsExactly("Offline Preserved")
         assertThat(CloudSyncRepository(firestore, auth).fetchAccountSnapshot().playlists.map { it.playlist.title })
@@ -1342,7 +1359,7 @@ class CloudSyncCoordinatorTest : FirestoreEmulatorTestBase() {
         val emailB = "q_foreign_b_${UUID.randomUUID()}@test.com"
         val uidA = signInTestUser(emailA)
 
-        val dev = TestDevice("QForeignRollback")
+        val dev = TestDevice("QForeignRollback", freshInstall = false)
         val plId = dev.repo.createPlaylist("Quarantined Mix", "Should not leak to B")
         dev.repo.addTrackToPlaylist(plId, SongItem("q_trk", "Q Song", "Artist"))
         dev.repo.toggleLike(SongItem("q_like", "Q Like", "Artist"))
@@ -1368,6 +1385,7 @@ class CloudSyncCoordinatorTest : FirestoreEmulatorTestBase() {
         assertThat(cB.authState.value.hasUnownedDataConflict).isTrue()
         assertThat(cB.readQuarantineResolutionJournal()).isNull()
         assertThat(cB.readQuarantineFile()).isNotNull()
+        assertThat(cB.listRetainedPayloadFiles()).isEmpty()
         assertThat(dev.dao.getPlaylistsOnce()).isEmpty()
         assertThat(dev.dao.getLikedSongsOnce()).isEmpty()
         assertThat(dev.dao.getSavedAlbumsOnce().map { it.albumId }).containsExactly("keep_foreign_alb")
@@ -1393,7 +1411,7 @@ class CloudSyncCoordinatorTest : FirestoreEmulatorTestBase() {
             syncRevision = 1L
         )
 
-        val dev = TestDevice("QDiscardCrash")
+        val dev = TestDevice("QDiscardCrash", freshInstall = false)
         dev.repo.createPlaylist("Local To Discard", "")
         val c1 = dev.createCoordinator(autoStartSync = false)
         withTimeout(SYNC_TIMEOUT_MS) { assertThat(c1.syncNowAndAwait()).isFalse() }
@@ -1423,6 +1441,7 @@ class CloudSyncCoordinatorTest : FirestoreEmulatorTestBase() {
         withTimeout(SYNC_TIMEOUT_MS) { assertThat(cA2.resolveUnownedDataDiscardAndAwait()).isTrue() }
         assertThat(cA2.readQuarantineFile()).isNull()
         assertThat(cA2.readQuarantineResolutionJournal()).isNull()
+        assertThat(cA2.listRetainedPayloadFiles()).isEmpty()
         assertThat(dev.dao.getPlaylistsOnce().map { it.title }).containsExactly("A Cloud Only")
         cA2.shutdown()
     }
@@ -1432,7 +1451,7 @@ class CloudSyncCoordinatorTest : FirestoreEmulatorTestBase() {
         val email = "q_multi_pl_${UUID.randomUUID()}@test.com"
         signInTestUser(email)
 
-        val dev = TestDevice("QMultiPl")
+        val dev = TestDevice("QMultiPl", freshInstall = false)
         val p1 = dev.repo.createPlaylist("Playlist Alpha", "One")
         dev.repo.addTrackToPlaylist(p1, SongItem("t_a1", "Alpha 1", "Artist"))
         dev.repo.addTrackToPlaylist(p1, SongItem("t_a2", "Alpha 2", "Artist"))
@@ -1456,6 +1475,7 @@ class CloudSyncCoordinatorTest : FirestoreEmulatorTestBase() {
         // Retry completes cleanly and leaves both playlists with all tracks & ops intact
         withTimeout(SYNC_TIMEOUT_MS) { assertThat(c.resolveUnownedDataMergeAndAwait()).isTrue() }
         assertThat(c.readQuarantineResolutionJournal()).isNull()
+        assertThat(c.listRetainedPayloadFiles()).isEmpty()
         val playlists = dev.dao.getPlaylistsOnce().sortedBy { it.title }
         assertThat(playlists.map { it.title }).containsExactly("Playlist Alpha", "Playlist Beta").inOrder()
         assertThat(dev.dao.getPlaylistTracks(playlists[0].id).map { it.videoId }).containsExactly("t_a1", "t_a2").inOrder()
@@ -1463,6 +1483,331 @@ class CloudSyncCoordinatorTest : FirestoreEmulatorTestBase() {
         assertThat(dev.dao.getPlaylistTrackOps(playlists[0].id)).isNotEmpty()
         assertThat(dev.dao.getPlaylistFieldOps(playlists[0].id)).isNotEmpty()
         c.shutdown()
+    }
+
+    @Test
+    fun resolveUnownedDataMerge_crashAfterDeleteBeforeClearedState_thenForeignUidSignsIn_restoresQuarantineWithoutLoss(): Unit = runBlocking {
+        val emailA = "q_pre_clear_a_${UUID.randomUUID()}@test.com"
+        val emailB = "q_pre_clear_b_${UUID.randomUUID()}@test.com"
+        val uidA = signInTestUser(emailA)
+
+        val dev = TestDevice("QPreClearForeign", freshInstall = false)
+        val plId = dev.repo.createPlaylist("Crucial Unuploaded Mix", "Never lose this")
+        dev.repo.addTrackToPlaylist(plId, SongItem("crucial_1", "Crucial Song", "Artist C"))
+        dev.repo.toggleLike(SongItem("crucial_like", "Crucial Like", "Artist C"))
+        dev.repo.blockArtist("Crucial Blocked")
+        dev.dao.insertSavedAlbum(SavedAlbumEntity("dev_alb_c", "Device Album", "Keep", null))
+
+        val cA = dev.createCoordinator(autoStartSync = false)
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(cA.syncNowAndAwait()).isFalse() }
+        assertThat(cA.authState.value.hasUnownedDataConflict).isTrue()
+
+        // Crash AFTER unowned_account_quarantine.json was deleted in PREFS_APPLIED, BEFORE writing QUARANTINE_CLEARED!
+        cA.onAfterQuarantineDeleteBeforeClearedState = { _, _ ->
+            throw IllegalStateException("Simulated crash right after deleting quarantine file")
+        }
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(cA.resolveUnownedDataMergeAndAwait()).isFalse() }
+        assertThat(cA.readQuarantineFile()).isNull()
+        assertThat(cA.listRetainedPayloadFiles()).hasSize(1)
+        assertThat(cA.readQuarantineResolutionJournal()?.state).isEqualTo(QuarantineResolutionState.PREFS_APPLIED)
+        assertThat(cA.readQuarantineResolutionJournal()?.targetUid).isEqualTo(uidA)
+        cA.shutdown()
+
+        // Different account B signs in -> rollback must restore unowned_account_quarantine.json from retained archive BEFORE clearing Room!
+        signInTestUser(emailB)
+        val cB = dev.createCoordinator(autoStartSync = false)
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(cB.syncNowAndAwait()).isFalse() }
+
+        assertThat(cB.authState.value.hasUnownedDataConflict).isTrue()
+        assertThat(cB.readQuarantineResolutionJournal()).isNull()
+        assertThat(cB.listRetainedPayloadFiles()).isEmpty()
+        val restoredQuarantine = cB.readQuarantineFile()
+        assertThat(restoredQuarantine).isNotNull()
+        assertThat(restoredQuarantine!!.playlists.map { it.title }).containsExactly("Crucial Unuploaded Mix")
+        assertThat(restoredQuarantine.likedSongs.map { it.videoId }).containsExactly("crucial_like")
+        assertThat(restoredQuarantine.blockedArtists.map { it.name }).containsExactly("Crucial Blocked")
+        assertThat(dev.dao.getPlaylistsOnce()).isEmpty()
+        assertThat(dev.dao.getLikedSongsOnce()).isEmpty()
+        assertThat(dev.dao.getBlockedArtistsOnce()).isEmpty()
+        assertThat(dev.dao.getSavedAlbumsOnce().map { it.albumId }).containsExactly("dev_alb_c")
+        val cloudSnapB = CloudSyncRepository(firestore, auth).fetchAccountSnapshot()
+        assertThat(cloudSnapB.playlists).isEmpty()
+        assertThat(cloudSnapB.likedSongs).isEmpty()
+        cB.shutdown()
+
+        // Account A signs back in -> can now explicitly Merge the restored quarantine without any lost data!
+        signInTestUser(emailA)
+        val cA2 = dev.createCoordinator(autoStartSync = false)
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(cA2.syncNowAndAwait()).isFalse() }
+        assertThat(cA2.authState.value.hasUnownedDataConflict).isTrue()
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(cA2.resolveUnownedDataMergeAndAwait()).isTrue() }
+        assertThat(dev.dao.getPlaylistsOnce().map { it.title }).containsExactly("Crucial Unuploaded Mix")
+        assertThat(dev.dao.getLikedSongsOnce().map { it.videoId }).containsExactly("crucial_like")
+        assertThat(CloudSyncRepository(firestore, auth).fetchAccountSnapshot().playlists.map { it.playlist.title })
+            .containsExactly("Crucial Unuploaded Mix")
+        cA2.shutdown()
+    }
+
+    @Test
+    fun resolveUnownedDataDiscard_crashAfterDeleteBeforeClearedState_thenForeignUidSignsIn_restoresQuarantine(): Unit = runBlocking {
+        val emailA = "q_disc_del_a_${UUID.randomUUID()}@test.com"
+        val emailB = "q_disc_del_b_${UUID.randomUUID()}@test.com"
+        signInTestUser(emailA)
+
+        val dev = TestDevice("QDiscDelForeign", freshInstall = false)
+        dev.repo.createPlaylist("Pending Discard List", "")
+        val cA = dev.createCoordinator(autoStartSync = false)
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(cA.syncNowAndAwait()).isFalse() }
+
+        cA.onAfterQuarantineDeleteBeforeClearedState = { _, _ ->
+            throw IllegalStateException("Crash after deleting quarantine during DISCARD")
+        }
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(cA.resolveUnownedDataDiscardAndAwait()).isFalse() }
+        assertThat(cA.readQuarantineFile()).isNull()
+        assertThat(cA.listRetainedPayloadFiles()).hasSize(1)
+        assertThat(cA.readQuarantineResolutionJournal()?.action).isEqualTo(QuarantineResolutionAction.DISCARD)
+        cA.shutdown()
+
+        signInTestUser(emailB)
+        val cB = dev.createCoordinator(autoStartSync = false)
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(cB.syncNowAndAwait()).isFalse() }
+        assertThat(cB.authState.value.hasUnownedDataConflict).isTrue()
+        assertThat(cB.readQuarantineFile()?.playlists?.map { it.title }).containsExactly("Pending Discard List")
+        assertThat(cB.listRetainedPayloadFiles()).isEmpty()
+        assertThat(CloudSyncRepository(firestore, auth).fetchAccountSnapshot().playlists).isEmpty()
+        cB.shutdown()
+    }
+
+    @Test
+    fun resolveUnownedDataMerge_crashAtPayloadArchivedAndCompletedCleanup_recoversCleanly(): Unit = runBlocking {
+        val emailA = "q_stage_a_${UUID.randomUUID()}@test.com"
+        val emailB = "q_stage_b_${UUID.randomUUID()}@test.com"
+        signInTestUser(emailA)
+
+        // Part 1: Crash right after PAYLOAD_ARCHIVED -> foreign UID switches cleanly; same UID merges cleanly
+        val dev1 = TestDevice("QArchivedStage", freshInstall = false)
+        dev1.repo.createPlaylist("Archived Stage Pl", "")
+        val c1 = dev1.createCoordinator(autoStartSync = false)
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(c1.syncNowAndAwait()).isFalse() }
+        c1.onAfterQuarantinePayloadArchived = { _, _ ->
+            throw IllegalStateException("Crash at PAYLOAD_ARCHIVED")
+        }
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(c1.resolveUnownedDataMergeAndAwait()).isFalse() }
+        assertThat(c1.readQuarantineResolutionJournal()?.state).isEqualTo(QuarantineResolutionState.PAYLOAD_ARCHIVED)
+        assertThat(c1.listRetainedPayloadFiles()).hasSize(1)
+        c1.shutdown()
+
+        signInTestUser(emailB)
+        val c1Foreign = dev1.createCoordinator(autoStartSync = false)
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(c1Foreign.syncNowAndAwait()).isFalse() }
+        assertThat(c1Foreign.authState.value.hasUnownedDataConflict).isTrue()
+        assertThat(c1Foreign.listRetainedPayloadFiles()).isEmpty()
+        assertThat(c1Foreign.readQuarantineResolutionJournal()).isNull()
+        assertThat(c1Foreign.readQuarantineFile()?.playlists?.map { it.title }).containsExactly("Archived Stage Pl")
+        c1Foreign.shutdown()
+
+        // Part 2: Crash after COMPLETED persisted BEFORE cleanup, then after payload delete before journal delete
+        signInTestUser(emailA)
+        val dev2 = TestDevice("QCompletedCleanup", freshInstall = false)
+        dev2.repo.createPlaylist("Completed Stage Pl", "")
+        val c2 = dev2.createCoordinator(autoStartSync = false)
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(c2.syncNowAndAwait()).isFalse() }
+        c2.onAfterQuarantineJournalCompletedBeforeCleanup = { _, _ ->
+            throw IllegalStateException("Crash after COMPLETED before retained payload cleanup")
+        }
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(c2.resolveUnownedDataMergeAndAwait()).isFalse() }
+        assertThat(c2.readQuarantineResolutionJournal()?.state).isEqualTo(QuarantineResolutionState.COMPLETED)
+        assertThat(c2.listRetainedPayloadFiles()).hasSize(1)
+        c2.shutdown()
+
+        val c2Restart = dev2.createCoordinator(autoStartSync = false)
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(c2Restart.syncNowAndAwait()).isTrue() }
+        assertThat(c2Restart.authState.value.hasUnownedDataConflict).isFalse()
+        assertThat(c2Restart.readQuarantineResolutionJournal()).isNull()
+        assertThat(c2Restart.listRetainedPayloadFiles()).isEmpty()
+        assertThat(CloudSyncRepository(firestore, auth).fetchAccountSnapshot().playlists.map { it.playlist.title })
+            .containsExactly("Completed Stage Pl")
+        c2Restart.shutdown()
+
+        // Part 3: Crash after retained payload deleted BEFORE journal deleted
+        val dev3 = TestDevice("QPostPayloadDel", freshInstall = false)
+        dev3.repo.createPlaylist("Post Cleanup Pl", "")
+        val c3 = dev3.createCoordinator(autoStartSync = false)
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(c3.syncNowAndAwait()).isFalse() }
+        c3.onAfterQuarantinePayloadCleanupBeforeJournalDelete = { _, _ ->
+            throw IllegalStateException("Crash before journal file delete")
+        }
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(c3.resolveUnownedDataMergeAndAwait()).isFalse() }
+        assertThat(c3.listRetainedPayloadFiles()).isEmpty()
+        assertThat(c3.readQuarantineResolutionJournal()?.state).isEqualTo(QuarantineResolutionState.COMPLETED)
+        c3.shutdown()
+
+        val c3Restart = dev3.createCoordinator(autoStartSync = false)
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(c3Restart.syncNowAndAwait()).isTrue() }
+        assertThat(c3Restart.readQuarantineResolutionJournal()).isNull()
+        assertThat(c3Restart.authState.value.hasUnownedDataConflict).isFalse()
+        assertThat(CloudSyncRepository(firestore, auth).fetchAccountSnapshot().playlists.map { it.playlist.title })
+            .containsExactly("Post Cleanup Pl")
+        c3Restart.shutdown()
+    }
+
+    @Test
+    fun resolveUnownedData_missingRecoveryPayloadsOrCorruptJournal_failsClosedWithoutWipingRoom(): Unit = runBlocking {
+        val emailA = "q_missing_a_${UUID.randomUUID()}@test.com"
+        val emailB = "q_missing_b_${UUID.randomUUID()}@test.com"
+        signInTestUser(emailA)
+
+        // Case 1: Incomplete journal after quarantineFile deletion AND retained file missing/corrupted -> fail closed!
+        val devMissing = TestDevice("QMissingPayloads", freshInstall = false)
+        devMissing.repo.createPlaylist("Must Not Wipe Blindly", "")
+        val cA = devMissing.createCoordinator(autoStartSync = false)
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(cA.syncNowAndAwait()).isFalse() }
+        cA.onAfterQuarantineDeleteBeforeClearedState = { _, _ ->
+            throw IllegalStateException("Crash after quarantine delete")
+        }
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(cA.resolveUnownedDataMergeAndAwait()).isFalse() }
+        // Corrupt/remove retained archive to simulate unrecoverable disk loss
+        cA.listRetainedPayloadFiles().forEach { it.delete() }
+        cA.shutdown()
+
+        signInTestUser(emailB)
+        val cB = devMissing.createCoordinator(autoStartSync = false)
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(cB.syncNowAndAwait()).isFalse() }
+        assertThat(cB.authState.value.syncStatus).isEqualTo("Quarantine recovery error")
+        // Room row applied for A MUST NOT be wiped cleanly without a recovery payload, and MUST NOT sync to B!
+        assertThat(devMissing.dao.getPlaylistsOnce().map { it.title }).containsExactly("Must Not Wipe Blindly")
+        assertThat(CloudSyncRepository(firestore, auth).fetchAccountSnapshot().playlists).isEmpty()
+        cB.shutdown()
+
+        // Case 2: Corrupt journal file -> fails closed cleanly without wiping or syncing
+        val devCorrupt = TestDevice("QCorruptJournal", freshInstall = false)
+        devCorrupt.repo.createPlaylist("Unowned Protected", "")
+        val syncStateDir = File(devCorrupt.dir, "sync_state").apply { mkdirs() }
+        File(syncStateDir, "unowned_quarantine_resolution_journal.json").writeText("{corrupt json")
+        val cCorrupt = devCorrupt.createCoordinator(autoStartSync = false)
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(cCorrupt.syncNowAndAwait()).isFalse() }
+        assertThat(cCorrupt.authState.value.syncStatus).isEqualTo("Quarantine recovery error")
+        assertThat(devCorrupt.dao.getPlaylistsOnce().map { it.title }).containsExactly("Unowned Protected")
+        assertThat(CloudSyncRepository(firestore, auth).fetchAccountSnapshot().playlists).isEmpty()
+        cCorrupt.shutdown()
+    }
+
+    @Test
+    fun unknownOwnerUpgrade_uuidPlaylistsLikesBlockedAndSeedsWithoutBaselinesOrMarkers_allFailClosedIntoQuarantine(): Unit = runBlocking {
+        val email = "prov_upgrade_${UUID.randomUUID()}@test.com"
+        signInTestUser(email)
+        val cloudRepo = CloudSyncRepository(firestore, auth)
+
+        // 1. Upgraded device with UUID playlists ONLY (no pl_local_*, no baselines, no tombstones, no legacy markers)
+        val devUuidPl = TestDevice("UpUuidOnly", freshInstall = false)
+        devUuidPl.repo.createPlaylist("Pre-Provenance UUID Playlist", "Desc")
+        // Simulate real app startup calling initializeInstallProvenanceIfClean on pre-populated DB
+        devUuidPl.prefsRepo.initializeInstallProvenanceIfClean(devUuidPl.dao)
+        assertThat(devUuidPl.prefsRepo.getLocalDataProvenance()).isEqualTo(LocalDataProvenance.UNKNOWN_OR_LEGACY)
+        val cPl = devUuidPl.createCoordinator(autoStartSync = false)
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(cPl.syncNowAndAwait()).isFalse() }
+        assertThat(cPl.authState.value.hasUnownedDataConflict).isTrue()
+        assertThat(cPl.readQuarantineFile()?.playlists?.map { it.title }).containsExactly("Pre-Provenance UUID Playlist")
+        cPl.shutdown()
+
+        // 2. Liked songs ONLY (no playlists, no baselines, no tombstones, no legacy markers)
+        val devLikesOnly = TestDevice("UpLikesOnly", freshInstall = false)
+        devLikesOnly.repo.toggleLike(SongItem("up_like_1", "Legacy Liked", "Artist"))
+        val cLikes = devLikesOnly.createCoordinator(autoStartSync = false)
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(cLikes.syncNowAndAwait()).isFalse() }
+        assertThat(cLikes.authState.value.hasUnownedDataConflict).isTrue()
+        assertThat(cLikes.readQuarantineFile()?.likedSongs?.map { it.videoId }).containsExactly("up_like_1")
+        cLikes.shutdown()
+
+        // 3. Blocked artists ONLY
+        val devBlockedOnly = TestDevice("UpBlockedOnly", freshInstall = false)
+        devBlockedOnly.repo.blockArtist("Legacy Blocked Artist")
+        val cBlocked = devBlockedOnly.createCoordinator(autoStartSync = false)
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(cBlocked.syncNowAndAwait()).isFalse() }
+        assertThat(cBlocked.authState.value.hasUnownedDataConflict).isTrue()
+        assertThat(cBlocked.readQuarantineFile()?.blockedArtists?.map { it.name }).containsExactly("Legacy Blocked Artist")
+        cBlocked.shutdown()
+
+        // 4. Taste seeds ONLY
+        val devSeedsOnly = TestDevice("UpSeedsOnly", freshInstall = false)
+        devSeedsOnly.prefsRepo.saveTasteProfile(
+            TasteProfile(
+                onboardingCompleted = true,
+                seedArtists = listOf(TasteSeed("art_up", "Upgraded Seed Artist"))
+            )
+        )
+        val cSeeds = devSeedsOnly.createCoordinator(autoStartSync = false)
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(cSeeds.syncNowAndAwait()).isFalse() }
+        assertThat(cSeeds.authState.value.hasUnownedDataConflict).isTrue()
+        assertThat(cSeeds.readQuarantineFile()?.tasteProfile?.seedArtists?.map { it.name })
+            .containsExactly("Upgraded Seed Artist")
+        cSeeds.shutdown()
+
+        // Cloud remains completely clean across all 4 unowned upgrades
+        val cloudSnap = cloudRepo.fetchAccountSnapshot()
+        assertThat(cloudSnap.playlists).isEmpty()
+        assertThat(cloudSnap.likedSongs).isEmpty()
+        assertThat(cloudSnap.hiddenArtists).isEmpty()
+        assertThat(cloudSnap.tasteSeeds).isEmpty()
+    }
+
+    @Test
+    fun accountOwnedProvenanceWithMissingActiveUid_failsClosed_whileFreshInstallAdoptsWithoutQuarantine(): Unit = runBlocking {
+        val emailA = "prov_own_a_${UUID.randomUUID()}@test.com"
+        val emailB = "prov_own_b_${UUID.randomUUID()}@test.com"
+        val uidA = signInTestUser(emailA)
+
+        // Part 1: Genuine fresh install -> offline mutations before first sign-in adopt cleanly without quarantine
+        val devFresh = TestDevice("FreshInstall", freshInstall = true)
+        assertThat(devFresh.prefsRepo.getLocalDataProvenance()).isEqualTo(LocalDataProvenance.FRESH_LOCAL)
+        val plId = devFresh.repo.createPlaylist("Offline First Mix", "Created offline on fresh install")
+        devFresh.repo.addTrackToPlaylist(plId, SongItem("fr_trk", "Fresh Track", "Fresh Artist"))
+        devFresh.repo.toggleLike(SongItem("fr_like", "Fresh Like", "Fresh Artist"))
+        devFresh.repo.blockArtist("Fresh Blocked")
+        devFresh.prefsRepo.saveTasteProfile(
+            TasteProfile(
+                onboardingCompleted = true,
+                seedArtists = listOf(TasteSeed("art_fr", "Fresh Seed"))
+            ),
+            touchProfileTimestamp = true
+        )
+
+        val cA = devFresh.createCoordinator(autoStartSync = false)
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(cA.syncNowAndAwait()).isTrue() }
+        assertThat(cA.authState.value.hasUnownedDataConflict).isFalse()
+        assertThat(devFresh.prefsRepo.getActiveCloudUid()).isEqualTo(uidA)
+        assertThat(devFresh.prefsRepo.getLocalDataProvenance()).isEqualTo(LocalDataProvenance.ACCOUNT_OWNED)
+        val cloudSnapA = CloudSyncRepository(firestore, auth).fetchAccountSnapshot()
+        assertThat(cloudSnapA.playlists.map { it.playlist.title }).containsExactly("Offline First Mix")
+        assertThat(cloudSnapA.likedSongs.map { it.videoId }).containsExactly("fr_like")
+
+        // Part 2: Ordinary sign-out resets provenance to FRESH_LOCAL and allows subsequent offline edits before next sign-in
+        cA.signOut()
+        val deadline = System.currentTimeMillis() + 10_000L
+        while ((cA.authState.value.isSignedIn || cA.authState.value.isAuthBusy) && System.currentTimeMillis() < deadline) {
+            kotlinx.coroutines.delay(25L)
+        }
+        assertThat(cA.authState.value.isSignedIn).isFalse()
+        assertThat(devFresh.prefsRepo.getLocalDataProvenance()).isEqualTo(LocalDataProvenance.FRESH_LOCAL)
+        cA.shutdown()
+
+        devFresh.repo.createPlaylist("Post-SignOut Offline Mix", "")
+        signInTestUser(emailA)
+        val cA2 = devFresh.createCoordinator(autoStartSync = false)
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(cA2.syncNowAndAwait()).isTrue() }
+        assertThat(cA2.authState.value.hasUnownedDataConflict).isFalse()
+        assertThat(devFresh.prefsRepo.getLocalDataProvenance()).isEqualTo(LocalDataProvenance.ACCOUNT_OWNED)
+        cA2.shutdown()
+
+        // Part 3: ACCOUNT_OWNED provenance where ACTIVE_CLOUD_UID & baselines were unexpectedly cleared while Room rows remain -> fails closed for B!
+        devFresh.prefsRepo.setActiveCloudUid(null)
+        devFresh.dao.clearAllSyncBaselines()
+        signInTestUser(emailB)
+        val cB = devFresh.createCoordinator(autoStartSync = false)
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(cB.syncNowAndAwait()).isFalse() }
+        assertThat(cB.authState.value.hasUnownedDataConflict).isTrue()
+        assertThat(CloudSyncRepository(firestore, auth).fetchAccountSnapshot().playlists).isEmpty()
+        cB.shutdown()
     }
 
     private companion object {

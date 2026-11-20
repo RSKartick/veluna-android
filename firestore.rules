@@ -315,13 +315,22 @@ service cloud.firestore {
       }
 
       match /playlists/{playlistKey} {
+        function snapshotMatchesParent(snapData, inc) {
+          return snapData.state == 'COMMITTED' &&
+                 snapData.syncRevision == inc.syncRevision &&
+                 snapData.trackCount == inc.trackCount;
+        }
+
         function isCommittedSnapshotTarget(snapId, inc) {
           let snapPath = /databases/$(database)/documents/users/$(userId)/playlists/$(playlistKey)/snapshots/$(snapId);
-          let snapData = get(snapPath).data;
-          return exists(snapPath) &&
-                 snapData.state == 'COMMITTED' &&
-                 (!('syncRevision' in inc) || snapData.syncRevision == inc.syncRevision) &&
-                 (!('trackCount' in inc) || snapData.trackCount == inc.trackCount);
+          return ('syncRevision' in inc) &&
+                 inc.syncRevision is int &&
+                 inc.syncRevision >= 1 &&
+                 ('trackCount' in inc) &&
+                 inc.trackCount is int &&
+                 inc.trackCount >= 0 &&
+                 exists(snapPath) &&
+                 snapshotMatchesParent(get(snapPath).data, inc);
         }
 
         function isMonotonicPlaylistUpdate(inc, ext) {
@@ -386,7 +395,6 @@ service cloud.firestore {
                    (isValidSyncedPlaylist(inc) &&
                     (!('activeSnapshotId' in inc) ||
                      inc.activeSnapshotId == null ||
-                     (('activeSnapshotId' in ext) && inc.activeSnapshotId == ext.activeSnapshotId) ||
                      isCommittedSnapshotTarget(inc.activeSnapshotId, inc))) ||
                    (isValidPlaylistTombstone(inc) &&
                     !diffKeys.hasAny(['title', 'description', 'coverUri']))

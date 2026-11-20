@@ -7,6 +7,7 @@ import com.example.BuildConfig
 import com.example.data.cloud.GoogleAuthHelper.findActivity
 import com.example.data.local.BlockedArtistEntity
 import com.example.data.local.LikedSongEntity
+import com.example.data.local.LocalDataProvenance
 import com.example.data.local.LocalPlaylistEntity
 import com.example.data.local.LocalPlaylistTrackEntity
 import com.example.data.local.PlaylistFieldNames
@@ -117,6 +118,7 @@ internal enum class QuarantineResolutionAction {
 @Serializable
 internal enum class QuarantineResolutionState {
     PREPARING,
+    PAYLOAD_ARCHIVED,
     ROOM_APPLIED,
     PREFS_APPLIED,
     QUARANTINE_CLEARED,
@@ -129,7 +131,8 @@ internal data class UnownedQuarantineResolutionJournal(
     val action: QuarantineResolutionAction,
     val targetUid: String,
     val startedAtMs: Long,
-    val state: QuarantineResolutionState
+    val state: QuarantineResolutionState,
+    val retainedPayloadFilename: String = ""
 )
 
 @Serializable
@@ -160,7 +163,8 @@ class CloudSyncCoordinator(
     private val auth: FirebaseAuth = Firebase.auth,
     ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val stateDir: File? = null,
-    private val autoStartSync: Boolean = true
+    private val autoStartSync: Boolean = true,
+    private val awaitStartupProvenance: suspend () -> Unit = {}
 ) {
     private val scope = CoroutineScope(SupervisorJob() + ioDispatcher)
     private val syncMutex = Mutex()
@@ -187,9 +191,13 @@ class CloudSyncCoordinator(
     internal var onBeforeAccountTransitionWipe: (suspend (fromUid: String, toUid: String) -> Unit)? = null
     internal var onAfterAccountTransitionWipeBeforeFinalize: (suspend (fromUid: String, toUid: String) -> Unit)? = null
     internal var onBeforeQuarantineRoomApply: (suspend (action: QuarantineResolutionAction, uid: String) -> Unit)? = null
+    internal var onAfterQuarantinePayloadArchived: (suspend (action: QuarantineResolutionAction, uid: String) -> Unit)? = null
     internal var onAfterQuarantineRoomApplyBeforePrefs: (suspend (action: QuarantineResolutionAction, uid: String) -> Unit)? = null
     internal var onAfterQuarantinePrefsBeforeDeleteFile: (suspend (action: QuarantineResolutionAction, uid: String) -> Unit)? = null
+    internal var onAfterQuarantineDeleteBeforeClearedState: (suspend (action: QuarantineResolutionAction, uid: String) -> Unit)? = null
     internal var onAfterQuarantineDeleteBeforeJournalComplete: (suspend (action: QuarantineResolutionAction, uid: String) -> Unit)? = null
+    internal var onAfterQuarantineJournalCompletedBeforeCleanup: (suspend (action: QuarantineResolutionAction, uid: String) -> Unit)? = null
+    internal var onAfterQuarantinePayloadCleanupBeforeJournalDelete: (suspend (action: QuarantineResolutionAction, uid: String) -> Unit)? = null
 
     // Track failed operations so honest sync status never masks partial failures
     private val failedCollections = ConcurrentHashMap<String, String>()
@@ -570,6 +578,8 @@ class CloudSyncCoordinator(
                 dao.clearAccountData()
                 prefsRepo.resetUserKeys()
                 deleteQuarantineFileIfExists()
+                readQuarantineResolutionJournal()?.let { deleteRetainedPayloadIfExists(it) }
+                deleteAllRetainedPayloadFiles()
                 deleteQuarantineResolutionJournalStrict()
             } else {
                 dao.clearSyncedAccountData()
@@ -635,17 +645,25 @@ class CloudSyncCoordinator(
                 val existingJournal = readQuarantineResolutionJournal()
                 if (existingJournal != null) {
                     if (existingJournal.state == QuarantineResolutionState.COMPLETED) {
+                        deleteRetainedPayloadIfExists(existingJournal)
                         deleteQuarantineResolutionJournalStrict()
                     } else if (existingJournal.targetUid != user.uid) {
-                        rollbackStaleQuarantineResolutionForForeignUidLocked(existingJournal)
+                        if (!rollbackStaleQuarantineResolutionForForeignUidLocked(existingJournal)) {
+                            throw IllegalStateException("Pending library resolution payload could not be restored.")
+                        }
                     } else if (existingJournal.action != action) {
-                        // User switched their mind after a crash before commit completed: reset partial state cleanly if still uncommitted
-                        if (quarantineFile().exists()) {
-                            rollbackStaleQuarantineResolutionForForeignUidLocked(existingJournal)
-                        } else {
-                            // Quarantine file was already deleted cleanly; finish completing existing journal
+                        // User switched their mind after a crash before commit completed: reset partial state cleanly if recovery payload exists and QUARANTINE_CLEARED hasn't committed
+                        val hasRecoveryPayload = readQuarantineFile() != null ||
+                            (retainedPayloadFile(existingJournal)?.let(::readQuarantineFromFile) != null)
+                        if (hasRecoveryPayload && existingJournal.state != QuarantineResolutionState.QUARANTINE_CLEARED) {
+                            if (!rollbackStaleQuarantineResolutionForForeignUidLocked(existingJournal)) {
+                                throw IllegalStateException("Pending library resolution payload could not be restored.")
+                            }
+                        } else if (existingJournal.state == QuarantineResolutionState.QUARANTINE_CLEARED) {
                             executeQuarantineResolutionWithJournalLocked(user.uid, existingJournal)
                             return@withLock true
+                        } else {
+                            throw IllegalStateException("Pending library resolution payload could not be restored.")
                         }
                     } else {
                         executeQuarantineResolutionWithJournalLocked(user.uid, existingJournal)
@@ -667,12 +685,14 @@ class CloudSyncCoordinator(
                     return@withLock true
                 }
 
+                val opId = java.util.UUID.randomUUID().toString().replace("-", "").take(12)
                 val freshJournal = UnownedQuarantineResolutionJournal(
-                    operationId = java.util.UUID.randomUUID().toString().replace("-", "").take(12),
+                    operationId = opId,
                     action = action,
                     targetUid = user.uid,
                     startedAtMs = System.currentTimeMillis(),
-                    state = QuarantineResolutionState.PREPARING
+                    state = QuarantineResolutionState.PREPARING,
+                    retainedPayloadFilename = "${UNOWNED_RETAINED_PREFIX}${opId}.json"
                 )
                 writeQuarantineResolutionJournalAtomically(freshJournal)
                 executeQuarantineResolutionWithJournalLocked(user.uid, freshJournal)
@@ -932,22 +952,53 @@ class CloudSyncCoordinator(
         prefsRepo.markLocalLikesScrubbed()
     }
 
+    private fun stateRootDir(): File = stateDir ?: context.noBackupFilesDir
+
     private fun quarantineFile(): File =
-        File(stateDir ?: context.noBackupFilesDir, UNOWNED_QUARANTINE_FILENAME)
+        File(stateRootDir(), UNOWNED_QUARANTINE_FILENAME)
 
     private fun quarantineResolutionJournalFile(): File =
-        File(stateDir ?: context.noBackupFilesDir, UNOWNED_RESOLUTION_JOURNAL_FILENAME)
+        File(stateRootDir(), UNOWNED_RESOLUTION_JOURNAL_FILENAME)
 
-    internal fun readQuarantineFile(): UnownedAccountDataQuarantine? {
-        val file = quarantineFile()
+    private fun sanitizeSafeChildFilename(name: String): String? {
+        val trimmed = name.trim()
+        if (trimmed.isEmpty() || trimmed.contains('/') || trimmed.contains('\\') || trimmed.contains("..")) {
+            return null
+        }
+        return trimmed
+    }
+
+    private fun retainedPayloadFile(journal: UnownedQuarantineResolutionJournal): File? {
+        val safeName = sanitizeSafeChildFilename(journal.retainedPayloadFilename) ?: return null
+        val root = stateRootDir().canonicalFile
+        val candidate = File(root, safeName).canonicalFile
+        return if (candidate.parentFile == root) candidate else null
+    }
+
+    internal fun listRetainedPayloadFiles(): List<File> {
+        val dir = stateRootDir()
+        if (!dir.isDirectory) return emptyList()
+        return dir.listFiles()?.filter {
+            it.isFile && it.name.startsWith(UNOWNED_RETAINED_PREFIX) && it.name.endsWith(".json")
+        }.orEmpty()
+    }
+
+    private fun readQuarantineFromFile(file: File): UnownedAccountDataQuarantine? {
         if (!file.exists()) return null
         return runCatching { json.decodeFromString<UnownedAccountDataQuarantine>(file.readText(Charsets.UTF_8)) }.getOrNull()
     }
+
+    internal fun readQuarantineFile(): UnownedAccountDataQuarantine? =
+        readQuarantineFromFile(quarantineFile())
 
     internal fun readQuarantineResolutionJournal(): UnownedQuarantineResolutionJournal? {
         val file = quarantineResolutionJournalFile()
         if (!file.exists()) return null
         return runCatching { json.decodeFromString<UnownedQuarantineResolutionJournal>(file.readText(Charsets.UTF_8)) }.getOrNull()
+    }
+
+    private fun resolveReadableRecoveryPayload(journal: UnownedQuarantineResolutionJournal): UnownedAccountDataQuarantine? {
+        return retainedPayloadFile(journal)?.let(::readQuarantineFromFile) ?: readQuarantineFile()
     }
 
     private fun hasPendingQuarantineOrJournal(): Boolean {
@@ -961,6 +1012,13 @@ class CloudSyncCoordinator(
 
     private fun writeQuarantineAtomically(quarantine: UnownedAccountDataQuarantine) {
         writeTextAtomically(quarantineFile(), UNOWNED_QUARANTINE_FILENAME, json.encodeToString(quarantine))
+    }
+
+    private fun writeRetainedPayloadAtomically(filename: String, quarantine: UnownedAccountDataQuarantine) {
+        val safeName = sanitizeSafeChildFilename(filename)
+            ?: throw IllegalArgumentException("Invalid retained quarantine filename: $filename")
+        val target = File(stateRootDir(), safeName)
+        writeTextAtomically(target, safeName, json.encodeToString(quarantine))
     }
 
     private fun writeQuarantineResolutionJournalAtomically(journal: UnownedQuarantineResolutionJournal) {
@@ -999,6 +1057,24 @@ class CloudSyncCoordinator(
         File(file.parentFile, "$UNOWNED_QUARANTINE_FILENAME.tmp").takeIf { it.exists() }?.delete()
     }
 
+    private fun deleteRetainedPayloadIfExists(journal: UnownedQuarantineResolutionJournal) {
+        val file = retainedPayloadFile(journal) ?: return
+        if (file.exists() && !file.delete()) {
+            throw java.io.IOException("Failed to remove retained quarantine payload file")
+        }
+        File(file.parentFile, "${file.name}.tmp").takeIf { it.exists() }?.delete()
+    }
+
+    private fun deleteAllRetainedPayloadFiles() {
+        val dir = stateRootDir()
+        if (!dir.isDirectory) return
+        dir.listFiles()?.forEach { f ->
+            if (f.isFile && f.name.startsWith(UNOWNED_RETAINED_PREFIX)) {
+                f.delete()
+            }
+        }
+    }
+
     private fun deleteQuarantineResolutionJournalStrict() {
         val file = quarantineResolutionJournalFile()
         if (file.exists() && !file.delete()) {
@@ -1009,16 +1085,33 @@ class CloudSyncCoordinator(
 
     private suspend fun rollbackStaleQuarantineResolutionForForeignUidLocked(
         staleJournal: UnownedQuarantineResolutionJournal
-    ) {
-        withContext(NonCancellable) {
+    ): Boolean {
+        return withContext(NonCancellable) {
+            val preservedQuarantine = readQuarantineFile()
+            val retainedQuarantine = retainedPayloadFile(staleJournal)?.let(::readQuarantineFromFile)
+            val recoveryPayload = retainedQuarantine ?: preservedQuarantine
+
+            // Fail closed WITHOUT destroying Room or deleting the journal if no readable recovery payload exists.
+            if (recoveryPayload == null) {
+                return@withContext false
+            }
+
+            if (preservedQuarantine == null) {
+                writeQuarantineAtomically(recoveryPayload)
+            }
+            if (readQuarantineFile() == null) {
+                return@withContext false
+            }
+
             dao.clearSyncedAccountData()
             prefsRepo.resetCloudSyncStateForSignOut()
             prefsRepo.setPendingAccountTransitionUid(null)
             cloudRepo.clearSessionCache()
             failedCollections.clear()
-            // If quarantineFile still exists, preserve it so the incoming user makes an explicit Merge/Discard choice;
-            // remove the stale journal either way after resetting partial local sync state.
+
+            deleteRetainedPayloadIfExists(staleJournal)
             deleteQuarantineResolutionJournalStrict()
+            true
         }
     }
 
@@ -1028,19 +1121,41 @@ class CloudSyncCoordinator(
     ) {
         var cur = initialJournal
         if (cur.state == QuarantineResolutionState.COMPLETED) {
+            deleteRetainedPayloadIfExists(cur)
+            onAfterQuarantinePayloadCleanupBeforeJournalDelete?.invoke(cur.action, userUid)
             deleteQuarantineResolutionJournalStrict()
             return
         }
 
+        if (cur.state == QuarantineResolutionState.PREPARING) {
+            val payload = resolveReadableRecoveryPayload(cur)
+                ?: throw IllegalStateException("Quarantine payload unreadable or missing before archival.")
+            val retainedName = cur.retainedPayloadFilename.takeIf { sanitizeSafeChildFilename(it) != null }
+                ?: "${UNOWNED_RETAINED_PREFIX}${cur.operationId}.json"
+            val existingRetained = File(stateRootDir(), retainedName)
+            if (readQuarantineFromFile(existingRetained) == null) {
+                writeRetainedPayloadAtomically(retainedName, payload)
+            }
+            cur = cur.copy(
+                state = QuarantineResolutionState.PAYLOAD_ARCHIVED,
+                retainedPayloadFilename = retainedName
+            )
+            writeQuarantineResolutionJournalAtomically(cur)
+            onAfterQuarantinePayloadArchived?.invoke(cur.action, userUid)
+        }
+
         if (cur.action == QuarantineResolutionAction.MERGE) {
-            val quarantine = if (cur.state == QuarantineResolutionState.PREPARING || cur.state == QuarantineResolutionState.ROOM_APPLIED) {
-                readQuarantineFile()
+            val quarantine = if (
+                cur.state == QuarantineResolutionState.PAYLOAD_ARCHIVED ||
+                cur.state == QuarantineResolutionState.ROOM_APPLIED
+            ) {
+                resolveReadableRecoveryPayload(cur)
                     ?: throw IllegalStateException("Quarantine payload unreadable or missing during merge resolution.")
             } else {
                 null
             }
 
-            if (cur.state == QuarantineResolutionState.PREPARING && quarantine != null) {
+            if (cur.state == QuarantineResolutionState.PAYLOAD_ARCHIVED && quarantine != null) {
                 onBeforeQuarantineRoomApply?.invoke(QuarantineResolutionAction.MERGE, userUid)
                 val liked = quarantine.likedSongs.map { LikedSongEntity(it.videoId, it.songJson, it.likedAt) }
                 val blocked = quarantine.blockedArtists.map { BlockedArtistEntity(it.name, it.channelId, it.blockedAt) }
@@ -1105,7 +1220,9 @@ class CloudSyncCoordinator(
 
             if (cur.state == QuarantineResolutionState.PREFS_APPLIED) {
                 onAfterQuarantinePrefsBeforeDeleteFile?.invoke(QuarantineResolutionAction.MERGE, userUid)
+                cur = ensureRetainedArchiveBeforeDeletingQuarantine(cur)
                 deleteQuarantineFileIfExists()
+                onAfterQuarantineDeleteBeforeClearedState?.invoke(QuarantineResolutionAction.MERGE, userUid)
                 cur = cur.copy(state = QuarantineResolutionState.QUARANTINE_CLEARED)
                 writeQuarantineResolutionJournalAtomically(cur)
             }
@@ -1114,10 +1231,13 @@ class CloudSyncCoordinator(
                 onAfterQuarantineDeleteBeforeJournalComplete?.invoke(QuarantineResolutionAction.MERGE, userUid)
                 cur = cur.copy(state = QuarantineResolutionState.COMPLETED)
                 writeQuarantineResolutionJournalAtomically(cur)
+                onAfterQuarantineJournalCompletedBeforeCleanup?.invoke(QuarantineResolutionAction.MERGE, userUid)
+                deleteRetainedPayloadIfExists(cur)
+                onAfterQuarantinePayloadCleanupBeforeJournalDelete?.invoke(QuarantineResolutionAction.MERGE, userUid)
                 deleteQuarantineResolutionJournalStrict()
             }
         } else {
-            if (cur.state == QuarantineResolutionState.PREPARING) {
+            if (cur.state == QuarantineResolutionState.PAYLOAD_ARCHIVED) {
                 onBeforeQuarantineRoomApply?.invoke(QuarantineResolutionAction.DISCARD, userUid)
                 dao.clearSyncedAccountData()
                 cloudRepo.clearSessionCache()
@@ -1135,7 +1255,9 @@ class CloudSyncCoordinator(
 
             if (cur.state == QuarantineResolutionState.PREFS_APPLIED) {
                 onAfterQuarantinePrefsBeforeDeleteFile?.invoke(QuarantineResolutionAction.DISCARD, userUid)
+                cur = ensureRetainedArchiveBeforeDeletingQuarantine(cur)
                 deleteQuarantineFileIfExists()
+                onAfterQuarantineDeleteBeforeClearedState?.invoke(QuarantineResolutionAction.DISCARD, userUid)
                 cur = cur.copy(state = QuarantineResolutionState.QUARANTINE_CLEARED)
                 writeQuarantineResolutionJournalAtomically(cur)
             }
@@ -1144,8 +1266,32 @@ class CloudSyncCoordinator(
                 onAfterQuarantineDeleteBeforeJournalComplete?.invoke(QuarantineResolutionAction.DISCARD, userUid)
                 cur = cur.copy(state = QuarantineResolutionState.COMPLETED)
                 writeQuarantineResolutionJournalAtomically(cur)
+                onAfterQuarantineJournalCompletedBeforeCleanup?.invoke(QuarantineResolutionAction.DISCARD, userUid)
+                deleteRetainedPayloadIfExists(cur)
+                onAfterQuarantinePayloadCleanupBeforeJournalDelete?.invoke(QuarantineResolutionAction.DISCARD, userUid)
                 deleteQuarantineResolutionJournalStrict()
             }
+        }
+    }
+
+    private fun ensureRetainedArchiveBeforeDeletingQuarantine(
+        journal: UnownedQuarantineResolutionJournal
+    ): UnownedQuarantineResolutionJournal {
+        val existingRetained = retainedPayloadFile(journal)
+        if (existingRetained != null && readQuarantineFromFile(existingRetained) != null) {
+            return journal
+        }
+        val payload = readQuarantineFile()
+            ?: throw IllegalStateException("Quarantine payload missing or unreadable before quarantine file removal.")
+        val retainedName = journal.retainedPayloadFilename.takeIf { sanitizeSafeChildFilename(it) != null }
+            ?: "${UNOWNED_RETAINED_PREFIX}${journal.operationId}.json"
+        writeRetainedPayloadAtomically(retainedName, payload)
+        return if (retainedName != journal.retainedPayloadFilename) {
+            journal.copy(retainedPayloadFilename = retainedName).also {
+                writeQuarantineResolutionJournalAtomically(it)
+            }
+        } else {
+            journal
         }
     }
 
@@ -1168,9 +1314,22 @@ class CloudSyncCoordinator(
                 return false
             }
             if (journal.state == QuarantineResolutionState.COMPLETED) {
+                deleteRetainedPayloadIfExists(journal)
                 deleteQuarantineResolutionJournalStrict()
             } else if (journal.targetUid != uid) {
-                rollbackStaleQuarantineResolutionForForeignUidLocked(journal)
+                if (!rollbackStaleQuarantineResolutionForForeignUidLocked(journal)) {
+                    val conflictCount = readQuarantineFile()?.itemCount ?: 0
+                    _authState.update {
+                        it.copy(
+                            isSyncing = false,
+                            hasUnownedDataConflict = quarantineFile().exists(),
+                            unownedDataItemCount = conflictCount,
+                            syncStatus = "Quarantine recovery error",
+                            errorMessage = "Pending library resolution payload could not be restored."
+                        )
+                    }
+                    return false
+                }
             } else {
                 try {
                     executeQuarantineResolutionWithJournalLocked(uid, journal)
@@ -1194,6 +1353,10 @@ class CloudSyncCoordinator(
             }
         }
 
+        if (!quarantineResolutionJournalFile().exists()) {
+            deleteAllRetainedPayloadFiles()
+        }
+
         // If quarantine file exists at startup without a journal (or after foreign-uid rollback), fail closed cleanly
         if (quarantineFile().exists()) {
             val parsed = readQuarantineFile()
@@ -1212,6 +1375,7 @@ class CloudSyncCoordinator(
     }
 
     private suspend fun ensureAccountOwnershipIsolatedLocked(uid: String): Boolean {
+        awaitStartupProvenance()
         if (!recoverIncompleteQuarantineResolutionLocked(uid)) {
             return false
         }
@@ -1279,8 +1443,14 @@ class CloudSyncCoordinator(
                 localTaste.seedArtists.isNotEmpty() ||
                 localTaste.seedSongs.isNotEmpty()
 
+            val provenance = prefsRepo.getLocalDataProvenance()
             val requiresFailClosedQuarantine = hasForeignBaselines ||
-                (hasSyncedContent && !hasOwnBaselines && (hasLegacySyncMarkers || hasLegacyPlaylistUpgradeMarkers || tombstones.isNotEmpty()))
+                (hasSyncedContent &&
+                    !hasOwnBaselines &&
+                    (hasLegacySyncMarkers ||
+                        hasLegacyPlaylistUpgradeMarkers ||
+                        tombstones.isNotEmpty() ||
+                        provenance != LocalDataProvenance.FRESH_LOCAL))
 
             if (requiresFailClosedQuarantine) {
                 val quarantine = UnownedAccountDataQuarantine(
@@ -3188,5 +3358,6 @@ class CloudSyncCoordinator(
         private const val TOMBSTONE_RETENTION_MS = 90L * 24L * 3600L * 1000L
         private const val UNOWNED_QUARANTINE_FILENAME = "unowned_account_quarantine.json"
         private const val UNOWNED_RESOLUTION_JOURNAL_FILENAME = "unowned_quarantine_resolution_journal.json"
+        private const val UNOWNED_RETAINED_PREFIX = "unowned_quarantine_retained_"
     }
 }

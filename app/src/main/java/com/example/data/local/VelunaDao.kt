@@ -792,6 +792,9 @@ interface VelunaDao {
     @Query("SELECT EXISTS(SELECT 1 FROM sync_baselines WHERE userId != :uid)")
     suspend fun hasSyncBaselinesForOtherUsers(uid: String): Boolean
 
+    @Query("SELECT EXISTS(SELECT 1 FROM sync_baselines)")
+    suspend fun hasAnySyncBaselines(): Boolean
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertTombstones(tombstones: List<SyncTombstoneEntity>)
 

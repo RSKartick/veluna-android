@@ -18,13 +18,20 @@ import com.example.data.repository.VelunaRepository
 import com.example.playback.PlayerController
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 
-class VelunaAppContainer(application: Application) {
+class VelunaAppContainer(
+    application: Application,
+    appScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+) {
     val database: VelunaDatabase = VelunaDatabase.getInstance(application)
     val dao = database.velunaDao()
     val prefsRepository: UserPrefsRepository = UserPrefsRepository(application)
+    val startupProvenanceJob: Job = appScope.launch {
+        runCatching { prefsRepository.initializeInstallProvenanceIfClean(dao) }
+    }
     val innerTubeClient: InnerTubeClient = InnerTubeClient()
     val lyricsRepository: LyricsRepository = LyricsRepository(dao, innerTubeClient)
     val scrobbleClient: ScrobbleClient = ScrobbleClient(
@@ -50,7 +57,8 @@ class VelunaAppContainer(application: Application) {
         dao = dao,
         prefsRepo = prefsRepository,
         repository = repository,
-        cloudRepo = cloudSyncRepository
+        cloudRepo = cloudSyncRepository,
+        awaitStartupProvenance = { startupProvenanceJob.join() }
     )
     val playerController: PlayerController = PlayerController(
         context = application,
@@ -77,9 +85,10 @@ class VelunaApplication : Application(), ImageLoaderFactory {
 
     override fun onCreate() {
         super.onCreate()
-        container = VelunaAppContainer(this)
+        container = VelunaAppContainer(this, appScope)
         container.scrobbleClient.registerConnectivityFlush(this)
         appScope.launch {
+            container.startupProvenanceJob.join()
             runCatching { container.repository.recoverIncompleteRestoreIfNeeded() }
             runCatching { container.prefsRepository.migrateSecretsAndPruneLegacyKeys() }
             runCatching { container.scrobbleClient.flushPendingScrobbles() }
