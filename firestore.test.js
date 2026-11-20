@@ -409,6 +409,34 @@ test("Playlist versioned snapshots enforce owner-only access, valid state transi
   const snapRef = plRef.collection("snapshots").doc("snap_1_abc123");
   const trackRef = snapRef.collection("tracks").doc("trk_00000_dQw4w9WgXcQ");
 
+  // Cannot create snapshot directly in COMMITTED or DELETING
+  await assertFails(
+    plRef.collection("snapshots").doc("snap_direct_commit").set({
+      state: "COMMITTED",
+      syncRevision: 1,
+      trackCount: 0,
+      clientUpdatedAt: 1700000000000,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    })
+  );
+  await assertFails(
+    plRef.collection("snapshots").doc("snap_direct_del").set({
+      state: "DELETING",
+      syncRevision: 1,
+      trackCount: 0,
+      clientUpdatedAt: 1700000000000,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  // Cannot write tracks to a non-existent snapshot
+  await assertFails(
+    plRef.collection("snapshots").doc("snap_nonexistent").collection("tracks").doc("trk_0").set(validPlaylistTrackPayload())
+  );
+
+  // Create in STAGING, write & update tracks in STAGING
   await assertSucceeds(
     snapRef.set({
       state: "STAGING",
@@ -421,11 +449,52 @@ test("Playlist versioned snapshots enforce owner-only access, valid state transi
   );
   await assertSucceeds(trackRef.set(validPlaylistTrackPayload()));
   await assertSucceeds(
+    trackRef.update({
+      title: "Updated In Staging",
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  // LOCAL track rejected inside STAGING snapshot tracks
+  await assertFails(
+    snapRef.collection("tracks").doc("LOCAL_trk").set(validPlaylistTrackPayload())
+  );
+
+  // Cannot delete track or manifest while STAGING
+  await assertFails(trackRef.delete());
+  await assertFails(snapRef.delete());
+
+  // Transition STAGING -> COMMITTED succeeds; STAGING metadata stays immutable
+  await assertSucceeds(
     snapRef.update({
       state: "COMMITTED",
       updatedAt: serverTimestamp(),
     })
   );
+
+  // Once COMMITTED, adding or updating tracks is forbidden
+  await assertFails(
+    snapRef.collection("tracks").doc("trk_00001_late").set(validPlaylistTrackPayload({ videoId: "trk_late", position: 1 }))
+  );
+  await assertFails(
+    trackRef.update({
+      title: "Tampered After Commit",
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  // Publishing with mismatched trackCount fails
+  await assertFails(
+    plRef.set(
+      validPlaylistPayload({
+        syncRevision: 1,
+        activeSnapshotId: "snap_1_abc123",
+        trackCount: 99,
+      })
+    )
+  );
+
+  // Publish valid COMMITTED snapshot
   await assertSucceeds(
     plRef.set(
       validPlaylistPayload({
@@ -437,10 +506,22 @@ test("Playlist versioned snapshots enforce owner-only access, valid state transi
   );
   await assertSucceeds(snapRef.collection("tracks").get());
 
-  // Cannot mutate syncRevision after snapshot creation or use invalid state
+  // Cannot mutate syncRevision, trackCount, createdAt, or use invalid state
   await assertFails(
     snapRef.update({
       syncRevision: 2,
+      updatedAt: serverTimestamp(),
+    })
+  );
+  await assertFails(
+    snapRef.update({
+      trackCount: 0,
+      updatedAt: serverTimestamp(),
+    })
+  );
+  await assertFails(
+    snapRef.update({
+      createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     })
   );
@@ -454,10 +535,6 @@ test("Playlist versioned snapshots enforce owner-only access, valid state transi
       updatedAt: serverTimestamp(),
     })
   );
-  // LOCAL track rejected inside snapshot tracks
-  await assertFails(
-    snapRef.collection("tracks").doc("LOCAL_trk").set(validPlaylistTrackPayload())
-  );
 
   // Cross-user access to snapshots or snapshot tracks fails
   const bobPlRef = bobDb.collection("users").doc(ALICE_UID).collection("playlists").doc("pl_snap");
@@ -465,7 +542,49 @@ test("Playlist versioned snapshots enforce owner-only access, valid state transi
   await assertFails(bobPlRef.collection("snapshots").doc("snap_1_abc123").collection("tracks").get());
   await assertFails(bobPlRef.collection("snapshots").doc("snap_1_abc123").delete());
 
-  // Owner cleanup succeeds
+  // Cannot delete track, delete manifest, or mark DELETING while parent activeSnapshotId references it
+  await assertFails(trackRef.delete());
+  await assertFails(snapRef.delete());
+  await assertFails(
+    snapRef.update({
+      state: "DELETING",
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  // Rotate parent to rev 2 COMMITTED snapshot first -> then unlinked snap_1 can become DELETING & be cleaned up
+  const snap2Ref = plRef.collection("snapshots").doc("snap_2_def456");
+  const snap2TrackRef = snap2Ref.collection("tracks").doc("trk_00000_next");
+  await assertSucceeds(
+    snap2Ref.set({
+      state: "STAGING",
+      syncRevision: 2,
+      trackCount: 1,
+      clientUpdatedAt: 1700000001000,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    })
+  );
+  await assertSucceeds(snap2TrackRef.set(validPlaylistTrackPayload({ videoId: "next" })));
+  await assertSucceeds(snap2Ref.update({ state: "COMMITTED", updatedAt: serverTimestamp() }));
+  await assertSucceeds(
+    plRef.update({
+      syncRevision: 2,
+      activeSnapshotId: "snap_2_def456",
+      trackCount: 1,
+      clientUpdatedAt: 1700000001000,
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  // Unlinked COMMITTED snap_1 transitions COMMITTED -> DELETING -> delete track -> delete manifest
+  await assertSucceeds(snapRef.update({ state: "DELETING", updatedAt: serverTimestamp() }));
+  await assertFails(
+    snapRef.collection("tracks").doc("trk_00002_del").set(validPlaylistTrackPayload({ videoId: "del", position: 1 }))
+  );
+  await assertFails(
+    trackRef.update({ title: "Mutate In Deleting", updatedAt: serverTimestamp() })
+  );
   await assertSucceeds(trackRef.delete());
   await assertSucceeds(snapRef.delete());
 });
@@ -545,7 +664,7 @@ test("Playlist enforces monotonic syncRevision, prevents stale un-delete, and va
 
   await assertSucceeds(
     snap1Ref.set({
-      state: "COMMITTED",
+      state: "STAGING",
       syncRevision: 2,
       trackCount: 0,
       clientUpdatedAt: 1700000000000,
@@ -553,9 +672,10 @@ test("Playlist enforces monotonic syncRevision, prevents stale un-delete, and va
       updatedAt: serverTimestamp(),
     })
   );
+  await assertSucceeds(snap1Ref.update({ state: "COMMITTED", updatedAt: serverTimestamp() }));
   await assertSucceeds(
     snap2Ref.set({
-      state: "COMMITTED",
+      state: "STAGING",
       syncRevision: 3,
       trackCount: 0,
       clientUpdatedAt: 1700000002000,
@@ -563,6 +683,7 @@ test("Playlist enforces monotonic syncRevision, prevents stale un-delete, and va
       updatedAt: serverTimestamp(),
     })
   );
+  await assertSucceeds(snap2Ref.update({ state: "COMMITTED", updatedAt: serverTimestamp() }));
   await assertSucceeds(
     snap3StagingRef.set({
       state: "STAGING",
@@ -692,7 +813,7 @@ test("Established playlist syncRevision cannot be omitted, removed, non-integer,
 
   await assertSucceeds(
     snap2Ref.set({
-      state: "COMMITTED",
+      state: "STAGING",
       syncRevision: 2,
       trackCount: 0,
       clientUpdatedAt: 1700000000000,
@@ -700,9 +821,10 @@ test("Established playlist syncRevision cannot be omitted, removed, non-integer,
       updatedAt: serverTimestamp(),
     })
   );
+  await assertSucceeds(snap2Ref.update({ state: "COMMITTED", updatedAt: serverTimestamp() }));
   await assertSucceeds(
     snap3Ref.set({
-      state: "COMMITTED",
+      state: "STAGING",
       syncRevision: 3,
       trackCount: 0,
       clientUpdatedAt: 1700000002000,
@@ -710,6 +832,7 @@ test("Established playlist syncRevision cannot be omitted, removed, non-integer,
       updatedAt: serverTimestamp(),
     })
   );
+  await assertSucceeds(snap3Ref.update({ state: "COMMITTED", updatedAt: serverTimestamp() }));
 
   await assertSucceeds(
     plRef.set(
@@ -818,7 +941,7 @@ test("Established playlist syncRevision cannot be omitted, removed, non-integer,
   const snap4Ref = plRef.collection("snapshots").doc("snap_4");
   await assertSucceeds(
     snap4Ref.set({
-      state: "COMMITTED",
+      state: "STAGING",
       syncRevision: 4,
       trackCount: 0,
       clientUpdatedAt: 1700000005000,
@@ -826,6 +949,7 @@ test("Established playlist syncRevision cannot be omitted, removed, non-integer,
       updatedAt: serverTimestamp(),
     })
   );
+  await assertSucceeds(snap4Ref.update({ state: "COMMITTED", updatedAt: serverTimestamp() }));
   await assertSucceeds(
     plRef.update({
       deleted: false,
@@ -871,7 +995,7 @@ test("Snapshot state machine forbids COMMITTED->STAGING downgrade, creating in D
   );
   await assertSucceeds(
     committedRef.set({
-      state: "COMMITTED",
+      state: "STAGING",
       syncRevision: 2,
       trackCount: 0,
       clientUpdatedAt: 1700000001000,
@@ -879,6 +1003,7 @@ test("Snapshot state machine forbids COMMITTED->STAGING downgrade, creating in D
       updatedAt: serverTimestamp(),
     })
   );
+  await assertSucceeds(committedRef.update({ state: "COMMITTED", updatedAt: serverTimestamp() }));
 
   // COMMITTED -> STAGING downgrade is forbidden
   await assertFails(
@@ -935,9 +1060,10 @@ test("Playlist causal metadata fields (fieldStamps, trackTombstones, lastDeviceI
     )
   );
 
+  const causalSnapRef = plRef.collection("snapshots").doc("snap_causal_2");
   await assertSucceeds(
-    plRef.collection("snapshots").doc("snap_causal_2").set({
-      state: "COMMITTED",
+    causalSnapRef.set({
+      state: "STAGING",
       syncRevision: 2,
       trackCount: 1,
       clientUpdatedAt: 1700000000900,
@@ -945,6 +1071,7 @@ test("Playlist causal metadata fields (fieldStamps, trackTombstones, lastDeviceI
       updatedAt: serverTimestamp(),
     })
   );
+  await assertSucceeds(causalSnapRef.update({ state: "COMMITTED", updatedAt: serverTimestamp() }));
 
   // Full update with all 4 fieldStamps + activeSnapshotId rotation must succeed within rules budget
   await assertSucceeds(
@@ -977,5 +1104,25 @@ test("Playlist causal metadata fields (fieldStamps, trackTombstones, lastDeviceI
       updatedAt: serverTimestamp(),
     })
   );
+});
+
+test("Owner-only sync_meta/clock validates server timestamp and blocks cross-user or arbitrary docs", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const clockRef = aliceDb.collection("users").doc(ALICE_UID).collection("sync_meta").doc("clock");
+
+  await assertSucceeds(clockRef.set({ serverTime: serverTimestamp() }));
+  await assertSucceeds(clockRef.get());
+  await assertFails(
+    aliceDb.collection("users").doc(ALICE_UID).collection("sync_meta").doc("other").set({
+      serverTime: serverTimestamp(),
+    })
+  );
+  await assertFails(clockRef.set({ serverTime: serverTimestamp(), extra: "nope" }));
+  await assertFails(bobDb.collection("users").doc(ALICE_UID).collection("sync_meta").doc("clock").get());
+  await assertFails(bobDb.collection("users").doc(ALICE_UID).collection("sync_meta").doc("clock").set({
+    serverTime: serverTimestamp(),
+  }));
+  await assertSucceeds(clockRef.delete());
 });
 

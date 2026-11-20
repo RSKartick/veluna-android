@@ -22,6 +22,7 @@ import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.FirebaseFirestoreException
 import com.google.firebase.firestore.Query
 import com.google.firebase.firestore.SetOptions
+import com.google.firebase.firestore.Source
 import com.google.firebase.firestore.snapshots
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
@@ -907,10 +908,37 @@ class CloudSyncRepository(
         }
     }
 
+    internal var serverTimeProviderOverride: (suspend (uid: String) -> Long?)? = null
+
+    /**
+     * Resolves authoritative Firestore server wall-clock epoch millis by committing a
+     * `FieldValue.serverTimestamp()` write to owner-only `users/{uid}/sync_meta/clock`
+     * and reading it back from `Source.SERVER`. Returns null if offline/unavailable so
+     * snapshot GC fails safely (retains snapshots) rather than trusting skewed device clocks.
+     */
+    suspend fun fetchAuthoritativeServerTimeMs(): Long? {
+        val uid = requireUserId()
+        serverTimeProviderOverride?.let { override ->
+            return override(uid)
+        }
+        val clockRef = db.collection("users").document(uid).collection("sync_meta").document("clock")
+        return try {
+            clockRef.set(mapOf("serverTime" to FieldValue.serverTimestamp())).await()
+            val serverSnap = clockRef.get(Source.SERVER).await()
+            val ts = serverSnap.getTimestamp("serverTime")
+            ts?.let { it.seconds * 1000L + (it.nanoseconds / 1_000_000L) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     /**
      * Concurrency-safe garbage collector for old playlist snapshots and legacy tracks:
-     * 1. Uses strictly the Firestore server `createdAt` timestamp (never `clientUpdatedAt`, and
-     *    never defaults missing server timestamps to expired).
+     * 1. Uses strictly the Firestore server `createdAt` timestamp compared against authoritative
+     *    Firestore server time when [nowMs] is omitted (never trusting skewed device wall clocks,
+     *    and never deleting non-DELETING snapshots if server time is unavailable).
      * 2. Uses separate retention policies: [stagingRetentionMs] (1h) for abandoned `STAGING` snapshots
      *    and [retentionWindowMs] (7d) for superseded `COMMITTED` snapshots outside [retainCommittedCount].
      * 3. Atomically claims eligible snapshots via a Firestore transaction (`STAGING`/`COMMITTED` -> `DELETING`)
@@ -922,7 +950,7 @@ class CloudSyncRepository(
         playlistKey: String,
         retentionWindowMs: Long = DEFAULT_SNAPSHOT_RETENTION_MS,
         retainCommittedCount: Int = DEFAULT_RETAINED_COMMITTED_SNAPSHOTS,
-        nowMs: Long = System.currentTimeMillis(),
+        nowMs: Long? = null,
         stagingRetentionMs: Long = DEFAULT_STAGING_SNAPSHOT_RETENTION_MS,
         throwOnError: Boolean = false
     ): Int {
@@ -931,6 +959,7 @@ class CloudSyncRepository(
         val plDocRef = db.collection("users").document(uid).collection("playlists").document(safeKey)
         var deletedCount = 0
         try {
+            val effectiveNowMs: Long? = nowMs ?: fetchAuthoritativeServerTimeMs()
             val parentSnap = plDocRef.get().await()
             val activeId = parentSnap.getString("activeSnapshotId")
             val snaps = plDocRef.collection("snapshots").get().await()
@@ -955,13 +984,14 @@ class CloudSyncRepository(
                 if (state == "COMMITTED" && doc.id in protectedCommitted) continue
 
                 if (state != "DELETING") {
+                    val serverNowMs = effectiveNowMs ?: continue
                     val serverCreatedAtMs = doc.getTimestamp("createdAt")?.toDate()?.time ?: continue
                     val requiredWindow = when (state) {
                         "STAGING" -> stagingRetentionMs.coerceAtLeast(0L)
                         "COMMITTED" -> retentionWindowMs.coerceAtLeast(0L)
                         else -> continue
                     }
-                    if (nowMs - serverCreatedAtMs < requiredWindow) continue
+                    if (serverNowMs - serverCreatedAtMs < requiredWindow) continue
 
                     onBeforeGcClaim?.invoke(safeKey, doc.id)
 
@@ -984,7 +1014,7 @@ class CloudSyncRepository(
                             "COMMITTED" -> retentionWindowMs.coerceAtLeast(0L)
                             else -> return@runTransaction false
                         }
-                        if (nowMs - freshCreatedAtMs < freshWindow) return@runTransaction false
+                        if (serverNowMs - freshCreatedAtMs < freshWindow) return@runTransaction false
 
                         tx.update(
                             doc.reference,
@@ -1129,6 +1159,36 @@ class CloudSyncRepository(
     }
 
     /**
+     * Unlinks any `activeSnapshotId` pointer on [plDoc], transitions every child snapshot manifest
+     * to terminal `DELETING`, deletes snapshot `tracks`, deletes snapshot manifests, and deletes legacy `tracks`.
+     */
+    private suspend fun deletePlaylistSubtreeSafely(plDoc: DocumentSnapshot) {
+        if (!plDoc.getString("activeSnapshotId").isNullOrBlank()) {
+            plDoc.reference.update(
+                mapOf(
+                    "activeSnapshotId" to null,
+                    "trackCount" to 0L,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+        }
+        val snaps = plDoc.reference.collection("snapshots").get().await()
+        for (snapDoc in snaps.documents) {
+            if (snapDoc.getString("state") != "DELETING") {
+                snapDoc.reference.update(
+                    mapOf(
+                        "state" to "DELETING",
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+            }
+            deleteCollectionInBatches(snapDoc.reference.collection("tracks"))
+            snapDoc.reference.delete().await()
+        }
+        deleteCollectionInBatches(plDoc.reference.collection("tracks"))
+    }
+
+    /**
      * Deletes all Firestore documents owned by [userId] in batches of 400 (idempotent).
      * Never silently swallows errors; callers handle PERMISSION_DENIED vs transient network retries.
      */
@@ -1138,19 +1198,14 @@ class CloudSyncRepository(
         val userDoc = db.collection("users").document(uid)
 
         try {
-            // 1. Nested snapshot/tracks subcollections inside each playlist
+            // 1. Nested snapshot/tracks subcollections inside each playlist (strict lifecycle order)
             val playlists = userDoc.collection("playlists").get().await()
             for (plDoc in playlists.documents) {
-                val snaps = plDoc.reference.collection("snapshots").get().await()
-                for (snapDoc in snaps.documents) {
-                    deleteCollectionInBatches(snapDoc.reference.collection("tracks"))
-                }
-                deleteCollectionInBatches(plDoc.reference.collection("snapshots"))
-                deleteCollectionInBatches(plDoc.reference.collection("tracks"))
+                deletePlaylistSubtreeSafely(plDoc)
             }
 
             // 2. Direct subcollections under /users/{uid}
-            for (sub in listOf("playlists", "liked_songs", "taste_seeds", "hidden_artists")) {
+            for (sub in listOf("playlists", "liked_songs", "taste_seeds", "hidden_artists", "sync_meta")) {
                 deleteCollectionInBatches(userDoc.collection(sub))
             }
 
@@ -1215,14 +1270,9 @@ class CloudSyncRepository(
                 if (expired.isEmpty) break
 
                 if (sub == "playlists") {
-                    // Firestore does not cascade deletes; remove every nested snapshot/track before its parent.
+                    // Firestore does not cascade deletes; safely unlink & transition snapshots -> DELETING first.
                     for (doc in expired.documents) {
-                        val snaps = doc.reference.collection("snapshots").get().await()
-                        for (snapDoc in snaps.documents) {
-                            deleteCollectionInBatches(snapDoc.reference.collection("tracks"))
-                        }
-                        deleteCollectionInBatches(doc.reference.collection("snapshots"))
-                        deleteCollectionInBatches(doc.reference.collection("tracks"))
+                        deletePlaylistSubtreeSafely(doc)
                     }
                 }
 

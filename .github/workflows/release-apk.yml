@@ -23,17 +23,17 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
 
       - name: Set up Node.js
-        uses: actions/setup-node@1e60f620b9541d16bece96c5465dc8ee9832be0b # v4.0.3
+        uses: actions/setup-node@249970729cb0ef3589644e289645e5dc5ba9c38 # v6.5.0
         with:
-          node-version: "20"
+          node-version: "24"
 
       - name: Set up JDK 21
-        uses: actions/setup-java@6a0805fcefea3d4657a47ac4c165951e33482018 # v4.2.2
+        uses: actions/setup-java@0f481fcb613427c0f801b606911222b5b6f6f3083a # v5.5.0
         with:
           distribution: temurin
           java-version: "21"
@@ -46,10 +46,15 @@ jobs:
           fi
 
       - name: Validate Gradle Wrapper & Setup Gradle
-        uses: gradle/actions/setup-gradle@017a9effdb900e5b5b2fddfb590a105619dca3c3 # v4.4.2
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
 
       - name: Install Node test dependencies
-        run: npm ci
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install --no-audit --no-fund
+          fi
 
       - name: Materialize local emulator google-services.json for CI tests
         run: |
@@ -99,7 +104,7 @@ jobs:
 
       - name: Upload test and lint reports on failure
         if: failure()
-        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: ci-test-lint-reports
           path: app/build/reports/
@@ -112,12 +117,12 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
 
       - name: Set up JDK 21
-        uses: actions/setup-java@6a0805fcefea3d4657a47ac4c165951e33482018 # v4.2.2
+        uses: actions/setup-java@0f481fcb613427c0f801b606911222b5b6f6f3083a # v5.5.0
         with:
           distribution: temurin
           java-version: "21"
@@ -130,7 +135,7 @@ jobs:
           fi
 
       - name: Validate Gradle Wrapper & Setup Gradle
-        uses: gradle/actions/setup-gradle@017a9effdb900e5b5b2fddfb590a105619dca3c3 # v4.4.2
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
 
       - name: Enable KVM for Android Emulator
         run: |
@@ -188,14 +193,37 @@ jobs:
           profile: pixel_6
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
           disable-animations: true
-          script: chmod +x ./gradlew && ./gradlew :app:connectedDebugAndroidTest --no-daemon --stacktrace
+          script: |
+            chmod +x ./gradlew
+            ./gradlew :app:connectedDebugAndroidTest --no-daemon --info --stacktrace 2>&1 | tee android-test-run.log
+            STATUS=${PIPESTATUS[0]}
+            adb logcat -d -s SecretVaultAndroidTest:I > keystore-logcat.txt || true
+            exit "$STATUS"
 
-      - name: Upload instrumentation reports on failure
-        if: failure()
-        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+      - name: Surface Keystore security inspection results
+        if: always()
+        run: |
+          {
+            echo "### Android Keystore Security Inspection (API 34 Emulator)"
+            echo '```text'
+            {
+              grep -h "KEYSTORE_SECURITY_REPORT\|KeyInfo report:" android-test-run.log keystore-logcat.txt 2>/dev/null || true
+              if [ -d app/build/outputs/androidTest-results ]; then
+                find app/build/outputs/androidTest-results -name "*.xml" -exec grep -h "KEYSTORE_SECURITY_REPORT\|KeyInfo report:" {} + 2>/dev/null || true
+              fi
+            } | sort -u || echo "No KEYSTORE_SECURITY_REPORT line captured."
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload instrumentation reports
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: ci-instrumentation-reports
-          path: app/build/reports/androidTests/
+          path: |
+            app/build/reports/androidTests/
+            app/build/outputs/androidTest-results/
+            keystore-logcat.txt
           if-no-files-found: ignore
           retention-days: 7
 
@@ -209,7 +237,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -246,7 +274,7 @@ jobs:
           [ -s app/google-services.json ] || { echo "Failed to write google-services.json"; exit 1; }
 
       - name: Set up JDK 21
-        uses: actions/setup-java@6a0805fcefea3d4657a47ac4c165951e33482018 # v4.2.2
+        uses: actions/setup-java@0f481fcb613427c0f801b606911222b5b6f6f3083a # v5.5.0
         with:
           distribution: temurin
           java-version: "21"
@@ -259,7 +287,7 @@ jobs:
           fi
 
       - name: Validate Gradle Wrapper & Setup Gradle
-        uses: gradle/actions/setup-gradle@017a9effdb900e5b5b2fddfb590a105619dca3c3 # v4.4.2
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
 
       - name: Assemble release APK
         env:
@@ -298,14 +326,14 @@ jobs:
             || { echo "APK certificate SHA-256 mismatch"; exit 1; }
 
       - name: Upload release APK artifact
-        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: veluna-android-release-apk
           path: dist/veluna-android.apk
           retention-days: 30
 
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           tag_name: ${{ github.ref_name }}
           name: Veluna ${{ github.ref_name }}

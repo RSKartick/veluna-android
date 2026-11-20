@@ -929,4 +929,69 @@ interface VelunaDao {
         clearSearchHistory()
         clearPendingScrobbles()
     }
+
+    /**
+     * Atomically restores quarantined unowned library data (liked songs, blocked artists,
+     * sync tombstones, and all playlists with tracks + causal ops) inside a single Room transaction.
+     * Deduplicates playlists by `cloudKey` so interrupted retries are 100% idempotent and cannot
+     * violate the unique `cloudKey` index.
+     */
+    @Transaction
+    suspend fun restoreQuarantinedAccountDataAtomic(
+        likedSongs: List<LikedSongEntity>,
+        blockedArtists: List<BlockedArtistEntity>,
+        tombstones: List<SyncTombstoneEntity>,
+        playlists: List<QuarantinePlaylistBundle>
+    ) {
+        if (likedSongs.isNotEmpty()) insertLikedSongs(likedSongs)
+        if (blockedArtists.isNotEmpty()) insertBlockedArtists(blockedArtists)
+        if (tombstones.isNotEmpty()) insertTombstones(tombstones)
+        for (bundle in playlists) {
+            val pl = bundle.playlist
+            require(pl.cloudKey.isNotBlank()) { "Playlist cloudKey must not be blank" }
+            val existing = getPlaylistByCloudKey(pl.cloudKey)
+            if (existing == null) {
+                createPlaylistWithTracks(
+                    playlist = pl,
+                    tracks = bundle.tracks,
+                    trackOps = bundle.trackOps.takeIf { it.isNotEmpty() },
+                    fieldOps = bundle.fieldOps.takeIf { it.isNotEmpty() }
+                )
+            } else {
+                updatePlaylistFromCloud(
+                    id = existing.id,
+                    title = pl.title,
+                    description = pl.description,
+                    coverUri = pl.coverUri,
+                    remoteCoverUri = pl.remoteCoverUri,
+                    coverRemoved = pl.coverRemoved,
+                    updatedAt = pl.updatedAt,
+                    syncRevision = pl.syncRevision
+                )
+                clearPlaylistTracks(existing.id)
+                if (bundle.tracks.isNotEmpty()) {
+                    insertPlaylistTracks(
+                        bundle.tracks.mapIndexed { idx, track ->
+                            track.copy(id = 0, playlistId = existing.id, position = idx)
+                        }
+                    )
+                }
+                if (bundle.trackOps.isNotEmpty()) {
+                    clearPlaylistTrackOps(existing.id)
+                    insertPlaylistTrackOps(bundle.trackOps.map { it.copy(playlistId = existing.id) })
+                }
+                if (bundle.fieldOps.isNotEmpty()) {
+                    clearPlaylistFieldOps(existing.id)
+                    insertPlaylistFieldOps(bundle.fieldOps.map { it.copy(playlistId = existing.id) })
+                }
+            }
+        }
+    }
 }
+
+data class QuarantinePlaylistBundle(
+    val playlist: LocalPlaylistEntity,
+    val tracks: List<LocalPlaylistTrackEntity>,
+    val trackOps: List<PlaylistTrackOpEntity>,
+    val fieldOps: List<PlaylistFieldOpEntity>
+)

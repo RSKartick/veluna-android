@@ -601,6 +601,49 @@ class UserPrefsRepository(
         }
     }
 
+    suspend fun commitQuarantineMergePrefs(
+        uid: String,
+        tasteProfile: TasteProfile?,
+        displayName: String,
+        prefsUpdatedAtMs: Long
+    ) {
+        dataStore.edit { p ->
+            if (tasteProfile != null) {
+                p[Keys.ONBOARDING_COMPLETED] = tasteProfile.onboardingCompleted
+                p[Keys.TASTE_PROFILE_JSON] = json.encodeToString(tasteProfile)
+            }
+            if (displayName.isNotBlank() && displayName != "Listener") {
+                p[Keys.DISPLAY_NAME] = displayName.trim().take(80)
+                p[Keys.PREFS_UPDATED_AT] = prefsUpdatedAtMs.coerceAtLeast(0L)
+            } else if (prefsUpdatedAtMs > 0L) {
+                p[Keys.PREFS_UPDATED_AT] = prefsUpdatedAtMs.coerceAtLeast(0L)
+            }
+            p.remove(Keys.PENDING_ACCOUNT_TRANSITION_UID)
+            p[Keys.ACTIVE_CLOUD_UID] = uid
+        }
+    }
+
+    suspend fun commitQuarantineDiscardPrefs(uid: String) {
+        dataStore.edit { p ->
+            p.remove(Keys.DISPLAY_NAME)
+            p.remove(Keys.ONBOARDING_COMPLETED)
+            p.remove(Keys.TASTE_PROFILE_JSON)
+            p.remove(Keys.LAST_PROFILE_PUSH_HASH)
+            p.remove(Keys.LAST_SEEDS_PUSH_HASH)
+            p.remove(Keys.LOCAL_LIKES_SCRUBBED)
+            p.remove(Keys.PLAYLIST_TRACKS_V2_MIGRATED)
+            p.remove(Keys.PREFS_UPDATED_AT)
+            p.remove(Keys.LAST_SUCCESSFUL_SYNC_AT_MS)
+            p.remove(Keys.LAST_SUCCESSFUL_SYNC_UID)
+            p.remove(Keys.PENDING_ACCOUNT_TRANSITION_UID)
+            p.remove(Keys.watermarkKey(WATERMARK_LIKED))
+            p.remove(Keys.watermarkKey(WATERMARK_PLAYLISTS))
+            p.remove(Keys.watermarkKey(WATERMARK_SEEDS))
+            p.remove(Keys.watermarkKey(WATERMARK_HIDDEN))
+            p[Keys.ACTIVE_CLOUD_UID] = uid
+        }
+    }
+
     /**
      * Explicit user/account DataStore key + SecretVault reset for permanent account deletion.
      * Leaves device-level theme, EQ, and playback settings intact.

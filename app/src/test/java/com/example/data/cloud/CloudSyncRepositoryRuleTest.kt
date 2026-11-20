@@ -482,7 +482,7 @@ class CloudSyncRepositoryRuleTest : FirestoreEmulatorTestBase() {
             ).await()
             snapRef.set(
                 mapOf(
-                    "state" to "COMMITTED",
+                    "state" to "STAGING",
                     "syncRevision" to 1L,
                     "trackCount" to 1L,
                     "clientUpdatedAt" to expiredAt,
@@ -505,6 +505,12 @@ class CloudSyncRepositoryRuleTest : FirestoreEmulatorTestBase() {
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
             ).await()
+            snapRef.update(
+                mapOf(
+                    "state" to "COMMITTED",
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
 
             repo.purgeExpiredCloudTombstones(uid, System.currentTimeMillis() - 30L * 24L * 60L * 60L * 1000L)
         }
@@ -515,7 +521,7 @@ class CloudSyncRepositoryRuleTest : FirestoreEmulatorTestBase() {
     }
 
     @Test
-    fun fetchAccountSnapshot_throwsIncompleteSnapshotException_onMissingOrMismatchedTracks(): Unit = runBlocking {
+    fun fetchAccountSnapshot_throwsIncompleteSnapshotException_onMismatchedTracks_andRulesBlockActiveSnapshotDelete(): Unit = runBlocking {
         val email = "snap_corrupt_${UUID.randomUUID()}@test.com"
         val uid = signInTestUser(email)
         val repo = CloudSyncRepository(firestore, auth)
@@ -523,11 +529,11 @@ class CloudSyncRepositoryRuleTest : FirestoreEmulatorTestBase() {
         val plRef = firestore.collection("users").document(uid).collection("playlists").document("pl_broken")
         val snapRef = plRef.collection("snapshots").document("snap_mismatch")
 
-        // Create a COMMITTED snapshot claiming 2 tracks while only writing 1 track doc
+        // Stage 1 track while claiming trackCount = 2, transition STAGING -> COMMITTED, and publish
         withTimeout(DEFAULT_TIMEOUT_MS) {
             snapRef.set(
                 mapOf(
-                    "state" to "COMMITTED",
+                    "state" to "STAGING",
                     "syncRevision" to 3L,
                     "trackCount" to 2L,
                     "clientUpdatedAt" to now,
@@ -547,6 +553,12 @@ class CloudSyncRepositoryRuleTest : FirestoreEmulatorTestBase() {
                     "deleted" to false,
                     "clientUpdatedAt" to now,
                     "createdAt" to FieldValue.serverTimestamp(),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            snapRef.update(
+                mapOf(
+                    "state" to "COMMITTED",
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
             ).await()
@@ -574,19 +586,34 @@ class CloudSyncRepositoryRuleTest : FirestoreEmulatorTestBase() {
         assertThat(caughtMismatch).isNotNull()
         assertThat(caughtMismatch!!.message).contains("expected 2 tracks")
 
-        // Delete the snapshot document while parent still references it -> reader throws rather than returning empty tracklist
-        withTimeout(DEFAULT_TIMEOUT_MS) {
-            snapRef.collection("tracks").document("trk_00000_one").delete().await()
-            snapRef.delete().await()
-        }
-        var caughtMissing: IncompletePlaylistSnapshotException? = null
+        // Hardened Firestore rules must refuse transitioning or deleting an actively referenced snapshot/track
+        var deniedTrackDelete = false
         try {
-            withTimeout(DEFAULT_TIMEOUT_MS) { repo.fetchAccountSnapshot() }
-        } catch (e: IncompletePlaylistSnapshotException) {
-            caughtMissing = e
+            withTimeout(DEFAULT_TIMEOUT_MS) {
+                snapRef.collection("tracks").document("trk_00000_one").delete().await()
+            }
+        } catch (e: FirebaseFirestoreException) {
+            if (e.code == FirebaseFirestoreException.Code.PERMISSION_DENIED) deniedTrackDelete = true
         }
-        assertThat(caughtMissing).isNotNull()
-        assertThat(caughtMissing!!.message).contains("snapshot document missing")
+        assertThat(deniedTrackDelete).isTrue()
+
+        var deniedDeletingTransition = false
+        try {
+            withTimeout(DEFAULT_TIMEOUT_MS) {
+                snapRef.update(mapOf("state" to "DELETING", "updatedAt" to FieldValue.serverTimestamp())).await()
+            }
+        } catch (e: FirebaseFirestoreException) {
+            if (e.code == FirebaseFirestoreException.Code.PERMISSION_DENIED) deniedDeletingTransition = true
+        }
+        assertThat(deniedDeletingTransition).isTrue()
+
+        var deniedManifestDelete = false
+        try {
+            withTimeout(DEFAULT_TIMEOUT_MS) { snapRef.delete().await() }
+        } catch (e: FirebaseFirestoreException) {
+            if (e.code == FirebaseFirestoreException.Code.PERMISSION_DENIED) deniedManifestDelete = true
+        }
+        assertThat(deniedManifestDelete).isTrue()
     }
 
     @Test
@@ -1283,6 +1310,128 @@ class CloudSyncRepositoryRuleTest : FirestoreEmulatorTestBase() {
         assertThat(after.profile?.tombstoneCompactedBeforeMs).isEqualTo(cutoff)
         assertThat(after.profile?.syncGeneration).isAtLeast(1L)
         assertThat(after.likedSongs.map { it.videoId }).containsExactly("trk_active")
+    }
+
+    @Test
+    fun garbageCollectPlaylistSnapshots_usesAuthoritativeServerTime_notSkewedDeviceClock(): Unit = runBlocking {
+        val email = "gc_clock_skew_${UUID.randomUUID()}@test.com"
+        val uid = signInTestUser(email)
+        val repo = CloudSyncRepository(firestore, auth)
+        val plKey = "pl_clock_skew"
+        val now = System.currentTimeMillis()
+
+        // Create 4 revisions so rev 1 is outside retainCommittedCount=1 and rev 2..4 would be eligible if expired
+        for (rev in 1L..2L) {
+            withTimeout(DEFAULT_TIMEOUT_MS) {
+                repo.upsertPlaylist(
+                    playlistKey = plKey,
+                    title = "Skew Pl $rev",
+                    description = "",
+                    coverUri = null,
+                    tracks = listOf(SongItem("trk_$rev", "T$rev", "Artist")),
+                    clientUpdatedAt = now - 5_000L,
+                    syncRevision = rev
+                )
+            }
+        }
+        val plRef = firestore.collection("users").document(uid).collection("playlists").document(plKey)
+        val stagingRef = plRef.collection("snapshots").document("snap_abandoned_fresh")
+        withTimeout(DEFAULT_TIMEOUT_MS) {
+            stagingRef.set(
+                mapOf(
+                    "state" to "STAGING",
+                    "syncRevision" to 3L,
+                    "trackCount" to 0L,
+                    "clientUpdatedAt" to now,
+                    "createdAt" to FieldValue.serverTimestamp(),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+        }
+
+        // 1. Default GC path uses genuine Firestore server time (sync_meta/clock), NOT device wall clock:
+        //    neither fresh STAGING nor fresh superseded COMMITTED snapshot is deleted.
+        val deletedWithRealServerTime = withTimeout(DEFAULT_TIMEOUT_MS) {
+            repo.garbageCollectPlaylistSnapshots(
+                playlistKey = plKey,
+                retentionWindowMs = 7L * 24L * 3600L * 1000L,
+                retainCommittedCount = 1,
+                stagingRetentionMs = 60L * 60L * 1000L,
+                throwOnError = true
+            )
+        }
+        assertThat(deletedWithRealServerTime).isEqualTo(0)
+        assertThat(stagingRef.get().await().exists()).isTrue()
+
+        // 2. When authoritative server time cannot be fetched (offline), GC fails safely (retains non-DELETING snapshots)
+        repo.serverTimeProviderOverride = { null }
+        val deletedWhenServerTimeMissing = withTimeout(DEFAULT_TIMEOUT_MS) {
+            repo.garbageCollectPlaylistSnapshots(
+                playlistKey = plKey,
+                retentionWindowMs = 0L,
+                retainCommittedCount = 1,
+                stagingRetentionMs = 0L,
+                throwOnError = true
+            )
+        }
+        assertThat(deletedWhenServerTimeMissing).isEqualTo(0)
+        assertThat(plRef.collection("snapshots").get().await().size()).isEqualTo(3)
+
+        // 3. When authoritative server time advances beyond retention windows, stale STAGING and superseded COMMITTED
+        //    snapshots are cleanly reclaimed while active rev 2 stays intact.
+        val newestCreatedMs = plRef.collection("snapshots").get().await().documents
+            .maxOf { it.getTimestamp("createdAt")?.toDate()?.time ?: now }
+        repo.serverTimeProviderOverride = { newestCreatedMs + 10L * 24L * 3600L * 1000L }
+        val deletedAfterServerExpiry = withTimeout(DEFAULT_TIMEOUT_MS) {
+            repo.garbageCollectPlaylistSnapshots(
+                playlistKey = plKey,
+                retentionWindowMs = 7L * 24L * 3600L * 1000L,
+                retainCommittedCount = 1,
+                stagingRetentionMs = 60L * 60L * 1000L,
+                throwOnError = true
+            )
+        }
+        repo.serverTimeProviderOverride = null
+        assertThat(deletedAfterServerExpiry).isEqualTo(2)
+        val remaining = plRef.collection("snapshots").get().await().documents
+        assertThat(remaining.mapNotNull { it.getLong("syncRevision") }).containsExactly(2L)
+    }
+
+    @Test
+    fun deleteAllUserData_underStrictSnapshotRules_deletesActiveSnapshotsAndSyncMetaCleanly(): Unit = runBlocking {
+        val email = "del_strict_${UUID.randomUUID()}@test.com"
+        val uid = signInTestUser(email)
+        val repo = CloudSyncRepository(firestore, auth)
+
+        withTimeout(DEFAULT_TIMEOUT_MS) {
+            repo.upsertUserProfile(VelunaUserPrefs(userDisplayName = "Del Strict"), TasteProfile(), email, null)
+            repo.upsertPlaylist(
+                playlistKey = "pl_strict_del",
+                title = "Rev 1",
+                description = "",
+                coverUri = null,
+                tracks = listOf(SongItem("trk_d1", "D1", "Artist")),
+                clientUpdatedAt = System.currentTimeMillis() - 1000L,
+                syncRevision = 1L
+            )
+            repo.upsertPlaylist(
+                playlistKey = "pl_strict_del",
+                title = "Rev 2",
+                description = "",
+                coverUri = null,
+                tracks = listOf(SongItem("trk_d2", "D2", "Artist")),
+                clientUpdatedAt = System.currentTimeMillis(),
+                syncRevision = 2L
+            )
+            // Also materialize sync_meta/clock via GC
+            repo.garbageCollectPlaylistSnapshots("pl_strict_del", throwOnError = true)
+            repo.deleteAllUserData(uid)
+        }
+
+        val userDoc = firestore.collection("users").document(uid)
+        assertThat(userDoc.get().await().exists()).isFalse()
+        assertThat(userDoc.collection("playlists").get().await().documents).isEmpty()
+        assertThat(userDoc.collection("sync_meta").get().await().documents).isEmpty()
     }
 
     private companion object {

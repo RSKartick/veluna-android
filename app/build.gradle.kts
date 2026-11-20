@@ -91,9 +91,20 @@ ksp {
 }
 
 // Room's exported schema is consumed by MigrationTestHelper from debug assets.
-// Generate it before Gradle snapshots those assets for the unit-test variant.
+// Generate it before Gradle snapshots those assets for the unit-test variant, and serialize KSP
+// invocations so debug and release tasks never write room.schemaLocation simultaneously.
+abstract class RoomSchemaLock : org.gradle.api.services.BuildService<org.gradle.api.services.BuildServiceParameters.None>
+
+val roomSchemaLock = gradle.sharedServices.registerIfAbsent("roomSchemaLock", RoomSchemaLock::class.java) {
+    maxParallelUsages.set(1)
+}
+
 tasks.matching { it.name == "mergeDebugAssets" }.configureEach {
     dependsOn("kspDebugKotlin")
+}
+
+tasks.matching { it.name.startsWith("ksp") && it.name.endsWith("Kotlin") }.configureEach {
+    usesService(roomSchemaLock)
 }
 
 dependencies {
