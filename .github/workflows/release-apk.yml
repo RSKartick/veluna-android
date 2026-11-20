@@ -95,7 +95,7 @@ jobs:
       - name: Run Firestore security rules, unit tests, lint, and compile check
         run: |
           npx firebase emulators:exec --only firestore,auth --project veluna-ci-test \
-            "FIRESTORE_EMULATOR_HOST=127.0.0.1:8085 FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:9099 node --test firestore.test.js && ./gradlew :app:testDebugUnitTest :app:compileDebugAndroidTestKotlin :app:lintDebug :app:compileReleaseKotlin --no-daemon --stacktrace"
+            "FIRESTORE_EMULATOR_HOST=127.0.0.1:8085 FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:9099 node --test firestore.test.js && chmod +x ./gradlew && ./gradlew :app:testDebugUnitTest :app:compileDebugAndroidTestKotlin :app:lintDebug :app:compileReleaseKotlin --no-daemon --stacktrace"
 
       - name: Upload test and lint reports on failure
         if: failure()
@@ -188,7 +188,7 @@ jobs:
           profile: pixel_6
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
           disable-animations: true
-          script: ./gradlew :app:connectedDebugAndroidTest --no-daemon --stacktrace
+          script: chmod +x ./gradlew && ./gradlew :app:connectedDebugAndroidTest --no-daemon --stacktrace
 
       - name: Upload instrumentation reports on failure
         if: failure()
@@ -270,6 +270,7 @@ jobs:
         run: |
           VER_CODE=$((100 + GITHUB_RUN_NUMBER))
           VER_NAME="${GITHUB_REF_NAME#v}"
+          chmod +x ./gradlew
           ./gradlew :app:assembleRelease --no-daemon --stacktrace \
             -PvelunaVersionCode="${VER_CODE}" \
             -PvelunaVersionName="${VER_NAME}"
