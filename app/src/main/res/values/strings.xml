@@ -197,6 +197,10 @@
     <string name="settings_deleting_account">Deleting account…</string>
     <string name="settings_delete_error_title">Account Deletion Notice</string>
     <string name="settings_delete_retry_btn">Retry Deletion</string>
+    <string name="settings_unowned_data_title">Local Library Conflict</string>
+    <string name="settings_unowned_data_body">%1$d synced library item(s) exist from an untracked account state. Merge them into this account or keep only your cloud data?</string>
+    <string name="settings_unowned_data_merge">Merge Into Account</string>
+    <string name="settings_unowned_data_discard">Keep Cloud Only</string>
 
     <string name="settings_card_appearance">Appearance</string>
     <string name="settings_theme_mode">Theme Mode</string>

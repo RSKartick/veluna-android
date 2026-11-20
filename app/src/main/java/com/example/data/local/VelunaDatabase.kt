@@ -24,9 +24,12 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         LyricsCacheEntity::class,
         SyncTombstoneEntity::class,
         SyncBaselineEntity::class,
-        PendingScrobbleEntity::class
+        PendingScrobbleEntity::class,
+        LocalDeviceClockEntity::class,
+        PlaylistTrackOpEntity::class,
+        PlaylistFieldOpEntity::class
     ],
-    version = 4,
+    version = 5,
     exportSchema = true
 )
 abstract class VelunaDatabase : RoomDatabase() {
@@ -109,6 +112,69 @@ abstract class VelunaDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_4_5: Migration = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `local_device_clock` (
+                        `id` INTEGER NOT NULL,
+                        `deviceId` TEXT NOT NULL,
+                        `lastSeq` INTEGER NOT NULL,
+                        PRIMARY KEY(`id`)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `playlist_track_ops` (
+                        `playlistId` INTEGER NOT NULL,
+                        `videoId` TEXT NOT NULL,
+                        `deleted` INTEGER NOT NULL,
+                        `timestampMs` INTEGER NOT NULL,
+                        `opSeq` INTEGER NOT NULL,
+                        `deviceId` TEXT NOT NULL,
+                        `opId` TEXT NOT NULL,
+                        PRIMARY KEY(`playlistId`, `videoId`)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE INDEX IF NOT EXISTS `index_playlist_track_ops_playlistId`
+                    ON `playlist_track_ops` (`playlistId`)
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `playlist_field_ops` (
+                        `playlistId` INTEGER NOT NULL,
+                        `fieldName` TEXT NOT NULL,
+                        `timestampMs` INTEGER NOT NULL,
+                        `opSeq` INTEGER NOT NULL,
+                        `deviceId` TEXT NOT NULL,
+                        `opId` TEXT NOT NULL,
+                        PRIMARY KEY(`playlistId`, `fieldName`)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE INDEX IF NOT EXISTS `index_playlist_field_ops_playlistId`
+                    ON `playlist_field_ops` (`playlistId`)
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    INSERT OR IGNORE INTO `playlist_track_ops` (
+                        `playlistId`, `videoId`, `deleted`, `timestampMs`, `opSeq`, `deviceId`, `opId`
+                    )
+                    SELECT `playlistId`, `videoId`, 0, `addedAt`, `id`, 'legacy_v4', 'mig_trk_' || `id`
+                    FROM `local_playlist_tracks`
+                    """.trimIndent()
+                )
+            }
+        }
+
         @Volatile
         private var INSTANCE: VelunaDatabase? = null
 
@@ -119,7 +185,7 @@ abstract class VelunaDatabase : RoomDatabase() {
                     VelunaDatabase::class.java,
                     "veluna.db"
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
                     .build()
                     .also { INSTANCE = it }
             }

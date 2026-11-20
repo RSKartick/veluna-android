@@ -76,6 +76,13 @@ private data class VaultSecretsSnapshot(
     val listenBrainzToken: String = ""
 )
 
+@Serializable
+data class SerializablePrefEntry(
+    val key: String,
+    val type: String,
+    val value: String
+)
+
 class UserPrefsRepository(
     context: Context,
     val secretVault: SecretVault = SecretVault(context.applicationContext),
@@ -125,6 +132,7 @@ class UserPrefsRepository(
         val ACTIVE_CLOUD_UID = stringPreferencesKey("active_cloud_uid")
         val LAST_SUCCESSFUL_SYNC_AT_MS = longPreferencesKey("last_successful_sync_at_ms")
         val LAST_SUCCESSFUL_SYNC_UID = stringPreferencesKey("last_successful_sync_uid")
+        val PENDING_ACCOUNT_TRANSITION_UID = stringPreferencesKey("pending_account_transition_uid")
 
         // Legacy DataStore keys (removed during migration, never written back)
         val LEGACY_CROSSFADE_SECS = intPreferencesKey("crossfade_secs")
@@ -519,6 +527,31 @@ class UserPrefsRepository(
         }
     }
 
+    suspend fun getPendingAccountTransitionUid(): String? =
+        dataStore.data.first()[Keys.PENDING_ACCOUNT_TRANSITION_UID]?.takeIf { it.isNotBlank() }
+
+    suspend fun setPendingAccountTransitionUid(uid: String?) {
+        dataStore.edit { p ->
+            if (uid.isNullOrBlank()) p.remove(Keys.PENDING_ACCOUNT_TRANSITION_UID)
+            else p[Keys.PENDING_ACCOUNT_TRANSITION_UID] = uid
+        }
+    }
+
+    suspend fun hasLegacyCloudSyncMarkers(targetUid: String): Boolean {
+        val p = dataStore.data.first()
+        val hasWatermark = (p[Keys.watermarkKey(WATERMARK_LIKED)] ?: 0L) > 0L ||
+            (p[Keys.watermarkKey(WATERMARK_PLAYLISTS)] ?: 0L) > 0L ||
+            (p[Keys.watermarkKey(WATERMARK_SEEDS)] ?: 0L) > 0L ||
+            (p[Keys.watermarkKey(WATERMARK_HIDDEN)] ?: 0L) > 0L
+        val lastUid = p[Keys.LAST_SUCCESSFUL_SYNC_UID]?.takeIf { it.isNotBlank() }
+        return hasWatermark ||
+            p[Keys.LAST_PROFILE_PUSH_HASH] != null ||
+            p[Keys.LAST_SEEDS_PUSH_HASH] != null ||
+            p[Keys.LOCAL_LIKES_SCRUBBED] == true ||
+            p[Keys.PLAYLIST_TRACKS_V2_MIGRATED] == true ||
+            (lastUid != null && lastUid != targetUid)
+    }
+
     suspend fun getLastSuccessfulSyncAtMs(uid: String): Long {
         val p = dataStore.data.first()
         return if (p[Keys.LAST_SUCCESSFUL_SYNC_UID] == uid) {
@@ -591,6 +624,7 @@ class UserPrefsRepository(
             p.remove(Keys.ACTIVE_CLOUD_UID)
             p.remove(Keys.LAST_SUCCESSFUL_SYNC_AT_MS)
             p.remove(Keys.LAST_SUCCESSFUL_SYNC_UID)
+            p.remove(Keys.PENDING_ACCOUNT_TRANSITION_UID)
             p.remove(Keys.watermarkKey(WATERMARK_LIKED))
             p.remove(Keys.watermarkKey(WATERMARK_PLAYLISTS))
             p.remove(Keys.watermarkKey(WATERMARK_SEEDS))
@@ -610,6 +644,57 @@ class UserPrefsRepository(
             snapshot.asMap().forEach { (k, v) ->
                 @Suppress("UNCHECKED_CAST")
                 mutable[k as Preferences.Key<Any>] = v
+            }
+        }
+    }
+
+    suspend fun captureSerializablePreferencesSnapshot(): List<SerializablePrefEntry> {
+        val excludedSecretKeys = setOf(
+            Keys.LEGACY_LASTFM_KEY.name,
+            Keys.LEGACY_LASTFM_SECRET.name,
+            Keys.LEGACY_LASTFM_SESSION.name,
+            Keys.LEGACY_LISTENBRAINZ_TOKEN.name
+        )
+        val raw = dataStore.data.first().asMap()
+        return raw.entries.mapNotNull { (k, v) ->
+            if (k.name in excludedSecretKeys) return@mapNotNull null
+            when (v) {
+                is String -> SerializablePrefEntry(k.name, "STRING", v)
+                is Boolean -> SerializablePrefEntry(k.name, "BOOLEAN", v.toString())
+                is Int -> SerializablePrefEntry(k.name, "INT", v.toString())
+                is Long -> SerializablePrefEntry(k.name, "LONG", v.toString())
+                is Float -> SerializablePrefEntry(k.name, "FLOAT", v.toString())
+                else -> null
+            }
+        }
+    }
+
+    suspend fun restoreSerializablePreferencesSnapshot(entries: List<SerializablePrefEntry>) {
+        val excludedSecretKeys = setOf(
+            Keys.LEGACY_LASTFM_KEY.name,
+            Keys.LEGACY_LASTFM_SECRET.name,
+            Keys.LEGACY_LASTFM_SESSION.name,
+            Keys.LEGACY_LISTENBRAINZ_TOKEN.name
+        )
+        dataStore.edit { mutable ->
+            mutable.clear()
+            entries.forEach { entry ->
+                if (entry.key in excludedSecretKeys) return@forEach
+                when (entry.type) {
+                    "STRING" -> mutable[stringPreferencesKey(entry.key)] = entry.value
+                    "BOOLEAN" -> entry.value.toBooleanStrictOrNull()?.let {
+                        mutable[booleanPreferencesKey(entry.key)] = it
+                    }
+                    "INT" -> entry.value.toIntOrNull()?.let {
+                        mutable[intPreferencesKey(entry.key)] = it
+                    }
+                    "LONG" -> entry.value.toLongOrNull()?.let {
+                        mutable[longPreferencesKey(entry.key)] = it
+                    }
+                    "FLOAT" -> entry.value.toFloatOrNull()?.takeIf { it.isFinite() }?.let {
+                        mutable[floatPreferencesKey(entry.key)] = it
+                    }
+                }
             }
         }
     }

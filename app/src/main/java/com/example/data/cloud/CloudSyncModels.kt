@@ -7,6 +7,52 @@ import com.google.firebase.Timestamp
 import com.google.firebase.firestore.DocumentId
 import com.google.firebase.firestore.IgnoreExtraProperties
 import com.google.firebase.firestore.ServerTimestamp
+import kotlinx.serialization.Serializable
+
+@Serializable
+data class SyncMutationStamp(
+    val timestampMs: Long = 0L,
+    val seq: Long = 0L,
+    val deviceId: String = "",
+    val opId: String = ""
+) : Comparable<SyncMutationStamp> {
+    val isPresent: Boolean
+        get() = timestampMs > 0L || seq > 0L || deviceId.isNotEmpty() || opId.isNotEmpty()
+
+    override fun compareTo(other: SyncMutationStamp): Int {
+        if (timestampMs != other.timestampMs) return timestampMs.compareTo(other.timestampMs)
+        if (seq != other.seq) return seq.compareTo(other.seq)
+        val devCmp = deviceId.compareTo(other.deviceId)
+        if (devCmp != 0) return devCmp
+        return opId.compareTo(other.opId)
+    }
+
+    companion object {
+        val EMPTY = SyncMutationStamp()
+    }
+}
+
+@IgnoreExtraProperties
+data class CloudMutationStamp(
+    val timestampMs: Long = 0L,
+    val seq: Long = 0L,
+    val deviceId: String = "",
+    val opId: String = ""
+) {
+    fun toSyncStamp(): SyncMutationStamp = SyncMutationStamp(
+        timestampMs = timestampMs,
+        seq = seq,
+        deviceId = deviceId,
+        opId = opId
+    )
+}
+
+fun SyncMutationStamp.toFirestoreMap(): Map<String, Any> = mapOf(
+    "timestampMs" to timestampMs.coerceAtLeast(0L),
+    "seq" to seq.coerceAtLeast(0L),
+    "deviceId" to deviceId.take(128),
+    "opId" to opId.take(128)
+)
 
 @IgnoreExtraProperties
 data class CloudUserProfile(
@@ -93,6 +139,10 @@ data class CloudPlaylistTrack(
     val explicit: Boolean = false,
     val position: Int = 0,
     val addedAt: Long = 0L,
+    val opTs: Long = 0L,
+    val opSeq: Long = 0L,
+    val deviceId: String = "",
+    val opId: String = "",
     val deleted: Boolean = false,
     val clientUpdatedAt: Long = 0L,
     @ServerTimestamp val createdAt: Timestamp? = null,
@@ -114,6 +164,19 @@ data class CloudPlaylistTrack(
             thumbnail = SecurityValidators.sanitizeHttpsUrl(thumbnail, 2048),
             explicit = explicit,
             addedAt = addedAt.takeIf { it > 0L }
+        )
+    }
+
+    fun effectiveOpStamp(fallbackTs: Long, fallbackDeviceId: String = "cloud_legacy"): SyncMutationStamp {
+        val resolvedTs = opTs.takeIf { it > 0L }
+            ?: addedAt.takeIf { it > 0L }
+            ?: clientUpdatedAt.takeIf { it > 0L }
+            ?: fallbackTs
+        return SyncMutationStamp(
+            timestampMs = resolvedTs.coerceAtLeast(0L),
+            seq = opSeq.coerceAtLeast(0L),
+            deviceId = deviceId.ifBlank { fallbackDeviceId },
+            opId = opId
         )
     }
 }
@@ -142,10 +205,22 @@ data class CloudPlaylist(
     val syncRevision: Long = 0L,
     val activeSnapshotId: String? = null,
     val trackCount: Long = 0L,
+    val lastDeviceId: String = "",
+    val lastOpSeq: Long = 0L,
+    val lastOpId: String = "",
+    val fieldStamps: Map<String, CloudMutationStamp> = emptyMap(),
+    val trackTombstones: Map<String, CloudMutationStamp> = emptyMap(),
     val clientUpdatedAt: Long = 0L,
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
-)
+) {
+    fun playlistMutationStamp(): SyncMutationStamp = SyncMutationStamp(
+        timestampMs = clientUpdatedAt.coerceAtLeast(0L),
+        seq = lastOpSeq.coerceAtLeast(0L),
+        deviceId = lastDeviceId,
+        opId = lastOpId
+    )
+}
 
 @IgnoreExtraProperties
 data class CloudHiddenArtist(

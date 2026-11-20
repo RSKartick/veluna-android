@@ -185,6 +185,49 @@ data class PendingScrobbleEntity(
     val lastError: String? = null
 )
 
+@Entity(tableName = "local_device_clock")
+data class LocalDeviceClockEntity(
+    @PrimaryKey val id: Int = 1,
+    val deviceId: String,
+    val lastSeq: Long = 0L
+)
+
+@Entity(
+    tableName = "playlist_track_ops",
+    primaryKeys = ["playlistId", "videoId"],
+    indices = [Index(value = ["playlistId"])]
+)
+data class PlaylistTrackOpEntity(
+    val playlistId: Long,
+    val videoId: String,
+    val deleted: Boolean,
+    val timestampMs: Long,
+    val opSeq: Long,
+    val deviceId: String,
+    val opId: String
+)
+
+@Entity(
+    tableName = "playlist_field_ops",
+    primaryKeys = ["playlistId", "fieldName"],
+    indices = [Index(value = ["playlistId"])]
+)
+data class PlaylistFieldOpEntity(
+    val playlistId: Long,
+    val fieldName: String,
+    val timestampMs: Long,
+    val opSeq: Long,
+    val deviceId: String,
+    val opId: String
+)
+
+object PlaylistFieldNames {
+    const val TITLE = "title"
+    const val DESCRIPTION = "description"
+    const val COVER = "cover"
+    const val ORDER = "order"
+}
+
 object SyncEntityTypes {
     const val LIKED = "LIKED"
     const val PLAYLIST = "PLAYLIST"

@@ -12,14 +12,18 @@ import androidx.room.withTransaction
 import com.example.data.local.BlockedArtistEntity
 import com.example.data.local.DownloadedTrackEntity
 import com.example.data.local.FollowedArtistEntity
+import com.example.data.local.LibraryRestoreSnapshot
 import com.example.data.local.LikedSongEntity
 import com.example.data.local.ListenEntity
 import com.example.data.local.ListenSongEntity
 import com.example.data.local.LocalPlaylistEntity
 import com.example.data.local.LocalPlaylistTrackEntity
 import com.example.data.local.LocalTrackEntity
+import com.example.data.local.PlaylistFieldOpEntity
+import com.example.data.local.PlaylistTrackOpEntity
 import com.example.data.local.SavedAlbumEntity
 import com.example.data.local.SearchHistoryEntity
+import com.example.data.local.SerializablePrefEntry
 import com.example.data.local.ShortcutEntity
 import com.example.data.local.UserPrefsRepository
 import com.example.data.local.VelunaDao
@@ -49,12 +53,15 @@ import com.example.util.readContentUriText
 import com.example.util.suspendRunCatching
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.EncodeDefault
 import kotlinx.serialization.ExperimentalSerializationApi
@@ -145,16 +152,142 @@ data class BackupRestoreResult(
     val sourceVersion: Int
 )
 
+@Serializable
+data class SerializableLikedSong(
+    val videoId: String,
+    val songJson: String,
+    val likedAt: Long
+)
+
+@Serializable
+data class SerializableBlockedArtist(
+    val name: String,
+    val channelId: String? = null,
+    val blockedAt: Long
+)
+
+@Serializable
+data class SerializableListenSong(
+    val videoId: String,
+    val songJson: String
+)
+
+@Serializable
+data class SerializableListenRow(
+    val id: Long,
+    val videoId: String,
+    val playedAt: Long,
+    val secs: Long
+)
+
+@Serializable
+data class SerializableLocalPlaylist(
+    val id: Long,
+    val cloudKey: String,
+    val title: String,
+    val description: String = "",
+    val coverUri: String? = null,
+    val remoteCoverUri: String? = null,
+    val coverRemoved: Boolean = false,
+    val createdAt: Long,
+    val updatedAt: Long,
+    val syncRevision: Long
+)
+
+@Serializable
+data class SerializableLocalPlaylistTrack(
+    val id: Long,
+    val playlistId: Long,
+    val videoId: String,
+    val songJson: String,
+    val position: Int,
+    val addedAt: Long
+)
+
+@Serializable
+data class SerializablePlaylistTrackOp(
+    val playlistId: Long,
+    val videoId: String,
+    val deleted: Boolean,
+    val timestampMs: Long,
+    val opSeq: Long,
+    val deviceId: String,
+    val opId: String
+)
+
+@Serializable
+data class SerializablePlaylistFieldOp(
+    val playlistId: Long,
+    val fieldName: String,
+    val timestampMs: Long,
+    val opSeq: Long,
+    val deviceId: String,
+    val opId: String
+)
+
+@Serializable
+data class SerializableRoomSnapshot(
+    val likedSongs: List<SerializableLikedSong> = emptyList(),
+    val blockedArtists: List<SerializableBlockedArtist> = emptyList(),
+    val savedAlbums: List<BackupSavedAlbum> = emptyList(),
+    val followedArtists: List<BackupFollowedArtist> = emptyList(),
+    val shortcuts: List<BackupShortcut> = emptyList(),
+    val searchHistory: List<BackupSearchHistoryItem> = emptyList(),
+    val listenSongs: List<SerializableListenSong> = emptyList(),
+    val listens: List<SerializableListenRow> = emptyList(),
+    val playlists: List<SerializableLocalPlaylist> = emptyList(),
+    val playlistTracks: List<SerializableLocalPlaylistTrack> = emptyList(),
+    val playlistTrackOps: List<SerializablePlaylistTrackOp> = emptyList(),
+    val playlistFieldOps: List<SerializablePlaylistFieldOp> = emptyList()
+)
+
+@Serializable
+enum class RestoreJournalState {
+    PREPARING,
+    ROOM_APPLIED,
+    ROLLBACK_IN_PROGRESS,
+    ROLLBACK_FAILED,
+    COMMITTED
+}
+
+@Serializable
+data class RestoreJournalRecord(
+    val operationId: String,
+    val startedAtMs: Long,
+    val sourceVersion: Int,
+    val state: RestoreJournalState,
+    val roomPreImage: SerializableRoomSnapshot,
+    val prefsPreImage: List<SerializablePrefEntry>,
+    val createdCoverPaths: List<String> = emptyList(),
+    val lastError: String? = null
+)
+
+class RestoreRollbackException(
+    cause: Throwable,
+    val originalError: Throwable? = null
+) : IllegalStateException("Restore rollback failed: ${cause.message}", cause)
+
 class VelunaRepository(
     private val context: Context,
     private val dao: VelunaDao,
     private val prefsRepo: UserPrefsRepository,
     val innerTube: InnerTubeClient,
-    private val database: VelunaDatabase? = null
+    private val database: VelunaDatabase? = null,
+    private val journalDir: File? = null
 ) {
     private val json = Json { ignoreUnknownKeys = true }
+    private val restoreMutex = Mutex()
 
+    internal var onBeforeJournalCreate: (suspend () -> Unit)? = null
+    internal var onBeforeJournalPersist: (suspend (RestoreJournalRecord) -> Unit)? = null
+    internal var onBeforeCoverCreate: (suspend (Int) -> Unit)? = null
+    internal var onBeforeRoomRestoreWrite: (suspend () -> Unit)? = null
+    internal var onAfterRoomRestoreCommit: (suspend () -> Unit)? = null
     internal var onBeforeDataStoreRestore: (suspend () -> Unit)? = null
+    internal var onBeforeRestoreFinalize: (suspend () -> Unit)? = null
+    internal var onBeforeJournalCleanup: (suspend () -> Unit)? = null
+    internal var onBeforeRollbackAttempt: (suspend () -> Unit)? = null
+    internal var onRollbackStepExecute: (suspend (stage: String) -> Unit)? = null
     var runWithSyncSuppressed: (suspend (suspend () -> Unit) -> Unit)? = null
 
     fun encodeSong(song: SongItem): String = json.encodeToString(song)
@@ -327,15 +460,16 @@ class VelunaRepository(
 
     suspend fun createPlaylist(title: String, description: String = ""): Long {
         val now = System.currentTimeMillis()
-        return dao.insertPlaylist(
-            LocalPlaylistEntity(
+        return dao.createPlaylistWithTracks(
+            playlist = LocalPlaylistEntity(
                 cloudKey = newCloudPlaylistKey(),
                 title = title.trim(),
                 description = description.trim(),
                 createdAt = now,
                 updatedAt = now,
                 syncRevision = 1L
-            )
+            ),
+            tracks = emptyList()
         )
     }
 
@@ -344,15 +478,19 @@ class VelunaRepository(
             val existing = dao.getPlaylistById(playlistId) ?: return@withContext
             val previousCover = existing.coverUri
             val explicitClear = coverUri.isNullOrBlank()
-            val persistedCover = if (explicitClear) null else persistPlaylistCoverIfNeeded(playlistId, coverUri)
-            val resolvedCover = if (explicitClear) null else persistedCover
+            val resolvedCover = if (explicitClear) {
+                null
+            } else {
+                persistPlaylistCoverIfNeeded(playlistId, coverUri)
+                    ?: throw IllegalArgumentException("Failed to validate or save the selected playlist cover.")
+            }
             val newRemoteCoverUri = when {
                 explicitClear -> null
                 resolvedCover != null && resolvedCover.startsWith("https://") -> resolvedCover
                 else -> existing.remoteCoverUri
             }
             val newCoverRemoved = explicitClear
-            dao.updatePlaylistWithCoverMeta(
+            dao.updatePlaylistMetadataAtomic(
                 id = playlistId,
                 title = title.trim(),
                 description = description.trim(),
@@ -425,12 +563,18 @@ class VelunaRepository(
         }.getOrNull()
     }
 
-    private fun writeCoverBytesAtomically(playlistId: Long, ext: String, bytes: ByteArray): File? {
+    private fun writeCoverBytesAtomically(
+        playlistId: Long,
+        ext: String,
+        bytes: ByteArray,
+        nameTag: String? = null
+    ): File? {
         return runCatching {
             val coversDir = File(context.filesDir, "playlist_covers").apply { mkdirs() }
+            val prefix = if (!nameTag.isNullOrBlank()) "restore_${nameTag}_" else ""
             val stamp = "${System.currentTimeMillis()}_${java.util.UUID.randomUUID().toString().take(8)}"
-            val tmpFile = File(coversDir, "pl_${playlistId}_${stamp}.$ext.tmp")
-            val outFile = File(coversDir, "pl_${playlistId}_${stamp}.$ext")
+            val tmpFile = File(coversDir, "${prefix}pl_${playlistId}_${stamp}.$ext.tmp")
+            val outFile = File(coversDir, "${prefix}pl_${playlistId}_${stamp}.$ext")
             try {
                 tmpFile.outputStream().use {
                     it.write(bytes)
@@ -993,6 +1137,75 @@ class VelunaRepository(
         return decodedCovers
     }
 
+    private fun restoreJournalFile(): File =
+        File(journalDir ?: context.noBackupFilesDir, RESTORE_JOURNAL_FILENAME)
+
+    fun hasUncommittedRestoreJournal(): Boolean =
+        readRestoreJournal()?.let { it.state != RestoreJournalState.COMMITTED } == true
+
+    private fun writeRestoreJournalAtomically(record: RestoreJournalRecord) {
+        val journalFile = restoreJournalFile()
+        journalFile.parentFile?.mkdirs()
+        val tmpFile = File(journalFile.parentFile, "$RESTORE_JOURNAL_FILENAME.tmp")
+        val encoded = json.encodeToString(record)
+        try {
+            tmpFile.outputStream().use { out ->
+                out.write(encoded.toByteArray(Charsets.UTF_8))
+                out.fd.sync()
+            }
+            if (!tmpFile.renameTo(journalFile)) {
+                journalFile.outputStream().use { dst ->
+                    dst.write(encoded.toByteArray(Charsets.UTF_8))
+                    dst.fd.sync()
+                }
+                tmpFile.delete()
+            }
+        } catch (t: Throwable) {
+            tmpFile.delete()
+            throw t
+        }
+    }
+
+    internal fun readRestoreJournal(): RestoreJournalRecord? {
+        val journalFile = restoreJournalFile()
+        if (!journalFile.exists()) return null
+        val raw = journalFile.readText(Charsets.UTF_8)
+        return json.decodeFromString<RestoreJournalRecord>(raw)
+    }
+
+    /**
+     * Checks whether a prior backup import left an incomplete journal on disk (due to process
+     * death or failed rollback) and idempotently rolls back Room, DataStore, and created covers
+     * under NonCancellable protection before sync or new mutations proceed.
+     */
+    suspend fun recoverIncompleteRestoreIfNeeded(): Boolean = withContext(Dispatchers.IO) {
+        restoreMutex.withLock {
+            val existing = readRestoreJournal() ?: return@withContext false
+            if (existing.state == RestoreJournalState.COMMITTED) {
+                deleteRestoreJournalStrict()
+                return@withContext false
+            }
+            val block: suspend () -> Unit = {
+                rollbackFromJournalNonCancellable(existing, originalError = null)
+            }
+            val suppressor = runWithSyncSuppressed
+            if (suppressor != null) {
+                suppressor { block() }
+            } else {
+                block()
+            }
+            true
+        }
+    }
+
+    private fun deleteRestoreJournalStrict() {
+        val file = restoreJournalFile()
+        if (file.exists() && !file.delete()) {
+            throw java.io.IOException("Failed to delete restore journal at ${file.absolutePath}")
+        }
+        File(file.parentFile, "$RESTORE_JOURNAL_FILENAME.tmp").takeIf { it.exists() }?.delete()
+    }
+
     private suspend fun performRecoverableImport(rawJson: String): BackupRestoreResult {
         require(rawJson.length <= MAX_BACKUP_JSON_CHARS) { "Backup file exceeds maximum supported size." }
         val payload = json.decodeFromString<VelunaBackupPayload>(rawJson)
@@ -1000,165 +1213,372 @@ class VelunaRepository(
         val clampedPrefs = clampBackupPrefs(payload.prefs)
         val sanitizedTaste = payload.tasteProfile?.let(::sanitizeBackupTasteProfile)
 
-        val preRoomSnapshot = dao.captureLibrarySnapshot()
-        val prePrefsSnapshot = prefsRepo.captureRawPreferencesSnapshot()
-        val createdCoverFiles = mutableListOf<File>()
-
-        val blockWrite: suspend () -> Int = {
-            payload.likedSongs
-                .take(5_000)
-                .mapNotNull(::sanitizeBackupSong)
-                .forEach { song ->
-                    dao.insertLikedSong(LikedSongEntity(song.videoId, encodeSong(song)))
-                }
-            payload.blockedArtists.take(500).forEach { name ->
-                val clean = name.trim().take(160)
-                if (clean.isNotEmpty()) {
-                    dao.insertBlockedArtist(BlockedArtistEntity(clean))
-                }
-            }
-            payload.savedAlbums.take(1_000).forEach { al ->
-                val cleanId = al.albumId.trim().takeIf { it.isNotEmpty() && it.length <= 128 } ?: return@forEach
-                dao.insertSavedAlbum(
-                    SavedAlbumEntity(
-                        albumId = cleanId,
-                        title = al.title.trim().ifBlank { "Album" }.take(200),
-                        subtitle = al.subtitle?.take(200),
-                        thumbnail = SecurityValidators.sanitizeHttpsUrl(al.thumbnail, 2048),
-                        savedAt = al.savedAt.coerceAtLeast(0L)
-                    )
-                )
-            }
-            payload.followedArtists.take(1_000).forEach { ar ->
-                val cleanId = ar.channelId.trim().takeIf { it.isNotEmpty() && it.length <= 128 } ?: return@forEach
-                dao.insertFollowedArtist(
-                    FollowedArtistEntity(
-                        channelId = cleanId,
-                        name = ar.name.trim().ifBlank { "Artist" }.take(160),
-                        thumbnail = SecurityValidators.sanitizeHttpsUrl(ar.thumbnail, 2048),
-                        subscribers = ar.subscribers?.take(64),
-                        followedAt = ar.followedAt.coerceAtLeast(0L)
-                    )
-                )
-            }
-            payload.shortcuts.take(100).forEach { sc ->
-                val cleanId = sc.id.trim().takeIf { it.isNotEmpty() && it.length <= 128 } ?: return@forEach
-                val safeKind = runCatching { BrowseKind.valueOf(sc.kind) }.getOrDefault(BrowseKind.PLAYLIST).name
-                dao.upsertShortcut(
-                    ShortcutEntity(
-                        id = cleanId,
-                        kind = safeKind,
-                        title = sc.title.trim().ifBlank { "Shortcut" }.take(160),
-                        subtitle = sc.subtitle?.take(160),
-                        thumbnail = SecurityValidators.sanitizeHttpsUrl(sc.thumbnail, 2048),
-                        position = sc.position.coerceIn(0, 1_000)
-                    )
-                )
-            }
-            payload.searchHistory.take(100).forEach { sh ->
-                val cleanQuery = sh.query.trim().take(200)
-                if (cleanQuery.isNotEmpty()) {
-                    dao.upsertSearchHistory(SearchHistoryEntity(cleanQuery, sh.searchedAt.coerceAtLeast(0L)))
-                }
-            }
-            payload.listens.take(10_000).forEach { l ->
-                val cleanVid = l.videoId.trim().takeIf { SecurityValidators.isValidYouTubeId(it) } ?: return@forEach
-                l.song?.let(::sanitizeBackupSong)?.let { song ->
-                    dao.upsertListenSong(ListenSongEntity(cleanVid, encodeSong(song)))
-                }
-                dao.insertListen(
-                    ListenEntity(
-                        videoId = cleanVid,
-                        playedAt = l.playedAt.coerceAtLeast(0L),
-                        secs = l.secs.coerceIn(0L, 86_400L)
-                    )
-                )
-            }
-
-            // Deduplicate playlists against existing ones using cloudKey and (normalizedTitle, trackSignature)
-            val existingPlaylists = dao.getPlaylistsOnce()
-            val existingCloudKeys = existingPlaylists.mapTo(HashSet()) { it.cloudKey }
-            val existingSignatures = existingPlaylists.map { existing ->
-                val existingTracks = dao.getPlaylistTracks(existing.id).map { it.videoId }
-                normalizePlaylistTitle(existing.title) to playlistTrackSignature(existingTracks)
-            }.toMutableSet()
-
-            var count = 0
-            payload.playlists.take(500).forEachIndexed { plIdx, pl ->
-                val cleanTracks = pl.tracks.take(5_000).mapNotNull(::sanitizeBackupSong)
-                val cleanTitle = pl.title.trim().ifBlank { "Playlist" }.take(120)
-                val requestedKey = pl.cloudKey?.trim()?.takeIf {
-                    it.length in 1..128 &&
-                        it.matches(VALID_CLOUD_KEY_REGEX) &&
-                        !it.startsWith("LOCAL", ignoreCase = true)
-                }
-                if (requestedKey != null && requestedKey in existingCloudKeys) {
-                    return@forEachIndexed
-                }
-                val sigKey = normalizePlaylistTitle(cleanTitle) to playlistTrackSignature(cleanTracks.map { it.videoId })
-                if (existingSignatures.add(sigKey)) {
-                    val now = System.currentTimeMillis()
-                    val resolvedKey = requestedKey ?: newCloudPlaylistKey()
-                    existingCloudKeys.add(resolvedKey)
-                    val safeRemoteCover = SecurityValidators.sanitizeHttpsUrl(pl.coverUri, 500)
-                    val materializedFile = decodedCovers[plIdx]?.let { cov ->
-                        writeCoverBytesAtomically(0L, cov.ext, cov.bytes)?.also { createdCoverFiles.add(it) }
-                    }
-                    val resolvedCover = materializedFile?.let { Uri.fromFile(it).toString() } ?: safeRemoteCover
-                    val trackEntities = cleanTracks.mapIndexed { idx, song ->
-                        LocalPlaylistTrackEntity(
-                            playlistId = 0,
-                            videoId = song.videoId,
-                            songJson = encodeSong(song),
-                            position = idx,
-                            addedAt = now
-                        )
-                    }
-                    dao.createPlaylistWithTracks(
-                        LocalPlaylistEntity(
-                            cloudKey = resolvedKey,
-                            title = cleanTitle,
-                            description = pl.description.trim().take(500),
-                            coverUri = resolvedCover,
-                            remoteCoverUri = safeRemoteCover,
-                            coverRemoved = false,
-                            createdAt = now,
-                            updatedAt = now,
-                            syncRevision = 1L
-                        ),
-                        trackEntities
-                    )
-                    count++
-                }
-            }
-            count
-        }
-
-        return try {
-            val restoredCount = if (database != null) {
-                database.withTransaction { blockWrite() }
-            } else {
-                blockWrite()
-            }
-            onBeforeDataStoreRestore?.invoke()
-            prefsRepo.applyBackupWithTaste(clampedPrefs, sanitizedTaste)
-            BackupRestoreResult(restoredPlaylists = restoredCount, sourceVersion = payload.version)
-        } catch (err: Throwable) {
-            runCatching {
-                val restoreRoom: suspend () -> Unit = {
-                    dao.restoreLibrarySnapshotAtomic(preRoomSnapshot)
-                }
-                if (database != null) {
-                    database.withTransaction { restoreRoom() }
+        return restoreMutex.withLock {
+            // If an interrupted restore exists from an earlier session, recover it before starting.
+            readRestoreJournal()?.let { stale ->
+                if (stale.state == RestoreJournalState.COMMITTED) {
+                    deleteRestoreJournalStrict()
                 } else {
-                    restoreRoom()
+                    rollbackFromJournalNonCancellable(stale, originalError = null)
                 }
             }
-            runCatching { prefsRepo.restoreRawPreferencesSnapshot(prePrefsSnapshot) }
-            createdCoverFiles.forEach { file -> runCatching { file.delete() } }
-            throw err
+
+            onBeforeJournalCreate?.invoke()
+            val operationId = java.util.UUID.randomUUID().toString().replace("-", "").take(12)
+            val preRoomSnapshot = dao.captureLibrarySnapshot()
+            val prePrefsSnapshot = prefsRepo.captureSerializablePreferencesSnapshot()
+            var journal = RestoreJournalRecord(
+                operationId = operationId,
+                startedAtMs = System.currentTimeMillis(),
+                sourceVersion = payload.version,
+                state = RestoreJournalState.PREPARING,
+                roomPreImage = preRoomSnapshot.toSerializable(),
+                prefsPreImage = prePrefsSnapshot,
+                createdCoverPaths = emptyList()
+            )
+            onBeforeJournalPersist?.invoke(journal)
+            writeRestoreJournalAtomically(journal)
+
+            val createdCoverFiles = mutableListOf<File>()
+            try {
+                // Step 1: Materialize cover files before database mutation and record paths durably.
+                val materializedByPlIdx = HashMap<Int, File>()
+                for ((plIdx, cov) in decodedCovers) {
+                    onBeforeCoverCreate?.invoke(plIdx)
+                    val file = writeCoverBytesAtomically(0L, cov.ext, cov.bytes, nameTag = operationId)
+                        ?: throw java.io.IOException("Failed to write cover file during restore.")
+                    createdCoverFiles.add(file)
+                    materializedByPlIdx[plIdx] = file
+                }
+                if (createdCoverFiles.isNotEmpty()) {
+                    journal = journal.copy(createdCoverPaths = createdCoverFiles.map { it.absolutePath })
+                    onBeforeJournalPersist?.invoke(journal)
+                    writeRestoreJournalAtomically(journal)
+                }
+
+                // Step 2: Mutate Room atomically inside a transaction.
+                onBeforeRoomRestoreWrite?.invoke()
+                val applyRoomRestore: suspend () -> Int = {
+                    payload.likedSongs
+                            .take(5_000)
+                            .mapNotNull(::sanitizeBackupSong)
+                            .forEach { song ->
+                                dao.insertLikedSong(LikedSongEntity(song.videoId, encodeSong(song)))
+                            }
+                        payload.blockedArtists.take(500).forEach { name ->
+                            val clean = name.trim().take(160)
+                            if (clean.isNotEmpty()) {
+                                dao.insertBlockedArtist(BlockedArtistEntity(clean))
+                            }
+                        }
+                        payload.savedAlbums.take(1_000).forEach { al ->
+                            val cleanId = al.albumId.trim().takeIf { it.isNotEmpty() && it.length <= 128 } ?: return@forEach
+                            dao.insertSavedAlbum(
+                                SavedAlbumEntity(
+                                    albumId = cleanId,
+                                    title = al.title.trim().ifBlank { "Album" }.take(200),
+                                    subtitle = al.subtitle?.take(200),
+                                    thumbnail = SecurityValidators.sanitizeHttpsUrl(al.thumbnail, 2048),
+                                    savedAt = al.savedAt.coerceAtLeast(0L)
+                                )
+                            )
+                        }
+                        payload.followedArtists.take(1_000).forEach { ar ->
+                            val cleanId = ar.channelId.trim().takeIf { it.isNotEmpty() && it.length <= 128 } ?: return@forEach
+                            dao.insertFollowedArtist(
+                                FollowedArtistEntity(
+                                    channelId = cleanId,
+                                    name = ar.name.trim().ifBlank { "Artist" }.take(160),
+                                    thumbnail = SecurityValidators.sanitizeHttpsUrl(ar.thumbnail, 2048),
+                                    subscribers = ar.subscribers?.take(64),
+                                    followedAt = ar.followedAt.coerceAtLeast(0L)
+                                )
+                            )
+                        }
+                        payload.shortcuts.take(100).forEach { sc ->
+                            val cleanId = sc.id.trim().takeIf { it.isNotEmpty() && it.length <= 128 } ?: return@forEach
+                            val safeKind = runCatching { BrowseKind.valueOf(sc.kind) }.getOrDefault(BrowseKind.PLAYLIST).name
+                            dao.upsertShortcut(
+                                ShortcutEntity(
+                                    id = cleanId,
+                                    kind = safeKind,
+                                    title = sc.title.trim().ifBlank { "Shortcut" }.take(160),
+                                    subtitle = sc.subtitle?.take(160),
+                                    thumbnail = SecurityValidators.sanitizeHttpsUrl(sc.thumbnail, 2048),
+                                    position = sc.position.coerceIn(0, 1_000)
+                                )
+                            )
+                        }
+                        payload.searchHistory.take(100).forEach { sh ->
+                            val cleanQuery = sh.query.trim().take(200)
+                            if (cleanQuery.isNotEmpty()) {
+                                dao.upsertSearchHistory(SearchHistoryEntity(cleanQuery, sh.searchedAt.coerceAtLeast(0L)))
+                            }
+                        }
+                        payload.listens.take(10_000).forEach { l ->
+                            val cleanVid = l.videoId.trim().takeIf { SecurityValidators.isValidYouTubeId(it) } ?: return@forEach
+                            l.song?.let(::sanitizeBackupSong)?.let { song ->
+                                dao.upsertListenSong(ListenSongEntity(cleanVid, encodeSong(song)))
+                            }
+                            dao.insertListen(
+                                ListenEntity(
+                                    videoId = cleanVid,
+                                    playedAt = l.playedAt.coerceAtLeast(0L),
+                                    secs = l.secs.coerceIn(0L, 86_400L)
+                                )
+                            )
+                        }
+
+                        // Deduplicate playlists against existing ones using cloudKey and (normalizedTitle, trackSignature)
+                        val existingPlaylists = dao.getPlaylistsOnce()
+                        val existingCloudKeys = existingPlaylists.mapTo(HashSet()) { it.cloudKey }
+                        val existingSignatures = existingPlaylists.map { existing ->
+                            val existingTracks = dao.getPlaylistTracks(existing.id).map { it.videoId }
+                            normalizePlaylistTitle(existing.title) to playlistTrackSignature(existingTracks)
+                        }.toMutableSet()
+
+                        var count = 0
+                        payload.playlists.take(500).forEachIndexed { plIdx, pl ->
+                            val cleanTracks = pl.tracks.take(5_000).mapNotNull(::sanitizeBackupSong)
+                            val cleanTitle = pl.title.trim().ifBlank { "Playlist" }.take(120)
+                            val requestedKey = pl.cloudKey?.trim()?.takeIf {
+                                it.length in 1..128 &&
+                                    it.matches(VALID_CLOUD_KEY_REGEX) &&
+                                    !it.startsWith("LOCAL", ignoreCase = true)
+                            }
+                            if (requestedKey != null && requestedKey in existingCloudKeys) {
+                                return@forEachIndexed
+                            }
+                            val sigKey = normalizePlaylistTitle(cleanTitle) to playlistTrackSignature(cleanTracks.map { it.videoId })
+                            if (existingSignatures.add(sigKey)) {
+                                val now = System.currentTimeMillis()
+                                val resolvedKey = requestedKey ?: newCloudPlaylistKey()
+                                existingCloudKeys.add(resolvedKey)
+                                val safeRemoteCover = SecurityValidators.sanitizeHttpsUrl(pl.coverUri, 500)
+                                val materializedFile = materializedByPlIdx[plIdx]
+                                val resolvedCover = materializedFile?.let { Uri.fromFile(it).toString() } ?: safeRemoteCover
+                                val trackEntities = cleanTracks.mapIndexed { idx, song ->
+                                    LocalPlaylistTrackEntity(
+                                        playlistId = 0,
+                                        videoId = song.videoId,
+                                        songJson = encodeSong(song),
+                                        position = idx,
+                                        addedAt = now
+                                    )
+                                }
+                                dao.createPlaylistWithTracks(
+                                    LocalPlaylistEntity(
+                                        cloudKey = resolvedKey,
+                                        title = cleanTitle,
+                                        description = pl.description.trim().take(500),
+                                        coverUri = resolvedCover,
+                                        remoteCoverUri = safeRemoteCover,
+                                        coverRemoved = false,
+                                        createdAt = now,
+                                        updatedAt = now,
+                                        syncRevision = 1L
+                                    ),
+                                    trackEntities
+                                )
+                                count++
+                            }
+                        }
+                    count
+                }
+                val countResult = if (database != null) {
+                    database.withTransaction { applyRoomRestore() }
+                } else {
+                    applyRoomRestore()
+                }
+                journal = journal.copy(state = RestoreJournalState.ROOM_APPLIED)
+                writeRestoreJournalAtomically(journal)
+                onAfterRoomRestoreCommit?.invoke()
+
+                // Step 3: Mutate DataStore preferences & taste profile.
+                onBeforeDataStoreRestore?.invoke()
+                prefsRepo.applyBackupWithTaste(clampedPrefs, sanitizedTaste)
+
+                // Step 4: Mark journal COMMITTED before deleting so crash right before cleanup does not revert.
+                onBeforeRestoreFinalize?.invoke()
+                journal = journal.copy(state = RestoreJournalState.COMMITTED)
+                writeRestoreJournalAtomically(journal)
+
+                onBeforeJournalCleanup?.invoke()
+                deleteRestoreJournalStrict()
+
+                BackupRestoreResult(restoredPlaylists = countResult, sourceVersion = payload.version)
+            } catch (err: Throwable) {
+                // Never abandon rollback if caller coroutine was cancelled; never swallow rollback failures.
+                if (journal.state != RestoreJournalState.COMMITTED) {
+                    rollbackFromJournalNonCancellable(journal, originalError = err)
+                }
+                throw err
+            }
         }
     }
+
+    private suspend fun rollbackFromJournalNonCancellable(
+        record: RestoreJournalRecord,
+        originalError: Throwable?
+    ) = withContext(NonCancellable) {
+        var current = record.copy(state = RestoreJournalState.ROLLBACK_IN_PROGRESS)
+        writeRestoreJournalAtomically(current)
+        try {
+            onBeforeRollbackAttempt?.invoke()
+            onRollbackStepExecute?.invoke("room")
+            val preImage = current.roomPreImage.toEntitySnapshot()
+            if (database != null) {
+                database.withTransaction { dao.restoreLibrarySnapshotAtomic(preImage) }
+            } else {
+                dao.restoreLibrarySnapshotAtomic(preImage)
+            }
+
+            onRollbackStepExecute?.invoke("datastore")
+            prefsRepo.restoreSerializablePreferencesSnapshot(current.prefsPreImage)
+
+            onRollbackStepExecute?.invoke("covers")
+            val pathsToRemove = LinkedHashSet<String>(current.createdCoverPaths)
+            val coversDir = File(context.filesDir, "playlist_covers")
+            val opPrefix = "restore_${current.operationId}_"
+            if (coversDir.isDirectory) {
+                coversDir.listFiles()?.forEach { f ->
+                    if (f.name.startsWith(opPrefix)) {
+                        pathsToRemove.add(f.absolutePath)
+                    }
+                }
+            }
+            for (path in pathsToRemove) {
+                val f = File(path)
+                if (f.exists() && !f.delete()) {
+                    throw java.io.IOException("Failed to delete cover artifact during rollback: $path")
+                }
+            }
+
+            onRollbackStepExecute?.invoke("cleanup")
+            deleteRestoreJournalStrict()
+        } catch (rollbackErr: Throwable) {
+            val failedRecord = current.copy(
+                state = RestoreJournalState.ROLLBACK_FAILED,
+                lastError = (rollbackErr.message ?: rollbackErr::class.java.simpleName).take(300)
+            )
+            kotlin.runCatching { writeRestoreJournalAtomically(failedRecord) }
+            throw RestoreRollbackException(rollbackErr, originalError)
+        }
+    }
+
+    private fun LibraryRestoreSnapshot.toSerializable(): SerializableRoomSnapshot =
+        SerializableRoomSnapshot(
+            likedSongs = likedSongs.map { SerializableLikedSong(it.videoId, it.songJson, it.likedAt) },
+            blockedArtists = blockedArtists.map { SerializableBlockedArtist(it.name, it.channelId, it.blockedAt) },
+            savedAlbums = savedAlbums.map { BackupSavedAlbum(it.albumId, it.title, it.subtitle, it.thumbnail, it.savedAt) },
+            followedArtists = followedArtists.map { BackupFollowedArtist(it.channelId, it.name, it.thumbnail, it.subscribers, it.followedAt) },
+            shortcuts = shortcuts.map { BackupShortcut(it.id, it.kind, it.title, it.subtitle, it.thumbnail, it.position) },
+            searchHistory = searchHistory.map { BackupSearchHistoryItem(it.query, it.searchedAt) },
+            listenSongs = listenSongs.map { SerializableListenSong(it.videoId, it.songJson) },
+            listens = listens.map { SerializableListenRow(it.id, it.videoId, it.playedAt, it.secs) },
+            playlists = playlists.map {
+                SerializableLocalPlaylist(
+                    id = it.id,
+                    cloudKey = it.cloudKey,
+                    title = it.title,
+                    description = it.description,
+                    coverUri = it.coverUri,
+                    remoteCoverUri = it.remoteCoverUri,
+                    coverRemoved = it.coverRemoved,
+                    createdAt = it.createdAt,
+                    updatedAt = it.updatedAt,
+                    syncRevision = it.syncRevision
+                )
+            },
+            playlistTracks = playlistTracks.map {
+                SerializableLocalPlaylistTrack(
+                    id = it.id,
+                    playlistId = it.playlistId,
+                    videoId = it.videoId,
+                    songJson = it.songJson,
+                    position = it.position,
+                    addedAt = it.addedAt
+                )
+            },
+            playlistTrackOps = playlistTrackOps.map {
+                SerializablePlaylistTrackOp(
+                    playlistId = it.playlistId,
+                    videoId = it.videoId,
+                    deleted = it.deleted,
+                    timestampMs = it.timestampMs,
+                    opSeq = it.opSeq,
+                    deviceId = it.deviceId,
+                    opId = it.opId
+                )
+            },
+            playlistFieldOps = playlistFieldOps.map {
+                SerializablePlaylistFieldOp(
+                    playlistId = it.playlistId,
+                    fieldName = it.fieldName,
+                    timestampMs = it.timestampMs,
+                    opSeq = it.opSeq,
+                    deviceId = it.deviceId,
+                    opId = it.opId
+                )
+            }
+        )
+
+    private fun SerializableRoomSnapshot.toEntitySnapshot(): LibraryRestoreSnapshot =
+        LibraryRestoreSnapshot(
+            likedSongs = likedSongs.map { LikedSongEntity(it.videoId, it.songJson, it.likedAt) },
+            blockedArtists = blockedArtists.map { BlockedArtistEntity(it.name, it.channelId, it.blockedAt) },
+            savedAlbums = savedAlbums.map { SavedAlbumEntity(it.albumId, it.title, it.subtitle, it.thumbnail, it.savedAt) },
+            followedArtists = followedArtists.map { FollowedArtistEntity(it.channelId, it.name, it.thumbnail, it.subscribers, it.followedAt) },
+            shortcuts = shortcuts.map { ShortcutEntity(it.id, it.kind, it.title, it.subtitle, it.thumbnail, it.position) },
+            searchHistory = searchHistory.map { SearchHistoryEntity(it.query, it.searchedAt) },
+            listenSongs = listenSongs.map { ListenSongEntity(it.videoId, it.songJson) },
+            listens = listens.map { ListenEntity(it.id, it.videoId, it.playedAt, it.secs) },
+            playlists = playlists.map {
+                LocalPlaylistEntity(
+                    id = it.id,
+                    cloudKey = it.cloudKey,
+                    title = it.title,
+                    description = it.description,
+                    coverUri = it.coverUri,
+                    remoteCoverUri = it.remoteCoverUri,
+                    coverRemoved = it.coverRemoved,
+                    createdAt = it.createdAt,
+                    updatedAt = it.updatedAt,
+                    syncRevision = it.syncRevision
+                )
+            },
+            playlistTracks = playlistTracks.map {
+                LocalPlaylistTrackEntity(
+                    id = it.id,
+                    playlistId = it.playlistId,
+                    videoId = it.videoId,
+                    songJson = it.songJson,
+                    position = it.position,
+                    addedAt = it.addedAt
+                )
+            },
+            playlistTrackOps = playlistTrackOps.map {
+                PlaylistTrackOpEntity(
+                    playlistId = it.playlistId,
+                    videoId = it.videoId,
+                    deleted = it.deleted,
+                    timestampMs = it.timestampMs,
+                    opSeq = it.opSeq,
+                    deviceId = it.deviceId,
+                    opId = it.opId
+                )
+            },
+            playlistFieldOps = playlistFieldOps.map {
+                PlaylistFieldOpEntity(
+                    playlistId = it.playlistId,
+                    fieldName = it.fieldName,
+                    timestampMs = it.timestampMs,
+                    opSeq = it.opSeq,
+                    deviceId = it.deviceId,
+                    opId = it.opId
+                )
+            }
+        )
 
     private fun sanitizeBackupSong(song: SongItem): SongItem? {
         if (song.isLocal || song.videoId.startsWith(LOCAL_SONG_PREFIX)) return null
@@ -1405,6 +1825,7 @@ class VelunaRepository(
     }
 
     companion object {
+        const val RESTORE_JOURNAL_FILENAME = "restore_journal.json"
         private const val MAX_PLAYLIST_IMPORT_BYTES = 5 * 1024 * 1024
         private const val MAX_COVER_BYTES = 8 * 1024 * 1024
         private const val MAX_COVER_DIMENSION = 4096

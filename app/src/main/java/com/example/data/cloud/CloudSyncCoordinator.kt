@@ -9,12 +9,21 @@ import com.example.data.local.BlockedArtistEntity
 import com.example.data.local.LikedSongEntity
 import com.example.data.local.LocalPlaylistEntity
 import com.example.data.local.LocalPlaylistTrackEntity
+import com.example.data.local.PlaylistFieldNames
+import com.example.data.local.PlaylistFieldOpEntity
+import com.example.data.local.PlaylistTrackOpEntity
 import com.example.data.local.SyncBaselineEntity
 import com.example.data.local.SyncEntityTypes
 import com.example.data.local.SyncTombstoneEntity
 import com.example.data.local.UserPrefsRepository
 import com.example.data.local.VelunaDao
 import com.example.data.local.VelunaUserPrefs
+import com.example.data.repository.SerializableBlockedArtist
+import com.example.data.repository.SerializableLikedSong
+import com.example.data.repository.SerializableLocalPlaylist
+import com.example.data.repository.SerializableLocalPlaylistTrack
+import com.example.data.repository.SerializablePlaylistFieldOp
+import com.example.data.repository.SerializablePlaylistTrackOp
 import com.example.data.repository.VelunaRepository
 import com.example.model.AudioQuality
 import com.example.model.LOCAL_PLAYLIST_PREFIX
@@ -37,7 +46,10 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -50,7 +62,13 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+import java.io.File
+import java.io.FileOutputStream
 import java.lang.ref.WeakReference
 import java.time.Instant
 import java.time.ZoneId
@@ -76,8 +94,37 @@ data class CloudAuthUiState(
     val pendingSignOutConfirmCount: Int? = null,
     val isDeletingAccount: Boolean = false,
     val deleteAccountError: String? = null,
-    val needsRetryAuthDelete: Boolean = false
+    val needsRetryAuthDelete: Boolean = false,
+    val hasUnownedDataConflict: Boolean = false,
+    val unownedDataItemCount: Int = 0
 )
+
+@Serializable
+internal data class SerializableSyncTombstone(
+    val entityType: String,
+    val entityKey: String,
+    val clientUpdatedAt: Long,
+    val deletedAt: Long
+)
+
+@Serializable
+internal data class UnownedAccountDataQuarantine(
+    val createdAtMs: Long,
+    val likedSongs: List<SerializableLikedSong> = emptyList(),
+    val playlists: List<SerializableLocalPlaylist> = emptyList(),
+    val playlistTracks: List<SerializableLocalPlaylistTrack> = emptyList(),
+    val playlistTrackOps: List<SerializablePlaylistTrackOp> = emptyList(),
+    val playlistFieldOps: List<SerializablePlaylistFieldOp> = emptyList(),
+    val blockedArtists: List<SerializableBlockedArtist> = emptyList(),
+    val tombstones: List<SerializableSyncTombstone> = emptyList(),
+    val tasteProfile: TasteProfile? = null,
+    val displayName: String = "Listener",
+    val prefsUpdatedAtMs: Long = 0L
+) {
+    val itemCount: Int
+        get() = likedSongs.size + playlists.size + blockedArtists.size +
+            (tasteProfile?.let { it.seedArtists.size + it.seedSongs.size } ?: 0)
+}
 
 class CloudSyncCoordinator(
     private val context: Context,
@@ -86,12 +133,16 @@ class CloudSyncCoordinator(
     private val repository: VelunaRepository,
     private val cloudRepo: CloudSyncRepository,
     private val auth: FirebaseAuth = Firebase.auth,
-    ioDispatcher: CoroutineDispatcher = Dispatchers.IO
+    ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val stateDir: File? = null,
+    private val autoStartSync: Boolean = true
 ) {
     private val scope = CoroutineScope(SupervisorJob() + ioDispatcher)
     private val syncMutex = Mutex()
+    private val transitionMutex = Mutex()
     private val suppressLocalPushCount = AtomicInteger(0)
     private val isSigningOut = AtomicBoolean(false)
+    private val json = Json { ignoreUnknownKeys = true }
 
     private val _authState = MutableStateFlow(buildUiState(auth.currentUser))
     val authState: StateFlow<CloudAuthUiState> = _authState.asStateFlow()
@@ -106,6 +157,10 @@ class CloudSyncCoordinator(
     private var retryJob: Job? = null
     private var retryAttempt = 0
     internal var signOutFlushTimeoutMs: Long = 10_000L
+
+    // Test hooks for process-death / cancellation injection around account transitions
+    internal var onBeforeAccountTransitionWipe: (suspend (fromUid: String, toUid: String) -> Unit)? = null
+    internal var onAfterAccountTransitionWipeBeforeFinalize: (suspend (fromUid: String, toUid: String) -> Unit)? = null
 
     // Track failed operations so honest sync status never masks partial failures
     private val failedCollections = ConcurrentHashMap<String, String>()
@@ -130,7 +185,7 @@ class CloudSyncCoordinator(
         synchronized(syncLifecycleLock) {
             if (user == null) {
                 stopSyncForSignedOutLocked(clearFailureState = !isSigningOut.get())
-            } else if (!isSigningOut.get() && activeUserId != user.uid) {
+            } else if (autoStartSync && !isSigningOut.get() && activeUserId != user.uid) {
                 startSyncForUserLocked(user)
             }
         }
@@ -138,10 +193,12 @@ class CloudSyncCoordinator(
 
     init {
         auth.addAuthStateListener(authStateListener)
-        auth.currentUser?.let { existing ->
-            synchronized(syncLifecycleLock) {
-                if (activeUserId != existing.uid) {
-                    startSyncForUserLocked(existing)
+        if (autoStartSync) {
+            auth.currentUser?.let { existing ->
+                synchronized(syncLifecycleLock) {
+                    if (activeUserId != existing.uid) {
+                        startSyncForUserLocked(existing)
+                    }
                 }
             }
         }
@@ -483,6 +540,7 @@ class CloudSyncCoordinator(
             if (clearAllAccountData) {
                 dao.clearAccountData()
                 prefsRepo.resetUserKeys()
+                deleteQuarantineFileIfExists()
             } else {
                 dao.clearSyncedAccountData()
                 prefsRepo.resetCloudSyncStateForSignOut()
@@ -506,6 +564,131 @@ class CloudSyncCoordinator(
     internal suspend fun syncNowAndAwait(): Boolean {
         val user = auth.currentUser ?: return false
         return runBidirectionalMerge(user)
+    }
+
+    fun resolveUnownedDataMergeIntoCurrentAccount() {
+        val user = auth.currentUser ?: return
+        if (isSigningOut.get()) return
+        scope.launch {
+            resolveUnownedDataMergeAndAwait()
+        }
+    }
+
+    internal suspend fun resolveUnownedDataMergeAndAwait(): Boolean {
+        val user = auth.currentUser ?: return false
+        _authState.update { it.copy(isSyncing = true, errorMessage = null, syncStatus = "Migrating library…") }
+        val restored = syncMutex.withLock {
+            suppressLocalPushCount.incrementAndGet()
+            try {
+                val quarantine = readQuarantineFile()
+                prefsRepo.setActiveCloudUid(user.uid)
+                prefsRepo.setPendingAccountTransitionUid(null)
+                if (quarantine != null) {
+                    val liked = quarantine.likedSongs.map { LikedSongEntity(it.videoId, it.songJson, it.likedAt) }
+                    if (liked.isNotEmpty()) dao.insertLikedSongs(liked)
+                    val blocked = quarantine.blockedArtists.map { BlockedArtistEntity(it.name, it.channelId, it.blockedAt) }
+                    if (blocked.isNotEmpty()) dao.insertBlockedArtists(blocked)
+                    val tombs = quarantine.tombstones.map { SyncTombstoneEntity(it.entityType, it.entityKey, it.clientUpdatedAt, it.deletedAt) }
+                    if (tombs.isNotEmpty()) dao.insertTombstones(tombs)
+
+                    for (pl in quarantine.playlists) {
+                        val tracks = quarantine.playlistTracks.filter { it.playlistId == pl.id }.sortedBy { it.position }
+                        val trkOps = quarantine.playlistTrackOps.filter { it.playlistId == pl.id }
+                        val fldOps = quarantine.playlistFieldOps.filter { it.playlistId == pl.id }
+                        dao.createPlaylistWithTracks(
+                            playlist = LocalPlaylistEntity(
+                                cloudKey = pl.cloudKey,
+                                title = pl.title,
+                                description = pl.description,
+                                coverUri = pl.coverUri,
+                                remoteCoverUri = pl.remoteCoverUri,
+                                coverRemoved = pl.coverRemoved,
+                                createdAt = pl.createdAt,
+                                updatedAt = pl.updatedAt,
+                                syncRevision = pl.syncRevision
+                            ),
+                            tracks = tracks.map {
+                                LocalPlaylistTrackEntity(
+                                    playlistId = 0,
+                                    videoId = it.videoId,
+                                    songJson = it.songJson,
+                                    position = it.position,
+                                    addedAt = it.addedAt
+                                )
+                            },
+                            trackOps = trkOps.map {
+                                PlaylistTrackOpEntity(0, it.videoId, it.deleted, it.timestampMs, it.opSeq, it.deviceId, it.opId)
+                            }.takeIf { it.isNotEmpty() },
+                            fieldOps = fldOps.map {
+                                PlaylistFieldOpEntity(0, it.fieldName, it.timestampMs, it.opSeq, it.deviceId, it.opId)
+                            }.takeIf { it.isNotEmpty() }
+                        )
+                    }
+                    quarantine.tasteProfile?.let { qp ->
+                        prefsRepo.saveTasteProfile(qp, touchProfileTimestamp = false)
+                    }
+                    if (quarantine.displayName.isNotBlank() && quarantine.displayName != "Listener") {
+                        prefsRepo.setDisplayName(quarantine.displayName, updatedAtMs = quarantine.prefsUpdatedAtMs)
+                    }
+                    deleteQuarantineFileIfExists()
+                }
+                true
+            } finally {
+                suppressLocalPushCount.decrementAndGet()
+            }
+        }
+        if (!restored) return false
+        _authState.update { it.copy(hasUnownedDataConflict = false, unownedDataItemCount = 0) }
+        val ok = runBidirectionalMerge(user)
+        synchronized(syncLifecycleLock) {
+            if (!_authState.value.hasUnownedDataConflict &&
+                activeUserId == user.uid &&
+                auth.currentUser?.uid == user.uid &&
+                watcherJobs.isEmpty()
+            ) {
+                launchWatchersLocked(user)
+            }
+        }
+        return ok
+    }
+
+    fun resolveUnownedDataDiscardAndSyncAccount() {
+        val user = auth.currentUser ?: return
+        if (isSigningOut.get()) return
+        scope.launch {
+            resolveUnownedDataDiscardAndAwait()
+        }
+    }
+
+    internal suspend fun resolveUnownedDataDiscardAndAwait(): Boolean {
+        val user = auth.currentUser ?: return false
+        _authState.update { it.copy(isSyncing = true, errorMessage = null, syncStatus = "Syncing cloud account…") }
+        syncMutex.withLock {
+            suppressLocalPushCount.incrementAndGet()
+            try {
+                dao.clearSyncedAccountData()
+                prefsRepo.resetCloudSyncStateForSignOut()
+                cloudRepo.clearSessionCache()
+                failedCollections.clear()
+                deleteQuarantineFileIfExists()
+                prefsRepo.setPendingAccountTransitionUid(null)
+                prefsRepo.setActiveCloudUid(user.uid)
+            } finally {
+                suppressLocalPushCount.decrementAndGet()
+            }
+        }
+        _authState.update { it.copy(hasUnownedDataConflict = false, unownedDataItemCount = 0) }
+        val ok = runBidirectionalMerge(user)
+        synchronized(syncLifecycleLock) {
+            if (!_authState.value.hasUnownedDataConflict &&
+                activeUserId == user.uid &&
+                auth.currentUser?.uid == user.uid &&
+                watcherJobs.isEmpty()
+            ) {
+                launchWatchersLocked(user)
+            }
+        }
+        return ok
     }
 
     suspend fun <T> runWithLocalSyncSuppressed(block: suspend () -> T): T = syncMutex.withLock {
@@ -536,12 +719,18 @@ class CloudSyncCoordinator(
         }
     }
 
-    private fun cancelWorkersLocked() {
+    private fun cancelWorkersLocked(): List<Job> {
         retryJob?.cancel()
+        val cancelled = mutableListOf<Job>()
+        retryJob?.let(cancelled::add)
         retryJob = null
         retryAttempt = 0
-        watcherJobs.forEach { it.cancel() }
+        watcherJobs.forEach {
+            it.cancel()
+            cancelled.add(it)
+        }
         watcherJobs.clear()
+        return cancelled
     }
 
     private fun stopSyncForSignedOutLocked(clearFailureState: Boolean = true) {
@@ -555,13 +744,28 @@ class CloudSyncCoordinator(
     private fun startSyncForUserLocked(user: FirebaseUser) {
         if (isSigningOut.get()) return
         if (activeUserId == user.uid && watcherJobs.isNotEmpty()) return
-        cancelWorkersLocked()
+        val priorJobs = cancelWorkersLocked() + listOfNotNull(signOutJob)
         activeUserId = user.uid
 
         val mainJob = scope.launch {
+            transitionMutex.withLock {
+                val me = currentCoroutineContext()[Job]
+                for (prev in priorJobs) {
+                    if (prev != me) {
+                        runCatching { prev.cancelAndJoin() }
+                    }
+                }
+            }
+            if (activeUserId != user.uid || auth.currentUser?.uid != user.uid || isSigningOut.get()) {
+                return@launch
+            }
             runBidirectionalMerge(user)
             synchronized(syncLifecycleLock) {
-                if (activeUserId == user.uid && auth.currentUser?.uid == user.uid && !isSigningOut.get()) {
+                if (!_authState.value.hasUnownedDataConflict &&
+                    activeUserId == user.uid &&
+                    auth.currentUser?.uid == user.uid &&
+                    !isSigningOut.get()
+                ) {
                     launchWatchersLocked(user)
                 }
             }
@@ -697,120 +901,357 @@ class CloudSyncCoordinator(
         prefsRepo.markLocalLikesScrubbed()
     }
 
-    private suspend fun ensureAccountOwnershipIsolatedLocked(uid: String) {
+    private fun quarantineFile(): File =
+        File(stateDir ?: context.noBackupFilesDir, UNOWNED_QUARANTINE_FILENAME)
+
+    internal fun readQuarantineFile(): UnownedAccountDataQuarantine? {
+        val file = quarantineFile()
+        if (!file.exists()) return null
+        return runCatching { json.decodeFromString<UnownedAccountDataQuarantine>(file.readText(Charsets.UTF_8)) }.getOrNull()
+    }
+
+    private fun writeQuarantineAtomically(quarantine: UnownedAccountDataQuarantine) {
+        val file = quarantineFile()
+        file.parentFile?.mkdirs()
+        val tmp = File(file.parentFile, "$UNOWNED_QUARANTINE_FILENAME.tmp")
+        val bytes = json.encodeToString(quarantine).toByteArray(Charsets.UTF_8)
+        try {
+            FileOutputStream(tmp).use { out ->
+                out.write(bytes)
+                out.flush()
+                out.fd.sync()
+            }
+            if (!tmp.renameTo(file)) {
+                FileOutputStream(file).use { dst ->
+                    dst.write(bytes)
+                    dst.flush()
+                    dst.fd.sync()
+                }
+                tmp.delete()
+            }
+        } catch (t: Throwable) {
+            tmp.delete()
+            throw t
+        }
+    }
+
+    private fun deleteQuarantineFileIfExists() {
+        val file = quarantineFile()
+        if (file.exists() && !file.delete()) {
+            throw java.io.IOException("Failed to remove resolved quarantine file")
+        }
+        File(file.parentFile, "$UNOWNED_QUARANTINE_FILENAME.tmp").takeIf { it.exists() }?.delete()
+    }
+
+    private suspend fun ensureAccountOwnershipIsolatedLocked(uid: String): Boolean {
+        val pendingTransitionUid = prefsRepo.getPendingAccountTransitionUid()
+        if (pendingTransitionUid != null) {
+            withContext(NonCancellable) {
+                dao.clearSyncedAccountData()
+                prefsRepo.resetCloudSyncStateForSignOut()
+                cloudRepo.clearSessionCache()
+                failedCollections.clear()
+                prefsRepo.setActiveCloudUid(uid)
+                prefsRepo.setPendingAccountTransitionUid(null)
+            }
+            return true
+        }
+
         val persistedUid = prefsRepo.getActiveCloudUid()
         if (persistedUid != null && persistedUid != uid) {
-            dao.clearSyncedAccountData()
-            prefsRepo.resetCloudSyncStateForSignOut()
-            cloudRepo.clearSessionCache()
-            failedCollections.clear()
+            withContext(NonCancellable) {
+                prefsRepo.setPendingAccountTransitionUid(uid)
+                onBeforeAccountTransitionWipe?.invoke(persistedUid, uid)
+                dao.clearSyncedAccountData()
+                prefsRepo.resetCloudSyncStateForSignOut()
+                cloudRepo.clearSessionCache()
+                failedCollections.clear()
+                onAfterAccountTransitionWipeBeforeFinalize?.invoke(persistedUid, uid)
+                prefsRepo.setActiveCloudUid(uid)
+                prefsRepo.setPendingAccountTransitionUid(null)
+            }
+            return true
         }
-        if (persistedUid != uid) {
+
+        if (persistedUid == null) {
+            val existingQuarantine = readQuarantineFile()
+            if (existingQuarantine != null) {
+                _authState.update {
+                    it.copy(
+                        isSyncing = false,
+                        hasUnownedDataConflict = true,
+                        unownedDataItemCount = existingQuarantine.itemCount,
+                        syncStatus = "Resolve local library conflict",
+                        errorMessage = null
+                    )
+                }
+                return false
+            }
+
+            val hasForeignBaselines = dao.hasSyncBaselinesForOtherUsers(uid)
+            val hasOwnBaselines = dao.getAllSyncBaselinesForUser(uid).isNotEmpty()
+            val hasLegacySyncMarkers = prefsRepo.hasLegacyCloudSyncMarkers(uid)
+            val playlists = dao.getPlaylistsOnce()
+            val hasLegacyPlaylistUpgradeMarkers = playlists.any {
+                it.cloudKey.startsWith("pl_local_")
+            }
+            val tombstones = dao.getAllTombstones()
+            val localLiked = dao.getLikedSongsOnce().filter { !it.videoId.startsWith(LOCAL_SONG_PREFIX) }
+            val localBlocked = dao.getBlockedArtistsOnce()
+            val localTaste = prefsRepo.tasteProfileFlow.first()
+            val localPrefs = prefsRepo.prefsFlow.first()
+            val hasSyncedContent = playlists.isNotEmpty() ||
+                localLiked.isNotEmpty() ||
+                localBlocked.isNotEmpty() ||
+                tombstones.isNotEmpty() ||
+                localTaste.seedArtists.isNotEmpty() ||
+                localTaste.seedSongs.isNotEmpty()
+
+            val requiresFailClosedQuarantine = hasForeignBaselines ||
+                (hasSyncedContent && !hasOwnBaselines && (hasLegacySyncMarkers || hasLegacyPlaylistUpgradeMarkers || tombstones.isNotEmpty()))
+
+            if (requiresFailClosedQuarantine) {
+                val quarantine = UnownedAccountDataQuarantine(
+                    createdAtMs = System.currentTimeMillis(),
+                    likedSongs = localLiked.map { SerializableLikedSong(it.videoId, it.songJson, it.likedAt) },
+                    playlists = playlists.map {
+                        SerializableLocalPlaylist(
+                            id = it.id,
+                            cloudKey = it.cloudKey,
+                            title = it.title,
+                            description = it.description,
+                            coverUri = it.coverUri,
+                            remoteCoverUri = it.remoteCoverUri,
+                            coverRemoved = it.coverRemoved,
+                            createdAt = it.createdAt,
+                            updatedAt = it.updatedAt,
+                            syncRevision = it.syncRevision
+                        )
+                    },
+                    playlistTracks = dao.getAllPlaylistTracksOnce().map {
+                        SerializableLocalPlaylistTrack(it.id, it.playlistId, it.videoId, it.songJson, it.position, it.addedAt)
+                    },
+                    playlistTrackOps = dao.getAllPlaylistTrackOpsOnce().map {
+                        SerializablePlaylistTrackOp(it.playlistId, it.videoId, it.deleted, it.timestampMs, it.opSeq, it.deviceId, it.opId)
+                    },
+                    playlistFieldOps = dao.getAllPlaylistFieldOpsOnce().map {
+                        SerializablePlaylistFieldOp(it.playlistId, it.fieldName, it.timestampMs, it.opSeq, it.deviceId, it.opId)
+                    },
+                    blockedArtists = localBlocked.map { SerializableBlockedArtist(it.name, it.channelId, it.blockedAt) },
+                    tombstones = tombstones.map {
+                        SerializableSyncTombstone(it.entityType, it.entityKey, it.clientUpdatedAt, it.deletedAt)
+                    },
+                    tasteProfile = localTaste,
+                    displayName = localPrefs.userDisplayName,
+                    prefsUpdatedAtMs = prefsRepo.getPrefsUpdatedAt()
+                )
+                writeQuarantineAtomically(quarantine)
+                withContext(NonCancellable) {
+                    dao.clearSyncedAccountData()
+                    prefsRepo.resetCloudSyncStateForSignOut()
+                    cloudRepo.clearSessionCache()
+                    failedCollections.clear()
+                }
+                _authState.update {
+                    it.copy(
+                        isSyncing = false,
+                        hasUnownedDataConflict = true,
+                        unownedDataItemCount = quarantine.itemCount,
+                        syncStatus = "Resolve local library conflict",
+                        errorMessage = null
+                    )
+                }
+                return false
+            }
+
             prefsRepo.setActiveCloudUid(uid)
         }
+        return true
     }
 
     private suspend fun runBidirectionalMerge(
         user: FirebaseUser,
         allowDuringSignOut: Boolean = false
-    ): Boolean = syncMutex.withLock {
-        if (auth.currentUser?.uid != user.uid) return@withLock false
-        if (!allowDuringSignOut && isSigningOut.get()) return@withLock false
+    ): Boolean {
+        if (auth.currentUser?.uid != user.uid) return false
+        if (!allowDuringSignOut && isSigningOut.get()) return false
 
-        _authState.update {
-            it.copy(isSyncing = true, syncStatus = "Syncing…", errorMessage = null)
-        }
-        suppressLocalPushCount.incrementAndGet()
+        // Always recover any interrupted backup restore journal BEFORE locking syncMutex or talking to Firestore
         try {
-            ensureAccountOwnershipIsolatedLocked(user.uid)
-            scrubLocalLikesOnceIfNeeded()
-
-            val now = System.currentTimeMillis()
-            val tombstoneCutoff = now - TOMBSTONE_RETENTION_MS
-            dao.purgeOldTombstones(tombstoneCutoff)
-
-            val lastSuccessAt = prefsRepo.getLastSuccessfulSyncAtMs(user.uid)
-            val hasDurableBaselines = dao.getAllSyncBaselinesForUser(user.uid).isNotEmpty()
-            var watermarks = if (hasDurableBaselines) {
-                SyncWatermarks(
-                    likedMs = prefsRepo.getSyncWatermark(UserPrefsRepository.WATERMARK_LIKED),
-                    playlistsMs = prefsRepo.getSyncWatermark(UserPrefsRepository.WATERMARK_PLAYLISTS),
-                    seedsMs = prefsRepo.getSyncWatermark(UserPrefsRepository.WATERMARK_SEEDS),
-                    hiddenMs = prefsRepo.getSyncWatermark(UserPrefsRepository.WATERMARK_HIDDEN)
-                )
-            } else {
-                SyncWatermarks()
-            }
-
-            if (watermarks.likedMs == 0L && watermarks.playlistsMs == 0L) {
-                cloudRepo.purgeExpiredCloudTombstones(user.uid, tombstoneCutoff)
-            }
-
-            var snapshot = cloudRepo.fetchAccountSnapshot(watermarks)
-            if (auth.currentUser?.uid != user.uid) return@withLock false
-            if (!allowDuringSignOut && isSigningOut.get()) return@withLock false
-
-            val cloudCompactedBefore = snapshot.profile?.tombstoneCompactedBeforeMs ?: 0L
-            val staleDueToCompaction = cloudCompactedBefore > 0L &&
-                lastSuccessAt in 1L..cloudCompactedBefore
-            if (staleDueToCompaction && watermarks != SyncWatermarks()) {
-                watermarks = SyncWatermarks()
-                prefsRepo.clearAllSyncWatermarks()
-                snapshot = cloudRepo.fetchAccountSnapshot(watermarks)
-                if (auth.currentUser?.uid != user.uid) return@withLock false
-                if (!allowDuringSignOut && isSigningOut.get()) return@withLock false
-            }
-            val compactionCutoffForLocal = if (staleDueToCompaction) cloudCompactedBefore else 0L
-
-            val resolvedDisplayName = mergeProfileAndSeedsLocked(user, snapshot, now, compactionCutoffForLocal)
-            mergeLikedSongsLocked(user.uid, snapshot, watermarks, now, compactionCutoffForLocal)
-            mergePlaylistsLocked(user.uid, snapshot, watermarks, now, compactionCutoffForLocal)
-            mergeHiddenArtistsLocked(user.uid, snapshot, watermarks, now, compactionCutoffForLocal)
-
-            if (watermarks.playlistsMs == 0L) {
-                dao.getPlaylistsOnce().forEach { pl ->
-                    cloudRepo.garbageCollectPlaylistSnapshots(pl.cloudKey)
-                }
-            }
-
-            failedCollections.clear()
-            retryAttempt = 0
-            val doneAt = System.currentTimeMillis()
-            prefsRepo.setLastSuccessfulSyncAtMs(user.uid, doneAt)
-            _authState.update {
-                it.copy(
-                    displayName = resolvedDisplayName,
-                    isSyncing = false,
-                    syncStatus = formatUpToDate(doneAt),
-                    lastSyncedAtMs = doneAt,
-                    errorMessage = null,
-                    pendingUnsyncedCount = 0
-                )
-            }
-            true
+            repository.recoverIncompleteRestoreIfNeeded()
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            if (BuildConfig.DEBUG) Log.e(TAG, "Cloud sync failed", e)
-            val safeMsg = SecurityValidators.safeUserErrorMessage(e, "Cloud sync failed.")
-            failedCollections["merge"] = safeMsg
-            val pendingCount = suspendRunCatching { countUnsyncedChangesFor(user.uid) }
-                .getOrDefault(failedCollections.size)
-                .coerceAtLeast(1)
+            val safeMsg = SecurityValidators.safeUserErrorMessage(e, "Pending backup recovery failed.")
+            failedCollections["restore_recovery"] = safeMsg
             _authState.update {
-                it.copy(
-                    isSyncing = false,
-                    syncStatus = "Sync failed: $safeMsg",
-                    errorMessage = safeMsg,
-                    pendingUnsyncedCount = pendingCount
-                )
+                it.copy(isSyncing = false, syncStatus = "Sync failed: $safeMsg", errorMessage = safeMsg)
             }
-            if (!isSigningOut.get()) {
-                scheduleRetry(user)
+            return false
+        }
+
+        return syncMutex.withLock {
+            if (auth.currentUser?.uid != user.uid) return@withLock false
+            if (!allowDuringSignOut && isSigningOut.get()) return@withLock false
+
+            _authState.update {
+                it.copy(isSyncing = true, syncStatus = "Syncing…", errorMessage = null)
             }
-            false
-        } finally {
-            suppressLocalPushCount.decrementAndGet()
+            suppressLocalPushCount.incrementAndGet()
+            try {
+                if (!ensureAccountOwnershipIsolatedLocked(user.uid)) {
+                    return@withLock false
+                }
+                scrubLocalLikesOnceIfNeeded()
+
+                val now = System.currentTimeMillis()
+                val tombstoneCutoff = now - TOMBSTONE_RETENTION_MS
+                dao.purgeOldTombstones(tombstoneCutoff)
+
+                val lastSuccessAt = prefsRepo.getLastSuccessfulSyncAtMs(user.uid)
+                val hasDurableBaselines = dao.getAllSyncBaselinesForUser(user.uid).isNotEmpty()
+                val hadLocalSyncedRecords = dao.getPlaylistsOnce().isNotEmpty() ||
+                    dao.getLikedSongsOnce().any { !it.videoId.startsWith(LOCAL_SONG_PREFIX) } ||
+                    dao.getBlockedArtistsOnce().isNotEmpty() ||
+                    dao.getAllTombstones().isNotEmpty()
+                var watermarks = if (hasDurableBaselines) {
+                    SyncWatermarks(
+                        likedMs = prefsRepo.getSyncWatermark(UserPrefsRepository.WATERMARK_LIKED),
+                        playlistsMs = prefsRepo.getSyncWatermark(UserPrefsRepository.WATERMARK_PLAYLISTS),
+                        seedsMs = prefsRepo.getSyncWatermark(UserPrefsRepository.WATERMARK_SEEDS),
+                        hiddenMs = prefsRepo.getSyncWatermark(UserPrefsRepository.WATERMARK_HIDDEN)
+                    )
+                } else {
+                    SyncWatermarks()
+                }
+
+                if (watermarks.likedMs == 0L && watermarks.playlistsMs == 0L) {
+                    cloudRepo.purgeExpiredCloudTombstones(user.uid, tombstoneCutoff)
+                }
+
+                var snapshot = cloudRepo.fetchAccountSnapshot(watermarks)
+                if (auth.currentUser?.uid != user.uid) return@withLock false
+                if (!allowDuringSignOut && isSigningOut.get()) return@withLock false
+
+                val cloudCompactedBefore = snapshot.profile?.tombstoneCompactedBeforeMs ?: 0L
+                val staleDueToCompaction = cloudCompactedBefore > 0L && (
+                    lastSuccessAt in 1L..cloudCompactedBefore ||
+                        (lastSuccessAt == 0L && (hasDurableBaselines || hadLocalSyncedRecords))
+                    )
+                if (staleDueToCompaction && watermarks != SyncWatermarks()) {
+                    watermarks = SyncWatermarks()
+                    prefsRepo.clearAllSyncWatermarks()
+                    snapshot = cloudRepo.fetchAccountSnapshot(watermarks)
+                    if (auth.currentUser?.uid != user.uid) return@withLock false
+                    if (!allowDuringSignOut && isSigningOut.get()) return@withLock false
+                }
+                val compactionCutoffForLocal = if (staleDueToCompaction) cloudCompactedBefore else 0L
+
+                var resolvedDisplayName = prefsRepo.prefsFlow.first().userDisplayName
+                failedCollections.remove("restore_recovery")
+
+                try {
+                    resolvedDisplayName = mergeProfileAndSeedsLocked(user, snapshot, now, compactionCutoffForLocal)
+                    failedCollections.remove("profile")
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    failedCollections["profile"] = SecurityValidators.safeUserErrorMessage(e, "Profile sync failed.")
+                }
+
+                try {
+                    mergeLikedSongsLocked(user.uid, snapshot, watermarks, now, compactionCutoffForLocal)
+                    failedCollections.remove("likes")
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    failedCollections["likes"] = SecurityValidators.safeUserErrorMessage(e, "Liked songs sync failed.")
+                }
+
+                try {
+                    mergePlaylistsLocked(user.uid, snapshot, watermarks, now, compactionCutoffForLocal)
+                    failedCollections.remove("playlists")
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    failedCollections["playlists"] = SecurityValidators.safeUserErrorMessage(e, "Playlists sync failed.")
+                }
+
+                try {
+                    mergeHiddenArtistsLocked(user.uid, snapshot, watermarks, now, compactionCutoffForLocal)
+                    failedCollections.remove("hidden")
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    failedCollections["hidden"] = SecurityValidators.safeUserErrorMessage(e, "Hidden artists sync failed.")
+                }
+
+                if (!failedCollections.containsKey("playlists") && watermarks.playlistsMs == 0L) {
+                    dao.getPlaylistsOnce().forEach { pl ->
+                        cloudRepo.garbageCollectPlaylistSnapshots(pl.cloudKey)
+                    }
+                }
+
+                if (failedCollections.isNotEmpty()) {
+                    val firstErr = failedCollections.values.firstOrNull() ?: "Partial sync failure."
+                    val pendingCount = suspendRunCatching { countUnsyncedChangesFor(user.uid) }
+                        .getOrDefault(failedCollections.size)
+                        .coerceAtLeast(1)
+                    _authState.update {
+                        it.copy(
+                            displayName = resolvedDisplayName,
+                            isSyncing = false,
+                            syncStatus = "Sync failed: $firstErr",
+                            errorMessage = firstErr,
+                            pendingUnsyncedCount = pendingCount
+                        )
+                    }
+                    if (!isSigningOut.get()) {
+                        scheduleRetry(user)
+                    }
+                    false
+                } else {
+                    retryAttempt = 0
+                    val doneAt = System.currentTimeMillis()
+                    prefsRepo.setLastSuccessfulSyncAtMs(user.uid, doneAt)
+                    _authState.update {
+                        it.copy(
+                            displayName = resolvedDisplayName,
+                            isSyncing = false,
+                            syncStatus = formatUpToDate(doneAt),
+                            lastSyncedAtMs = doneAt,
+                            errorMessage = null,
+                            pendingUnsyncedCount = 0,
+                            hasUnownedDataConflict = false,
+                            unownedDataItemCount = 0
+                        )
+                    }
+                    true
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (BuildConfig.DEBUG) Log.e(TAG, "Cloud sync failed", e)
+                val safeMsg = SecurityValidators.safeUserErrorMessage(e, "Cloud sync failed.")
+                failedCollections["merge"] = safeMsg
+                val pendingCount = suspendRunCatching { countUnsyncedChangesFor(user.uid) }
+                    .getOrDefault(failedCollections.size)
+                    .coerceAtLeast(1)
+                _authState.update {
+                    it.copy(
+                        isSyncing = false,
+                        syncStatus = "Sync failed: $safeMsg",
+                        errorMessage = safeMsg,
+                        pendingUnsyncedCount = pendingCount
+                    )
+                }
+                if (!isSigningOut.get()) {
+                    scheduleRetry(user)
+                }
+                false
+            } finally {
+                suppressLocalPushCount.decrementAndGet()
+            }
         }
     }
 
@@ -1269,19 +1710,123 @@ class CloudSyncCoordinator(
         }
     }
 
+    private suspend fun getLocalSyncDeviceId(): String =
+        dao.getLocalDeviceClock()?.deviceId?.takeIf { it.isNotBlank() }
+            ?: dao.allocateNextOperationStamp().deviceId
+
+    private suspend fun loadLocalPlaylistCausalState(
+        pl: LocalPlaylistEntity,
+        baselineSnap: PlaylistBaselineSnapshot?,
+        localDeviceId: String
+    ): Triple<Map<String, SyncMutationStamp>, Map<String, BaselineTrackOp>, Boolean> {
+        val rawFields = dao.getPlaylistFieldOps(pl.id).associate {
+            it.fieldName to SyncMutationStamp(it.timestampMs, it.opSeq, it.deviceId, it.opId)
+        }
+        val rawTracks = dao.getPlaylistTrackOps(pl.id).associate {
+            it.videoId to BaselineTrackOp(
+                deleted = it.deleted,
+                stamp = SyncMutationStamp(it.timestampMs, it.opSeq, it.deviceId, it.opId)
+            )
+        }
+        val maxRecordedTs = (rawFields.values.map { it.timestampMs } + rawTracks.values.map { it.stamp.timestampMs })
+            .maxOrNull() ?: 0L
+        val rawDaoBypassed = rawFields.isEmpty() || (maxRecordedTs > 0L && pl.updatedAt > maxRecordedTs)
+        val effectiveFields = rawFields.toMutableMap()
+        if (rawDaoBypassed) {
+            val fallback = SyncMutationStamp(pl.updatedAt.coerceAtLeast(0L), 0L, localDeviceId)
+            if (baselineSnap == null || pl.title != baselineSnap.title) {
+                effectiveFields[PlaylistFieldNames.TITLE] = fallback
+            }
+            if (baselineSnap == null || pl.description != baselineSnap.description) {
+                effectiveFields[PlaylistFieldNames.DESCRIPTION] = fallback
+            }
+            val localRemoteCover = pl.remoteCoverUri ?: SecurityValidators.sanitizeHttpsUrl(pl.coverUri, 500)
+            if (baselineSnap == null || localRemoteCover != baselineSnap.remoteCoverUri || pl.coverRemoved != baselineSnap.coverRemoved) {
+                effectiveFields[PlaylistFieldNames.COVER] = fallback
+            }
+        }
+
+        val hasNewerOps = if (baselineSnap == null) {
+            false
+        } else {
+            effectiveFields.any { (field, stamp) ->
+                val baseStamp = baselineSnap.fieldStamps[field]
+                baseStamp == null || stamp > baseStamp
+            } || rawTracks.any { (vid, op) ->
+                val baseOp = baselineSnap.trackOps[vid]
+                baseOp == null || baseOp.deleted != op.deleted || op.stamp > baseOp.stamp
+            }
+        }
+        return Triple(effectiveFields, rawTracks, hasNewerOps)
+    }
+
+    private fun buildRoomFieldOps(
+        playlistId: Long,
+        fieldStamps: Map<String, SyncMutationStamp>
+    ): List<PlaylistFieldOpEntity> = fieldStamps.map { (field, stamp) ->
+        PlaylistFieldOpEntity(playlistId, field, stamp.timestampMs, stamp.seq, stamp.deviceId, stamp.opId)
+    }
+
+    private fun buildRoomTrackOps(
+        playlistId: Long,
+        addStamps: Map<String, SyncMutationStamp>,
+        tombstones: Map<String, SyncMutationStamp>
+    ): List<PlaylistTrackOpEntity> {
+        val out = linkedMapOf<String, PlaylistTrackOpEntity>()
+        addStamps.forEach { (vid, stamp) ->
+            out[vid] = PlaylistTrackOpEntity(playlistId, vid, false, stamp.timestampMs, stamp.seq, stamp.deviceId, stamp.opId)
+        }
+        tombstones.forEach { (vid, stamp) ->
+            val cur = out[vid]
+            val curStamp = cur?.let { SyncMutationStamp(it.timestampMs, it.opSeq, it.deviceId, it.opId) }
+            if (curStamp == null || stamp > curStamp) {
+                out[vid] = PlaylistTrackOpEntity(playlistId, vid, true, stamp.timestampMs, stamp.seq, stamp.deviceId, stamp.opId)
+            }
+        }
+        return out.values.toList()
+    }
+
+    private fun buildBaselineTrackOps(
+        addStamps: Map<String, SyncMutationStamp>,
+        tombstones: Map<String, SyncMutationStamp>
+    ): Map<String, BaselineTrackOp> {
+        val out = linkedMapOf<String, BaselineTrackOp>()
+        addStamps.forEach { (vid, stamp) -> out[vid] = BaselineTrackOp(deleted = false, stamp = stamp) }
+        tombstones.forEach { (vid, stamp) ->
+            val cur = out[vid]
+            if (cur == null || stamp > cur.stamp) {
+                out[vid] = BaselineTrackOp(deleted = true, stamp = stamp)
+            }
+        }
+        return out
+    }
+
+    private fun computePlaylistMutationStamp(
+        fallbackUpdatedAt: Long,
+        localDeviceId: String,
+        fieldStamps: Map<String, SyncMutationStamp>,
+        trackAddStamps: Map<String, SyncMutationStamp>,
+        trackTombstones: Map<String, SyncMutationStamp>
+    ): SyncMutationStamp = (fieldStamps.values + trackAddStamps.values + trackTombstones.values).maxOrNull()
+        ?: SyncMutationStamp(fallbackUpdatedAt.coerceAtLeast(0L), 0L, localDeviceId)
+
     private fun encodePlaylistSnapshotJson(
         title: String,
         description: String,
         remoteCoverUri: String?,
         coverRemoved: Boolean,
-        tracks: List<SongItem>
+        tracks: List<SongItem>,
+        fieldStamps: Map<String, SyncMutationStamp> = emptyMap(),
+        trackOps: Map<String, BaselineTrackOp> = emptyMap()
     ): String = PlaylistThreeWayMerger.encodeBaselineSnapshot(
         PlaylistBaselineSnapshot(
             title = title,
             description = description,
             remoteCoverUri = if (coverRemoved) null else SecurityValidators.sanitizeHttpsUrl(remoteCoverUri, 500),
             coverRemoved = coverRemoved,
-            trackIds = tracks.map { it.videoId }
+            trackIds = tracks.map { it.videoId },
+            fieldStamps = fieldStamps,
+            trackOps = trackOps
         )
     )
 
@@ -1292,6 +1837,7 @@ class CloudSyncCoordinator(
         now: Long,
         compactedBeforeMs: Long = 0L
     ) {
+        val localDeviceId = getLocalSyncDeviceId()
         val rawLocalPlaylists = dao.getPlaylistsOnce()
         val validLocalPlaylists = rawLocalPlaylists.map { pl ->
             if (pl.cloudKey.isBlank()) {
@@ -1327,6 +1873,28 @@ class CloudSyncCoordinator(
             val localTomb = plTombstones[key]
             val baseline = plBaselines[key]
 
+            val remoteTracks: List<SongItem> = if (cloudBundle.subcollectionTracks.isNotEmpty() || !cloudBundle.hasLegacyArrayTracks) {
+                cloudBundle.subcollectionTracks
+                    .filter { !it.deleted }
+                    .sortedBy { it.position }
+                    .mapNotNull { it.toSongItem() }
+            } else {
+                cloudPl.tracks.mapNotNull { CloudSyncRepository.songFromCloudMap(it) }
+            }
+            val remoteDeviceId = cloudPl.lastDeviceId.ifBlank { "cloud_remote" }
+            val remoteFieldStamps = cloudPl.fieldStamps.mapValues { (_, v) -> v.toSyncStamp() }
+            val remoteTrackAddStamps = cloudBundle.subcollectionTracks
+                .filter { !it.deleted }
+                .associate { it.videoId to it.effectiveOpStamp(cloudPl.clientUpdatedAt, remoteDeviceId) }
+            val remoteTrackTombstones = cloudPl.trackTombstones.mapValues { (_, v) -> v.toSyncStamp() }.toMutableMap()
+            cloudBundle.subcollectionTracks.filter { it.deleted }.forEach { trk ->
+                val delStamp = trk.effectiveOpStamp(cloudPl.clientUpdatedAt, remoteDeviceId)
+                val existing = remoteTrackTombstones[trk.videoId]
+                if (existing == null || delStamp > existing) {
+                    remoteTrackTombstones[trk.videoId] = delStamp
+                }
+            }
+
             if (cloudPl.deleted) {
                 val cloudTs = cloudPl.clientUpdatedAt
                 val localReeditedAfterDelete = matchedLocal != null &&
@@ -1336,11 +1904,19 @@ class CloudSyncCoordinator(
                     val localTracks = dao.getPlaylistTracks(matchedLocal.id)
                         .mapNotNull { repository.decodeSong(it.songJson) }
                         .filter { !it.isLocal }
+                    val baseSnap = PlaylistThreeWayMerger.decodeBaselineSnapshot(baseline?.snapshotJson)
+                    val (localFieldStamps, localTrackOps, _) = loadLocalPlaylistCausalState(matchedLocal, baseSnap, localDeviceId)
+                    val addStamps = localTracks.associate { trk ->
+                        val explicit = localTrackOps[trk.videoId]?.takeIf { !it.deleted }?.stamp
+                        trk.videoId to (explicit ?: SyncMutationStamp(trk.addedAt ?: matchedLocal.updatedAt, 0L, localDeviceId))
+                    }
+                    val trackTombstones = localTrackOps.filterValues { it.deleted }.mapValues { it.value.stamp }
                     val targetRev = maxOf(matchedLocal.syncRevision, cloudPl.syncRevision + 1L, 1L)
                     if (targetRev != matchedLocal.syncRevision) {
                         dao.setPlaylistSyncRevision(matchedLocal.id, targetRev)
                     }
                     val remoteCover = matchedLocal.remoteCoverUri ?: SecurityValidators.sanitizeHttpsUrl(matchedLocal.coverUri, 500)
+                    val winStamp = computePlaylistMutationStamp(matchedLocal.updatedAt, localDeviceId, localFieldStamps, addStamps, trackTombstones)
                     cloudRepo.upsertPlaylist(
                         playlistKey = key,
                         title = matchedLocal.title,
@@ -1350,7 +1926,11 @@ class CloudSyncCoordinator(
                         clientUpdatedAt = matchedLocal.updatedAt,
                         syncRevision = targetRev,
                         removeLegacyTracksField = cloudBundle.hasLegacyArrayTracks,
-                        coverRemoved = matchedLocal.coverRemoved
+                        coverRemoved = matchedLocal.coverRemoved,
+                        playlistMutationStamp = winStamp,
+                        fieldStamps = localFieldStamps,
+                        trackAddStamps = addStamps,
+                        trackTombstones = trackTombstones
                     )
                     val sig = SyncSignatureHelper.playlistSignature(
                         key, matchedLocal.title, matchedLocal.description, remoteCover, localTracks, matchedLocal.coverRemoved
@@ -1359,7 +1939,8 @@ class CloudSyncCoordinator(
                         SyncBaselineEntity(
                             uid, SyncEntityTypes.PLAYLIST, key, targetRev, sig, matchedLocal.updatedAt, false, now,
                             snapshotJson = encodePlaylistSnapshotJson(
-                                matchedLocal.title, matchedLocal.description, remoteCover, matchedLocal.coverRemoved, localTracks
+                                matchedLocal.title, matchedLocal.description, remoteCover, matchedLocal.coverRemoved,
+                                localTracks, localFieldStamps, buildBaselineTrackOps(addStamps, trackTombstones)
                             )
                         )
                     )
@@ -1391,15 +1972,6 @@ class CloudSyncCoordinator(
                 continue
             }
 
-            val remoteTracks: List<SongItem> = if (cloudBundle.subcollectionTracks.isNotEmpty() || !cloudBundle.hasLegacyArrayTracks) {
-                cloudBundle.subcollectionTracks
-                    .filter { !it.deleted }
-                    .sortedBy { it.position }
-                    .mapNotNull { it.toSongItem() }
-            } else {
-                cloudPl.tracks.mapNotNull { CloudSyncRepository.songFromCloudMap(it) }
-            }
-
             val cloudTitle = cloudPl.title.ifBlank { matchedLocal?.title ?: "Playlist" }
             val safeCloudCoverUri = if (cloudPl.coverRemoved) null else SecurityValidators.sanitizeHttpsUrl(cloudPl.coverUri, 500)
             val cloudSig = SyncSignatureHelper.playlistSignature(
@@ -1425,18 +1997,30 @@ class CloudSyncCoordinator(
                     tracks = localTracks,
                     coverRemoved = matchedLocal.coverRemoved
                 )
+                val baseSnap = PlaylistThreeWayMerger.decodeBaselineSnapshot(baseline?.snapshotJson)
+                val (localFieldStamps, localTrackOps, hasNewerLocalOps) = loadLocalPlaylistCausalState(
+                    matchedLocal, baseSnap, localDeviceId
+                )
                 val localDirty = baseline == null ||
                     baseline.deleted ||
                     matchedLocal.syncRevision > baseline.revision ||
-                    localSig != baseline.signature
+                    localSig != baseline.signature ||
+                    hasNewerLocalOps
+                val cloudTrackCausalChanged = baseSnap != null && (
+                    remoteFieldStamps != baseSnap.fieldStamps ||
+                        remoteTrackTombstones.any { (vid, st) ->
+                            val b = baseSnap.trackOps[vid]
+                            b == null || !b.deleted || st > b.stamp
+                        }
+                    )
                 val cloudDirty = baseline == null ||
                     cloudPl.syncRevision > baseline.revision ||
                     cloudSig != baseline.signature ||
                     cloudPl.clientUpdatedAt > baseline.clientUpdatedAt ||
-                    cloudBundle.hasLegacyArrayTracks
+                    cloudBundle.hasLegacyArrayTracks ||
+                    cloudTrackCausalChanged
 
                 if (localDirty && cloudDirty) {
-                    val baseSnap = PlaylistThreeWayMerger.decodeBaselineSnapshot(baseline?.snapshotJson)
                     val merged = PlaylistThreeWayMerger.merge(
                         baseline = baseSnap,
                         localTitle = matchedLocal.title,
@@ -1450,7 +2034,14 @@ class CloudSyncCoordinator(
                         remoteCoverUri = safeCloudCoverUri,
                         remoteCoverRemoved = cloudPl.coverRemoved,
                         remoteTracks = remoteTracks,
-                        remoteUpdatedAt = cloudPl.clientUpdatedAt
+                        remoteUpdatedAt = cloudPl.clientUpdatedAt,
+                        localDeviceId = localDeviceId,
+                        localFieldStamps = localFieldStamps,
+                        localTrackOps = localTrackOps,
+                        remoteDeviceId = remoteDeviceId,
+                        remoteFieldStamps = remoteFieldStamps,
+                        remoteTrackAddStamps = remoteTrackAddStamps,
+                        remoteTrackTombstones = remoteTrackTombstones
                     )
                     val mergedRemoteCover = merged.remoteCoverUri
                     val resolvedCover: String? = when {
@@ -1476,7 +2067,12 @@ class CloudSyncCoordinator(
                         tracks = merged.tracks,
                         coverRemoved = merged.coverRemoved
                     )
-                    if (merged.needsLocalUpdate || resolvedCover != matchedLocal.coverUri || targetRev != matchedLocal.syncRevision) {
+                    val mergedTrackOps = buildRoomTrackOps(matchedLocal.id, merged.mergedTrackAddStamps, merged.mergedTrackTombstones)
+                    val mergedFieldOps = buildRoomFieldOps(matchedLocal.id, merged.mergedFieldStamps)
+                    val opsChanged = merged.mergedFieldStamps != localFieldStamps ||
+                        mergedTrackOps.associateBy { it.videoId }.mapValues { BaselineTrackOp(it.value.deleted, SyncMutationStamp(it.value.timestampMs, it.value.opSeq, it.value.deviceId, it.value.opId)) } != localTrackOps
+
+                    if (merged.needsLocalUpdate || resolvedCover != matchedLocal.coverUri || targetRev != matchedLocal.syncRevision || opsChanged) {
                         val trackEntities = merged.tracks.mapIndexed { idx, s ->
                             LocalPlaylistTrackEntity(
                                 playlistId = matchedLocal.id,
@@ -1495,7 +2091,9 @@ class CloudSyncCoordinator(
                             coverRemoved = merged.coverRemoved,
                             updatedAt = mergedTs,
                             syncRevision = targetRev,
-                            tracks = trackEntities
+                            tracks = trackEntities,
+                            trackOps = mergedTrackOps,
+                            fieldOps = mergedFieldOps
                         )
                     }
                     if (merged.needsCloudPush || cloudBundle.hasLegacyArrayTracks || cloudPl.activeSnapshotId.isNullOrBlank()) {
@@ -1508,18 +2106,23 @@ class CloudSyncCoordinator(
                             clientUpdatedAt = mergedTs,
                             syncRevision = targetRev,
                             removeLegacyTracksField = cloudBundle.hasLegacyArrayTracks,
-                            coverRemoved = merged.coverRemoved
+                            coverRemoved = merged.coverRemoved,
+                            playlistMutationStamp = merged.winningPlaylistStamp,
+                            fieldStamps = merged.mergedFieldStamps,
+                            trackAddStamps = merged.mergedTrackAddStamps,
+                            trackTombstones = merged.mergedTrackTombstones
                         )
                     }
                     dao.upsertSyncBaseline(
                         SyncBaselineEntity(
                             uid, SyncEntityTypes.PLAYLIST, key, targetRev, mergedSig, mergedTs, false, now,
                             snapshotJson = encodePlaylistSnapshotJson(
-                                merged.title, merged.description, mergedRemoteCover, merged.coverRemoved, merged.tracks
+                                merged.title, merged.description, mergedRemoteCover, merged.coverRemoved, merged.tracks,
+                                merged.mergedFieldStamps, buildBaselineTrackOps(merged.mergedTrackAddStamps, merged.mergedTrackTombstones)
                             )
                         )
                     )
-                } else if (cloudDirty && !localDirty && (cloudSig != localSig || cloudPl.syncRevision > matchedLocal.syncRevision || cloudBundle.hasLegacyArrayTracks)) {
+                } else if (cloudDirty && !localDirty && (cloudSig != localSig || cloudPl.syncRevision > matchedLocal.syncRevision || cloudBundle.hasLegacyArrayTracks || cloudTrackCausalChanged)) {
                     val resolvedCover: String? = when {
                         cloudPl.coverRemoved -> {
                             matchedLocal.coverUri?.let { repository.deleteManagedPlaylistCover(it) }
@@ -1544,6 +2147,8 @@ class CloudSyncCoordinator(
                             addedAt = s.addedAt ?: now
                         )
                     }
+                    val adoptedFieldOps = buildRoomFieldOps(matchedLocal.id, remoteFieldStamps)
+                    val adoptedTrackOps = buildRoomTrackOps(matchedLocal.id, remoteTrackAddStamps, remoteTrackTombstones)
                     dao.replacePlaylistFromCloudAtomic(
                         playlistId = matchedLocal.id,
                         title = cloudTitle,
@@ -1553,7 +2158,9 @@ class CloudSyncCoordinator(
                         coverRemoved = cloudPl.coverRemoved,
                         updatedAt = adoptedTs,
                         syncRevision = adoptedRev,
-                        tracks = trackEntities
+                        tracks = trackEntities,
+                        trackOps = adoptedTrackOps,
+                        fieldOps = adoptedFieldOps
                     )
                     if (cloudBundle.hasLegacyArrayTracks) {
                         cloudRepo.upsertPlaylist(
@@ -1565,27 +2172,38 @@ class CloudSyncCoordinator(
                             clientUpdatedAt = adoptedTs,
                             syncRevision = adoptedRev,
                             removeLegacyTracksField = true,
-                            coverRemoved = cloudPl.coverRemoved
+                            coverRemoved = cloudPl.coverRemoved,
+                            playlistMutationStamp = cloudPl.playlistMutationStamp(),
+                            fieldStamps = remoteFieldStamps,
+                            trackAddStamps = remoteTrackAddStamps,
+                            trackTombstones = remoteTrackTombstones
                         )
                     }
                     dao.upsertSyncBaseline(
                         SyncBaselineEntity(
                             uid, SyncEntityTypes.PLAYLIST, key, adoptedRev, cloudSig, adoptedTs, false, now,
                             snapshotJson = encodePlaylistSnapshotJson(
-                                cloudTitle, cloudPl.description, resolvedRemoteCover, cloudPl.coverRemoved, remoteTracks
+                                cloudTitle, cloudPl.description, resolvedRemoteCover, cloudPl.coverRemoved, remoteTracks,
+                                remoteFieldStamps, buildBaselineTrackOps(remoteTrackAddStamps, remoteTrackTombstones)
                             )
                         )
                     )
                 } else if (
                     cloudBundle.hasLegacyArrayTracks ||
                     cloudPl.activeSnapshotId.isNullOrBlank() ||
-                    (localDirty && cloudSig != localSig)
+                    (localDirty && (cloudSig != localSig || hasNewerLocalOps))
                 ) {
                     val pushTs = maxOf(matchedLocal.updatedAt, cloudPl.clientUpdatedAt)
                     val targetRev = maxOf(matchedLocal.syncRevision, cloudPl.syncRevision + 1L, 1L)
                     if (targetRev != matchedLocal.syncRevision) {
                         dao.setPlaylistSyncRevision(matchedLocal.id, targetRev)
                     }
+                    val addStamps = localTracks.associate { trk ->
+                        val explicit = localTrackOps[trk.videoId]?.takeIf { !it.deleted }?.stamp
+                        trk.videoId to (explicit ?: SyncMutationStamp(trk.addedAt ?: pushTs, 0L, localDeviceId))
+                    }
+                    val trackTombstones = localTrackOps.filterValues { it.deleted }.mapValues { it.value.stamp }
+                    val winStamp = computePlaylistMutationStamp(pushTs, localDeviceId, localFieldStamps, addStamps, trackTombstones)
                     cloudRepo.upsertPlaylist(
                         playlistKey = key,
                         title = matchedLocal.title,
@@ -1595,13 +2213,18 @@ class CloudSyncCoordinator(
                         clientUpdatedAt = pushTs,
                         syncRevision = targetRev,
                         removeLegacyTracksField = cloudBundle.hasLegacyArrayTracks,
-                        coverRemoved = matchedLocal.coverRemoved
+                        coverRemoved = matchedLocal.coverRemoved,
+                        playlistMutationStamp = winStamp,
+                        fieldStamps = localFieldStamps,
+                        trackAddStamps = addStamps,
+                        trackTombstones = trackTombstones
                     )
                     dao.upsertSyncBaseline(
                         SyncBaselineEntity(
                             uid, SyncEntityTypes.PLAYLIST, key, targetRev, localSig, pushTs, false, now,
                             snapshotJson = encodePlaylistSnapshotJson(
-                                matchedLocal.title, matchedLocal.description, localRemoteCover, matchedLocal.coverRemoved, localTracks
+                                matchedLocal.title, matchedLocal.description, localRemoteCover, matchedLocal.coverRemoved, localTracks,
+                                localFieldStamps, buildBaselineTrackOps(addStamps, trackTombstones)
                             )
                         )
                     )
@@ -1612,7 +2235,8 @@ class CloudSyncCoordinator(
                             maxOf(matchedLocal.syncRevision, cloudPl.syncRevision),
                             localSig, matchedLocal.updatedAt, false, now,
                             snapshotJson = encodePlaylistSnapshotJson(
-                                matchedLocal.title, matchedLocal.description, localRemoteCover, matchedLocal.coverRemoved, localTracks
+                                matchedLocal.title, matchedLocal.description, localRemoteCover, matchedLocal.coverRemoved, localTracks,
+                                localFieldStamps, localTrackOps
                             )
                         )
                     )
@@ -1630,6 +2254,8 @@ class CloudSyncCoordinator(
                         addedAt = s.addedAt ?: now
                     )
                 }
+                val newFieldOps = buildRoomFieldOps(0L, remoteFieldStamps)
+                val newTrackOps = buildRoomTrackOps(0L, remoteTrackAddStamps, remoteTrackTombstones)
                 dao.createPlaylistWithTracks(
                     playlist = LocalPlaylistEntity(
                         cloudKey = key,
@@ -1642,7 +2268,9 @@ class CloudSyncCoordinator(
                         updatedAt = initialTs,
                         syncRevision = initialRev
                     ),
-                    tracks = trackEntities
+                    tracks = trackEntities,
+                    trackOps = newTrackOps,
+                    fieldOps = newFieldOps
                 )
                 if (cloudBundle.hasLegacyArrayTracks) {
                     cloudRepo.upsertPlaylist(
@@ -1654,14 +2282,19 @@ class CloudSyncCoordinator(
                         clientUpdatedAt = initialTs,
                         syncRevision = initialRev,
                         removeLegacyTracksField = true,
-                        coverRemoved = cloudPl.coverRemoved
+                        coverRemoved = cloudPl.coverRemoved,
+                        playlistMutationStamp = cloudPl.playlistMutationStamp(),
+                        fieldStamps = remoteFieldStamps,
+                        trackAddStamps = remoteTrackAddStamps,
+                        trackTombstones = remoteTrackTombstones
                     )
                 }
                 dao.upsertSyncBaseline(
                     SyncBaselineEntity(
                         uid, SyncEntityTypes.PLAYLIST, key, initialRev, cloudSig, initialTs, false, now,
                         snapshotJson = encodePlaylistSnapshotJson(
-                            cloudTitle, cloudPl.description, safeCloudCoverUri, cloudPl.coverRemoved, remoteTracks
+                            cloudTitle, cloudPl.description, safeCloudCoverUri, cloudPl.coverRemoved, remoteTracks,
+                            remoteFieldStamps, buildBaselineTrackOps(remoteTrackAddStamps, remoteTrackTombstones)
                         )
                     )
                 )
@@ -1685,10 +2318,15 @@ class CloudSyncCoordinator(
                 coverRemoved = localPl.coverRemoved
             )
             val baseline = plBaselines[localPl.cloudKey]
+            val baseSnap = PlaylistThreeWayMerger.decodeBaselineSnapshot(baseline?.snapshotJson)
+            val (localFieldStamps, localTrackOps, hasNewerLocalOps) = loadLocalPlaylistCausalState(
+                localPl, baseSnap, localDeviceId
+            )
             val dirty = baseline == null ||
                 baseline.deleted ||
                 localPl.syncRevision > baseline.revision ||
-                sig != baseline.signature
+                sig != baseline.signature ||
+                hasNewerLocalOps
 
             if (compactedBeforeMs > 0L && baseline != null && !baseline.deleted &&
                 !dirty && localPl.updatedAt <= compactedBeforeMs
@@ -1704,6 +2342,12 @@ class CloudSyncCoordinator(
                 if (targetRev != localPl.syncRevision) {
                     dao.setPlaylistSyncRevision(localPl.id, targetRev)
                 }
+                val addStamps = localTracks.associate { trk ->
+                    val explicit = localTrackOps[trk.videoId]?.takeIf { !it.deleted }?.stamp
+                    trk.videoId to (explicit ?: SyncMutationStamp(trk.addedAt ?: localPl.updatedAt, 0L, localDeviceId))
+                }
+                val trackTombstones = localTrackOps.filterValues { it.deleted }.mapValues { it.value.stamp }
+                val winStamp = computePlaylistMutationStamp(localPl.updatedAt, localDeviceId, localFieldStamps, addStamps, trackTombstones)
                 cloudRepo.upsertPlaylist(
                     playlistKey = localPl.cloudKey,
                     title = localPl.title,
@@ -1712,14 +2356,19 @@ class CloudSyncCoordinator(
                     tracks = localTracks,
                     clientUpdatedAt = localPl.updatedAt,
                     syncRevision = targetRev,
-                    coverRemoved = localPl.coverRemoved
+                    coverRemoved = localPl.coverRemoved,
+                    playlistMutationStamp = winStamp,
+                    fieldStamps = localFieldStamps,
+                    trackAddStamps = addStamps,
+                    trackTombstones = trackTombstones
                 )
                 dao.upsertSyncBaseline(
                     SyncBaselineEntity(
                         uid, SyncEntityTypes.PLAYLIST, localPl.cloudKey,
                         targetRev, sig, localPl.updatedAt, false, now,
                         snapshotJson = encodePlaylistSnapshotJson(
-                            localPl.title, localPl.description, localRemoteCover, localPl.coverRemoved, localTracks
+                            localPl.title, localPl.description, localRemoteCover, localPl.coverRemoved, localTracks,
+                            localFieldStamps, buildBaselineTrackOps(addStamps, trackTombstones)
                         )
                     )
                 )
@@ -2049,6 +2698,7 @@ class CloudSyncCoordinator(
                     syncMutex.withLock {
                         if (auth.currentUser?.uid != uid || isSigningOut.get() || suppressLocalPushCount.get() > 0) return@withLock
                         if (prefsRepo.getActiveCloudUid() != uid) return@withLock
+                        val localDeviceId = getLocalSyncDeviceId()
                         val baselines = dao.getSyncBaselinesByType(uid, SyncEntityTypes.PLAYLIST).associateBy { it.entityKey }
                         val activeKeys = mutableSetOf<String>()
                         val dirtyPlaylists = mutableListOf<Triple<LocalPlaylistEntity, List<SongItem>, String>>()
@@ -2064,7 +2714,9 @@ class CloudSyncCoordinator(
                                 pl.cloudKey, pl.title, pl.description, localRemoteCover, tracks, pl.coverRemoved
                             )
                             val base = baselines[pl.cloudKey]
-                            if (base == null || base.deleted || pl.syncRevision > base.revision || base.signature != sig) {
+                            val baseSnap = PlaylistThreeWayMerger.decodeBaselineSnapshot(base?.snapshotJson)
+                            val (_, _, hasNewerOps) = loadLocalPlaylistCausalState(pl, baseSnap, localDeviceId)
+                            if (base == null || base.deleted || pl.syncRevision > base.revision || base.signature != sig || hasNewerOps) {
                                 dirtyPlaylists.add(Triple(pl, tracks, sig))
                             }
                         }
@@ -2076,13 +2728,22 @@ class CloudSyncCoordinator(
                         val res = suspendRunCatching {
                             for ((pl, tracks, sig) in dirtyPlaylists) {
                                 dao.deleteTombstone(SyncEntityTypes.PLAYLIST, pl.cloudKey)
-                                val baseRev = baselines[pl.cloudKey]?.revision ?: 0L
+                                val base = baselines[pl.cloudKey]
+                                val baseRev = base?.revision ?: 0L
                                 val targetRev = maxOf(pl.syncRevision, if (baseRev > 0L) baseRev + 1L else 1L, 1L)
                                 if (targetRev != pl.syncRevision) {
                                     dao.setPlaylistSyncRevision(pl.id, targetRev)
                                 }
                                 val localRemoteCover = pl.remoteCoverUri
                                     ?: SecurityValidators.sanitizeHttpsUrl(pl.coverUri, 500)
+                                val baseSnap = PlaylistThreeWayMerger.decodeBaselineSnapshot(base?.snapshotJson)
+                                val (localFieldStamps, localTrackOps, _) = loadLocalPlaylistCausalState(pl, baseSnap, localDeviceId)
+                                val addStamps = tracks.associate { trk ->
+                                    val explicit = localTrackOps[trk.videoId]?.takeIf { !it.deleted }?.stamp
+                                    trk.videoId to (explicit ?: SyncMutationStamp(trk.addedAt ?: pl.updatedAt, 0L, localDeviceId))
+                                }
+                                val trackTombstones = localTrackOps.filterValues { it.deleted }.mapValues { it.value.stamp }
+                                val winStamp = computePlaylistMutationStamp(pl.updatedAt, localDeviceId, localFieldStamps, addStamps, trackTombstones)
                                 cloudRepo.upsertPlaylist(
                                     playlistKey = pl.cloudKey,
                                     title = pl.title,
@@ -2091,13 +2752,18 @@ class CloudSyncCoordinator(
                                     tracks = tracks,
                                     clientUpdatedAt = pl.updatedAt,
                                     syncRevision = targetRev,
-                                    coverRemoved = pl.coverRemoved
+                                    coverRemoved = pl.coverRemoved,
+                                    playlistMutationStamp = winStamp,
+                                    fieldStamps = localFieldStamps,
+                                    trackAddStamps = addStamps,
+                                    trackTombstones = trackTombstones
                                 )
                                 dao.upsertSyncBaseline(
                                     SyncBaselineEntity(
                                         uid, SyncEntityTypes.PLAYLIST, pl.cloudKey, targetRev, sig, pl.updatedAt, false, now,
                                         snapshotJson = encodePlaylistSnapshotJson(
-                                            pl.title, pl.description, localRemoteCover, pl.coverRemoved, tracks
+                                            pl.title, pl.description, localRemoteCover, pl.coverRemoved, tracks,
+                                            localFieldStamps, buildBaselineTrackOps(addStamps, trackTombstones)
                                         )
                                     )
                                 )
@@ -2244,5 +2910,6 @@ class CloudSyncCoordinator(
         private const val TAG = "CloudSyncCoordinator"
         private const val PROFILE_BASELINE_KEY = "profile"
         private const val TOMBSTONE_RETENTION_MS = 90L * 24L * 3600L * 1000L
+        private const val UNOWNED_QUARANTINE_FILENAME = "unowned_account_quarantine.json"
     }
 }

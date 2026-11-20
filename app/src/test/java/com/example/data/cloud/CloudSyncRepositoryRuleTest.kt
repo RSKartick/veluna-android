@@ -616,15 +616,27 @@ class CloudSyncRepositoryRuleTest : FirestoreEmulatorTestBase() {
         val snapsBefore = plRef.collection("snapshots").get().await().documents
         assertThat(snapsBefore).hasSize(5)
 
+        // Old clientUpdatedAt alone must NEVER cause newly uploaded snapshots to be deleted
+        val deletedTooSoon = withTimeout(DEFAULT_TIMEOUT_MS) {
+            repo.garbageCollectPlaylistSnapshots(
+                playlistKey = plKey,
+                retentionWindowMs = 7L * 24L * 3600L * 1000L,
+                retainCommittedCount = 2,
+                nowMs = System.currentTimeMillis()
+            )
+        }
+        assertThat(deletedTooSoon).isEqualTo(0)
+
+        // Once genuine server createdAt exceeds the 7-day window, top-2 committed (rev 4 & 5) stay and rev 1..3 are deleted
+        val maxServerCreatedMs = snapsBefore.maxOf { it.getTimestamp("createdAt")?.toDate()?.time ?: now }
         val deleted = withTimeout(DEFAULT_TIMEOUT_MS) {
             repo.garbageCollectPlaylistSnapshots(
                 playlistKey = plKey,
                 retentionWindowMs = 7L * 24L * 3600L * 1000L,
                 retainCommittedCount = 2,
-                nowMs = now
+                nowMs = maxServerCreatedMs + 8L * 24L * 3600L * 1000L
             )
         }
-        // Rev 4 & 5 are retained (top 2 committed), Rev 1..3 are old and deleted -> 3 deleted
         assertThat(deleted).isEqualTo(3)
 
         val snapsAfter = plRef.collection("snapshots").get().await().documents
@@ -726,7 +738,7 @@ class CloudSyncRepositoryRuleTest : FirestoreEmulatorTestBase() {
         }
 
         withTimeout(DEFAULT_TIMEOUT_MS) { slowReachedPublish.await() }
-        // Fast writer completes rev 2 with newer timestamp (or higher revision) before slow writer's publish transaction
+        // Fast writer completes rev 2 with newer timestamp before slow writer's publish transaction
         withTimeout(DEFAULT_TIMEOUT_MS) {
             writerFast.upsertPlaylist(
                 playlistKey = plKey,
@@ -756,6 +768,436 @@ class CloudSyncRepositoryRuleTest : FirestoreEmulatorTestBase() {
     }
 
     @Test
+    fun garbageCollectPlaylistSnapshots_protectsRecentStagingAndCollectsAbandonedStagingAfterWindow(): Unit = runBlocking {
+        val email = "gc_staging_${UUID.randomUUID()}@test.com"
+        val uid = signInTestUser(email)
+        val publisher = CloudSyncRepository(firestore, auth)
+        val gcRunner = CloudSyncRepository(firestore, auth)
+        val plKey = "pl_gc_stage"
+
+        val inStaging = CompletableDeferred<Unit>()
+        val allowFinish = CompletableDeferred<Unit>()
+        publisher.onBeforeCommitPlaylistSnapshot = { _, _ ->
+            inStaging.complete(Unit)
+            allowFinish.await()
+        }
+
+        val publishJob = async {
+            publisher.upsertPlaylist(
+                playlistKey = plKey,
+                title = "Staging List",
+                description = "",
+                coverUri = null,
+                tracks = listOf(SongItem("trk_s1", "S1", "A")),
+                clientUpdatedAt = System.currentTimeMillis(),
+                syncRevision = 1L
+            )
+        }
+
+        withTimeout(DEFAULT_TIMEOUT_MS) { inStaging.await() }
+
+        // While STAGING is active and recent, GC (even with aggressive retention) must not delete it
+        val deletedWhileStaging = withTimeout(DEFAULT_TIMEOUT_MS) {
+            gcRunner.garbageCollectPlaylistSnapshots(
+                playlistKey = plKey,
+                retentionWindowMs = 0L,
+                retainCommittedCount = 1,
+                nowMs = System.currentTimeMillis(),
+                stagingRetentionMs = 60_000L
+            )
+        }
+        assertThat(deletedWhileStaging).isEqualTo(0)
+
+        allowFinish.complete(Unit)
+        withTimeout(DEFAULT_TIMEOUT_MS) { publishJob.await() }
+
+        val plRef = firestore.collection("users").document(uid).collection("playlists").document(plKey)
+        // Create an abandoned STAGING snapshot doc manually
+        val abandonedRef = plRef.collection("snapshots").document("snap_abandoned_1")
+        abandonedRef.set(
+            mapOf(
+                "state" to "STAGING",
+                "syncRevision" to 9L,
+                "trackCount" to 1L,
+                "clientUpdatedAt" to 1_000L,
+                "createdAt" to FieldValue.serverTimestamp(),
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+        ).await()
+        abandonedRef.collection("tracks").document("trk_00000_x").set(
+            mapOf(
+                "videoId" to "x",
+                "title" to "Orphan",
+                "artists" to "A",
+                "durationSecs" to 10L,
+                "explicit" to false,
+                "position" to 0,
+                "addedAt" to 1_000L,
+                "deleted" to false,
+                "clientUpdatedAt" to 1_000L,
+                "createdAt" to FieldValue.serverTimestamp(),
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+        ).await()
+
+        val abandonedCreatedMs = abandonedRef.get().await().getTimestamp("createdAt")?.toDate()?.time
+            ?: System.currentTimeMillis()
+        // Within 1h staging retention window -> preserved
+        assertThat(
+            gcRunner.garbageCollectPlaylistSnapshots(
+                playlistKey = plKey,
+                nowMs = abandonedCreatedMs + 30L * 60L * 1000L,
+                stagingRetentionMs = 60L * 60L * 1000L
+            )
+        ).isEqualTo(0)
+        assertThat(abandonedRef.get().await().exists()).isTrue()
+
+        // After 1h staging retention window -> claimed DELETING & purged safely
+        assertThat(
+            gcRunner.garbageCollectPlaylistSnapshots(
+                playlistKey = plKey,
+                nowMs = abandonedCreatedMs + 2L * 60L * 60L * 1000L,
+                stagingRetentionMs = 60L * 60L * 1000L
+            )
+        ).isEqualTo(1)
+        assertThat(abandonedRef.get().await().exists()).isFalse()
+        assertThat(abandonedRef.collection("tracks").get().await().documents).isEmpty()
+    }
+
+    @Test
+    fun gcAndPublishRace_publicationWinsClaimRace_gcReReadsActiveSnapshotAndRefusesDeletion(): Unit = runBlocking {
+        val email = "race_pub_wins_${UUID.randomUUID()}@test.com"
+        val uid = signInTestUser(email)
+        val publisher = CloudSyncRepository(firestore, auth)
+        val gcRunner = CloudSyncRepository(firestore, auth)
+        val plKey = "pl_race_pub_wins"
+
+        // Pre-seed a STAGING snapshot for rev 1 before GC runs, then let GC pause right before claim tx
+        // while publisher completes staging upload and publishes rev 1 on the same snapshot path?
+        // Simulate exact tx race: publisher commits rev 1 to COMMITTED & pauses before publish tx;
+        // simultaneously stagingRetentionMs = 0L lets GC see COMMITTED snapshot only if not top-N, OR:
+        // create staging snapshot doc via publisher hook paused before COMMITTED mark, then complete publish.
+        val beforeBatchUpload = CompletableDeferred<Unit>()
+        val proceedUploadAndPublish = CompletableDeferred<Unit>()
+        val gcAtClaim = CompletableDeferred<Unit>()
+        val releaseGcClaim = CompletableDeferred<Unit>()
+        var targetSnapId: String? = null
+
+        publisher.onBeforeCommitPlaylistSnapshot = { snapId, _ ->
+            targetSnapId = snapId
+            beforeBatchUpload.complete(Unit)
+            proceedUploadAndPublish.await()
+        }
+        gcRunner.onBeforeGcClaim = { _, snapId ->
+            if (snapId == targetSnapId) {
+                gcAtClaim.complete(Unit)
+                releaseGcClaim.await()
+            }
+        }
+
+        val pubJob = async {
+            publisher.upsertPlaylist(
+                playlistKey = plKey,
+                title = "Winner Active",
+                description = "Active",
+                coverUri = null,
+                tracks = listOf(SongItem("trk_win", "Win", "Artist")),
+                clientUpdatedAt = System.currentTimeMillis(),
+                syncRevision = 1L
+            )
+        }
+
+        withTimeout(DEFAULT_TIMEOUT_MS) { beforeBatchUpload.await() }
+        val snapCreatedMs = firestore.collection("users").document(uid)
+            .collection("playlists").document(plKey)
+            .collection("snapshots").document(targetSnapId!!)
+            .get().await().getTimestamp("createdAt")?.toDate()?.time ?: System.currentTimeMillis()
+
+        val gcJob = async {
+            gcRunner.garbageCollectPlaylistSnapshots(
+                playlistKey = plKey,
+                retentionWindowMs = 0L,
+                retainCommittedCount = 1,
+                nowMs = snapCreatedMs + 10_000L,
+                stagingRetentionMs = 0L
+            )
+        }
+
+        withTimeout(DEFAULT_TIMEOUT_MS) { gcAtClaim.await() }
+        // Publication wins first!
+        proceedUploadAndPublish.complete(Unit)
+        withTimeout(DEFAULT_TIMEOUT_MS) { pubJob.await() }
+
+        // Now GC executes its claim tx -> must see freshParent.activeSnapshotId == targetSnapId and abort!
+        releaseGcClaim.complete(Unit)
+        val deleted = withTimeout(DEFAULT_TIMEOUT_MS) { gcJob.await() }
+        assertThat(deleted).isEqualTo(0)
+
+        val fetched = publisher.fetchAccountSnapshot().playlists.single { it.playlist.playlistKey == plKey }
+        assertThat(fetched.playlist.activeSnapshotId).isEqualTo(targetSnapId)
+        assertThat(fetched.subcollectionTracks.map { it.videoId }).containsExactly("trk_win")
+    }
+
+    @Test
+    fun gcAndPublishRace_gcClaimsDeletingFirst_publisherAbortsCleanlyAndPreservesWinner(): Unit = runBlocking {
+        val email = "race_gc_wins_${UUID.randomUUID()}@test.com"
+        val uid = signInTestUser(email)
+        val repoFast = CloudSyncRepository(firestore, auth)
+        val repoSlow = CloudSyncRepository(firestore, auth)
+        val gcRunner = CloudSyncRepository(firestore, auth)
+        val plKey = "pl_race_gc_wins"
+
+        // Publish rev 2 first so rev 2 is active and in top-1 committed
+        withTimeout(DEFAULT_TIMEOUT_MS) {
+            repoFast.upsertPlaylist(
+                playlistKey = plKey,
+                title = "Rev 2 Winner",
+                description = "",
+                coverUri = null,
+                tracks = listOf(SongItem("trk_r2", "R2", "A")),
+                clientUpdatedAt = System.currentTimeMillis(),
+                syncRevision = 2L
+            )
+        }
+
+        // Slow writer uploads rev 1 snapshot to COMMITTED and pauses before its publish tx
+        val slowReadyToPublish = CompletableDeferred<Unit>()
+        val allowSlowPublish = CompletableDeferred<Unit>()
+        repoSlow.onBeforePublishTransaction = { _, _ ->
+            slowReadyToPublish.complete(Unit)
+            allowSlowPublish.await()
+        }
+
+        val slowJob = async {
+            runCatching {
+                repoSlow.upsertPlaylist(
+                    playlistKey = plKey,
+                    title = "Stale Rev 1",
+                    description = "",
+                    coverUri = null,
+                    tracks = listOf(SongItem("trk_r1", "R1", "A")),
+                    clientUpdatedAt = System.currentTimeMillis() - 5_000L,
+                    syncRevision = 1L
+                )
+            }
+        }
+        withTimeout(DEFAULT_TIMEOUT_MS) { slowReadyToPublish.await() }
+
+        // GC claims & deletes superseded rev 1 (retainCommittedCount = 1 retains rev 2 only)
+        val snapsNow = firestore.collection("users").document(uid)
+            .collection("playlists").document(plKey).collection("snapshots").get().await().documents
+        val maxCreated = snapsNow.maxOf { it.getTimestamp("createdAt")?.toDate()?.time ?: System.currentTimeMillis() }
+        val gcDeleted = withTimeout(DEFAULT_TIMEOUT_MS) {
+            gcRunner.garbageCollectPlaylistSnapshots(
+                playlistKey = plKey,
+                retentionWindowMs = 0L,
+                retainCommittedCount = 1,
+                nowMs = maxCreated + 10_000L
+            )
+        }
+        assertThat(gcDeleted).isEqualTo(1)
+
+        // Slow writer attempts publish tx after GC claimed/deleted its snapshot -> fails safely
+        allowSlowPublish.complete(Unit)
+        val slowRes = withTimeout(DEFAULT_TIMEOUT_MS) { slowJob.await() }
+        assertThat(slowRes.exceptionOrNull()).isInstanceOf(IncompletePlaylistSnapshotException::class.java)
+
+        val intact = repoFast.fetchAccountSnapshot().playlists.single { it.playlist.playlistKey == plKey }
+        assertThat(intact.playlist.syncRevision).isEqualTo(2L)
+        assertThat(intact.subcollectionTracks.map { it.videoId }).containsExactly("trk_r2")
+    }
+
+    @Test
+    fun ambiguousPublishOutcome_doesNotDeleteCommittedActiveSnapshot_andDeferredGcKeepsIt(): Unit = runBlocking {
+        val email = "ambig_tx_${UUID.randomUUID()}@test.com"
+        signInTestUser(email)
+        val repo = CloudSyncRepository(firestore, auth)
+        val plKey = "pl_ambig"
+
+        // Parent commit succeeds on server, then client experiences network drop / exception after tx commit
+        repo.onAfterPublishTransactionSuccess = { _, _ ->
+            throw RuntimeException("Simulated transport drop right after server commit")
+        }
+
+        var threw = false
+        try {
+            withTimeout(DEFAULT_TIMEOUT_MS) {
+                repo.upsertPlaylist(
+                    playlistKey = plKey,
+                    title = "Ambiguous Commit",
+                    description = "Must remain readable",
+                    coverUri = null,
+                    tracks = listOf(SongItem("trk_ambig", "Ambig", "Artist")),
+                    clientUpdatedAt = System.currentTimeMillis(),
+                    syncRevision = 1L
+                )
+            }
+        } catch (_: RuntimeException) {
+            threw = true
+        } finally {
+            repo.onAfterPublishTransactionSuccess = null
+        }
+        assertThat(threw).isTrue()
+
+        // Even aggressive deferred GC must see activeSnapshotId and preserve the snapshot & tracks
+        val deleted = withTimeout(DEFAULT_TIMEOUT_MS) {
+            repo.garbageCollectPlaylistSnapshots(
+                playlistKey = plKey,
+                retentionWindowMs = 0L,
+                retainCommittedCount = 1,
+                nowMs = System.currentTimeMillis() + 365L * 24L * 3600L * 1000L,
+                stagingRetentionMs = 0L
+            )
+        }
+        assertThat(deleted).isEqualTo(0)
+
+        val snap = withTimeout(DEFAULT_TIMEOUT_MS) { repo.fetchAccountSnapshot() }
+        val loaded = snap.playlists.single { it.playlist.playlistKey == plKey }
+        assertThat(loaded.playlist.activeSnapshotId).isNotNull()
+        assertThat(loaded.subcollectionTracks.map { it.videoId }).containsExactly("trk_ambig")
+    }
+
+    @Test
+    fun readerDuringConcurrentPublish_readsCompletePreviousCommittedSnapshotWithoutMixedTracks(): Unit = runBlocking {
+        val email = "concurrent_read_${UUID.randomUUID()}@test.com"
+        signInTestUser(email)
+        val writer = CloudSyncRepository(firestore, auth)
+        val reader = CloudSyncRepository(firestore, auth)
+        val plKey = "pl_reader_iso"
+
+        withTimeout(DEFAULT_TIMEOUT_MS) {
+            writer.upsertPlaylist(
+                playlistKey = plKey,
+                title = "V1",
+                description = "",
+                coverUri = null,
+                tracks = (0 until 5).map { i -> SongItem("v1_$i", "V1 $i", "A") },
+                clientUpdatedAt = System.currentTimeMillis() - 2_000L,
+                syncRevision = 1L
+            )
+        }
+
+        val readerPaused = CompletableDeferred<Unit>()
+        val allowReaderTracks = CompletableDeferred<Unit>()
+        reader.onBeforeReadSnapshotTracks = { _, _ ->
+            readerPaused.complete(Unit)
+            allowReaderTracks.await()
+        }
+
+        val readJob = async { reader.fetchAccountSnapshot() }
+        withTimeout(DEFAULT_TIMEOUT_MS) { readerPaused.await() }
+
+        // Meanwhile writer stages and publishes v2 with completely different tracks
+        withTimeout(DEFAULT_TIMEOUT_MS) {
+            writer.upsertPlaylist(
+                playlistKey = plKey,
+                title = "V2",
+                description = "",
+                coverUri = null,
+                tracks = (0 until 3).map { i -> SongItem("v2_$i", "V2 $i", "A") },
+                clientUpdatedAt = System.currentTimeMillis(),
+                syncRevision = 2L
+            )
+        }
+
+        allowReaderTracks.complete(Unit)
+        val v1Read = withTimeout(DEFAULT_TIMEOUT_MS) { readJob.await() }
+        val plRead = v1Read.playlists.single { it.playlist.playlistKey == plKey }
+        assertThat(plRead.playlist.syncRevision).isEqualTo(1L)
+        assertThat(plRead.subcollectionTracks.map { it.videoId })
+            .containsExactly("v1_0", "v1_1", "v1_2", "v1_3", "v1_4").inOrder()
+    }
+
+    @Test
+    fun gcInterruptedMidTrackDeletion_keepsManifestUntilAllTracksRemoved_andResumesCleanly(): Unit = runBlocking {
+        val email = "gc_resume_${UUID.randomUUID()}@test.com"
+        val uid = signInTestUser(email)
+        val repo = CloudSyncRepository(firestore, auth)
+        val plKey = "pl_gc_resume"
+
+        // Rev 1 has 450 tracks (2 delete batches of 400 + 50), superseded by Rev 2
+        val bigTracks = (0 until 450).map { i -> SongItem("big_$i", "Big $i", "Artist") }
+        withTimeout(60_000L) {
+            repo.upsertPlaylist(plKey, "Rev 1 Big", "", null, bigTracks, System.currentTimeMillis() - 2_000L, syncRevision = 1L)
+            repo.upsertPlaylist(plKey, "Rev 2 Small", "", null, listOf(SongItem("small_0", "Small", "A")), System.currentTimeMillis(), syncRevision = 2L)
+        }
+
+        val plRef = firestore.collection("users").document(uid).collection("playlists").document(plKey)
+        val rev1SnapId = plRef.collection("snapshots").get().await().documents
+            .first { it.getLong("syncRevision") == 1L }.id
+        val rev1MaxCreated = plRef.collection("snapshots").document(rev1SnapId).get().await()
+            .getTimestamp("createdAt")?.toDate()?.time ?: System.currentTimeMillis()
+
+        // Inject failure on 2nd track batch delete -> batch 0 deletes 400 tracks, fails before batch 1
+        repo.onBeforeGcDeleteTrackBatch = { _, _, batchIndex ->
+            if (batchIndex == 1) throw IllegalStateException("Interrupted mid-track GC")
+        }
+        var failed = false
+        try {
+            withTimeout(30_000L) {
+                repo.garbageCollectPlaylistSnapshots(
+                    playlistKey = plKey,
+                    retentionWindowMs = 0L,
+                    retainCommittedCount = 1,
+                    nowMs = rev1MaxCreated + 10_000L,
+                    throwOnError = true
+                )
+            }
+        } catch (_: IllegalStateException) {
+            failed = true
+        } finally {
+            repo.onBeforeGcDeleteTrackBatch = null
+        }
+        assertThat(failed).isTrue()
+
+        // Manifest MUST still exist in state DELETING with 50 tracks remaining
+        val rev1AfterFail = plRef.collection("snapshots").document(rev1SnapId).get().await()
+        assertThat(rev1AfterFail.exists()).isTrue()
+        assertThat(rev1AfterFail.getString("state")).isEqualTo("DELETING")
+        assertThat(plRef.collection("snapshots").document(rev1SnapId).collection("tracks").get().await().size()).isEqualTo(50)
+
+        // Retry GC without fault -> resumes from DELETING, wipes remaining 50 tracks, then deletes manifest
+        val resumedDeleted = withTimeout(30_000L) {
+            repo.garbageCollectPlaylistSnapshots(
+                playlistKey = plKey,
+                retentionWindowMs = 0L,
+                retainCommittedCount = 1,
+                nowMs = rev1MaxCreated + 10_000L,
+                throwOnError = true
+            )
+        }
+        assertThat(resumedDeleted).isEqualTo(1)
+        assertThat(plRef.collection("snapshots").document(rev1SnapId).get().await().exists()).isFalse()
+        assertThat(plRef.collection("snapshots").document(rev1SnapId).collection("tracks").get().await().isEmpty).isTrue()
+    }
+
+    @Test
+    fun upsertPlaylist_emptyTracklessPlaylist_publishesAndReadsEmpty(): Unit = runBlocking {
+        val email = "empty_snap_${UUID.randomUUID()}@test.com"
+        signInTestUser(email)
+        val repo = CloudSyncRepository(firestore, auth)
+        val plKey = "pl_empty_tracks"
+
+        withTimeout(DEFAULT_TIMEOUT_MS) {
+            repo.upsertPlaylist(
+                playlistKey = plKey,
+                title = "Empty Mix",
+                description = "No tracks yet",
+                coverUri = null,
+                tracks = emptyList(),
+                clientUpdatedAt = System.currentTimeMillis(),
+                syncRevision = 1L
+            )
+        }
+        val fetched = withTimeout(DEFAULT_TIMEOUT_MS) {
+            repo.fetchAccountSnapshot().playlists.single { it.playlist.playlistKey == plKey }
+        }
+        assertThat(fetched.playlist.trackCount).isEqualTo(0L)
+        assertThat(fetched.playlist.activeSnapshotId).isNotNull()
+        assertThat(fetched.subcollectionTracks).isEmpty()
+    }
+
+    @Test
     fun fetchAccountSnapshot_watermarkOverlapHandlesSameTimestampDocsWithoutSkipping(): Unit = runBlocking {
         val email = "overlap_${UUID.randomUUID()}@test.com"
         signInTestUser(email)
@@ -777,6 +1219,48 @@ class CloudSyncRepositoryRuleTest : FirestoreEmulatorTestBase() {
             repo.fetchAccountSnapshot(SyncWatermarks(likedMs = wm1))
         }
         assertThat(incremental.likedSongs.map { it.videoId }).containsAtLeast("trk_1", "trk_2")
+    }
+
+    @Test
+    fun fetchAccountSnapshot_paginatesAcrossPagesWithIdenticalServerTimestamps(): Unit = runBlocking {
+        val email = "paginate_${UUID.randomUUID()}@test.com"
+        val uid = signInTestUser(email)
+        val repo = CloudSyncRepository(firestore, auth).apply {
+            collectionQueryPageSize = 3L
+        }
+
+        // Write 8 documents in a single Firestore batch so every doc receives the exact same server updatedAt
+        val col = firestore.collection("users").document(uid).collection("liked_songs")
+        val batch = firestore.batch()
+        for (i in 0 until 8) {
+            batch.set(
+                col.document("trk_page_%02d".format(i)),
+                mapOf(
+                    "title" to "Paged Song $i",
+                    "artists" to "Artist",
+                    "durationSecs" to 180L,
+                    "explicit" to false,
+                    "likedAt" to 1700000000000L,
+                    "deleted" to false,
+                    "clientUpdatedAt" to 1700000000000L,
+                    "createdAt" to FieldValue.serverTimestamp(),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            )
+        }
+        batch.commit().await()
+
+        val full = withTimeout(DEFAULT_TIMEOUT_MS) { repo.fetchAccountSnapshot() }
+        assertThat(full.likedSongs.map { it.videoId }).containsExactlyElementsIn(
+            (0 until 8).map { "trk_page_%02d".format(it) }
+        )
+
+        val incremental = withTimeout(DEFAULT_TIMEOUT_MS) {
+            repo.fetchAccountSnapshot(SyncWatermarks(likedMs = full.maxLikedUpdatedAtMs))
+        }
+        assertThat(incremental.likedSongs.map { it.videoId }).containsExactlyElementsIn(
+            (0 until 8).map { "trk_page_%02d".format(it) }
+        )
     }
 
     @Test

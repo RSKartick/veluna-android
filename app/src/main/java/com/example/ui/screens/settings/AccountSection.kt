@@ -21,6 +21,7 @@ import androidx.compose.material.icons.rounded.CloudDone
 import androidx.compose.material.icons.rounded.CloudOff
 import androidx.compose.material.icons.rounded.CloudSync
 import androidx.compose.material.icons.rounded.DeleteForever
+import androidx.compose.material.icons.rounded.WarningAmber
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -73,7 +74,9 @@ internal fun AccountSection(
     onSyncNow: () -> Unit,
     onOpenTasteOnboarding: () -> Unit,
     onSetDisplayName: (String) -> Unit,
-    onStatusMessage: (String) -> Unit
+    onStatusMessage: (String) -> Unit,
+    onMergeUnownedData: () -> Unit = {},
+    onDiscardUnownedData: () -> Unit = {}
 ) {
     var displayName by remember(prefs.userDisplayName) { mutableStateOf(prefs.userDisplayName) }
     var deleteDialogStep by remember { mutableIntStateOf(0) } // 0=closed, 1=step1, 2=step2
@@ -186,6 +189,84 @@ internal fun AccountSection(
                                         modifier = Modifier.heightIn(min = 32.dp)
                                     ) {
                                         Text(stringResource(R.string.action_retry))
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (cloudAuthState.hasUnownedDataConflict) {
+                        Surface(
+                            color = MaterialTheme.colorScheme.errorContainer,
+                            shape = MaterialTheme.shapes.small,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("settings_unowned_conflict_card")
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.WarningAmber,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.onErrorContainer,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                    Text(
+                                        text = stringResource(R.string.settings_unowned_data_title),
+                                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+                                        color = MaterialTheme.colorScheme.onErrorContainer
+                                    )
+                                }
+                                Text(
+                                    text = stringResource(
+                                        R.string.settings_unowned_data_body,
+                                        cloudAuthState.unownedDataItemCount
+                                    ),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onErrorContainer
+                                )
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Button(
+                                        onClick = onMergeUnownedData,
+                                        enabled = !cloudAuthState.isSyncing && !cloudAuthState.isAuthBusy,
+                                        colors = velunaPrimaryButtonColors(),
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .heightIn(min = 48.dp)
+                                            .testTag("settings_unowned_merge_btn")
+                                    ) {
+                                        Text(
+                                            text = stringResource(R.string.settings_unowned_data_merge),
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                    OutlinedButton(
+                                        onClick = onDiscardUnownedData,
+                                        enabled = !cloudAuthState.isSyncing && !cloudAuthState.isAuthBusy,
+                                        colors = ButtonDefaults.outlinedButtonColors(
+                                            contentColor = MaterialTheme.colorScheme.onErrorContainer
+                                        ),
+                                        border = velunaOutlinedButtonBorder(!cloudAuthState.isSyncing),
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .heightIn(min = 48.dp)
+                                            .testTag("settings_unowned_discard_btn")
+                                    ) {
+                                        Text(
+                                            text = stringResource(R.string.settings_unowned_data_discard),
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
                                     }
                                 }
                             }

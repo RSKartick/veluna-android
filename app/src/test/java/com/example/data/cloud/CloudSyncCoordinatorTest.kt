@@ -67,11 +67,15 @@ class CloudSyncCoordinatorTest : FirestoreEmulatorTestBase() {
             dao = dao,
             prefsRepo = prefsRepo,
             innerTube = InnerTubeClient(OkHttpClient()),
-            database = db
+            database = db,
+            journalDir = File(dir, "journal")
         )
 
-        fun createCoordinator(): CloudSyncCoordinator {
-            val cloudRepo = CloudSyncRepository(firestore, auth)
+        fun createCoordinator(
+            customCloudRepo: CloudSyncRepository? = null,
+            autoStartSync: Boolean = true
+        ): CloudSyncCoordinator {
+            val cloudRepo = customCloudRepo ?: CloudSyncRepository(firestore, auth)
             return CloudSyncCoordinator(
                 context = context,
                 dao = dao,
@@ -79,7 +83,9 @@ class CloudSyncCoordinatorTest : FirestoreEmulatorTestBase() {
                 repository = repo,
                 cloudRepo = cloudRepo,
                 auth = auth,
-                ioDispatcher = Dispatchers.IO
+                ioDispatcher = Dispatchers.IO,
+                stateDir = File(dir, "sync_state"),
+                autoStartSync = autoStartSync
             ).also { coordinators.add(it) }
         }
     }
@@ -732,6 +738,497 @@ class CloudSyncCoordinatorTest : FirestoreEmulatorTestBase() {
         assertThat(coord.authState.value.isSignedIn).isFalse()
         assertThat(dev.dao.getPlaylistsOnce()).isEmpty()
         coord.shutdown()
+    }
+
+    @Test
+    fun playlistMerge_offlineAddThenRemoveVsConcurrentAddition_preservesIntentionalRemovalDeterministically(): Unit = runBlocking {
+        val email = "add_rem_${UUID.randomUUID()}@test.com"
+        signInTestUser(email)
+
+        val devA = TestDevice("AddRemA")
+        val devB = TestDevice("AddRemB")
+
+        val plIdA = devA.repo.createPlaylist("Causal Mix", "Base")
+        val t1 = SongItem(videoId = "trk_base", title = "Base Song", artists = "Artist")
+        val tX = SongItem(videoId = "trk_x", title = "Disputed Song", artists = "Artist")
+        devA.repo.addTrackToPlaylist(plIdA, t1)
+
+        val cA1 = devA.createCoordinator()
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(cA1.syncNowAndAwait()).isTrue() }
+        cA1.shutdown()
+
+        val cB1 = devB.createCoordinator()
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(cB1.syncNowAndAwait()).isTrue() }
+        cB1.shutdown()
+        val plIdB = devB.dao.getPlaylistsOnce().single().id
+
+        // Device B adds tX offline FIRST
+        devB.repo.addTrackToPlaylist(plIdB, tX)
+        kotlinx.coroutines.delay(10L)
+
+        // Device A independently adds tX and then intentionally REMOVES tX offline AFTER B's addition
+        devA.repo.addTrackToPlaylist(plIdA, tX)
+        kotlinx.coroutines.delay(10L)
+        devA.repo.removeTrackFromPlaylist(plIdA, "trk_x")
+
+        // B syncs first -> cloud has [trk_base, trk_x]
+        val cB2 = devB.createCoordinator()
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(cB2.syncNowAndAwait()).isTrue() }
+        cB2.shutdown()
+
+        // A reconnects and syncs -> A's newer causal removal tombstone of trk_x must win, NOT be resurrected!
+        val cA2 = devA.createCoordinator()
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(cA2.syncNowAndAwait()).isTrue() }
+        cA2.shutdown()
+
+        // B syncs again -> both converge without trk_x
+        val cB3 = devB.createCoordinator()
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(cB3.syncNowAndAwait()).isTrue() }
+        cB3.shutdown()
+
+        assertThat(devA.dao.getPlaylistTracks(plIdA).map { it.videoId }).containsExactly("trk_base")
+        assertThat(devB.dao.getPlaylistTracks(plIdB).map { it.videoId }).containsExactly("trk_base")
+    }
+
+    @Test
+    fun playlistMerge_removeThenIntentionalReAdd_andConcurrentReordersConvergeAcrossDevices(): Unit = runBlocking {
+        val email = "readd_reorder_${UUID.randomUUID()}@test.com"
+        signInTestUser(email)
+
+        val devA = TestDevice("ReaddA")
+        val devB = TestDevice("ReaddB")
+
+        val plIdA = devA.repo.createPlaylist("Order & Readd", "Base")
+        val s1 = SongItem("trk_1", "One", "A")
+        val s2 = SongItem("trk_2", "Two", "A")
+        val s3 = SongItem("trk_3", "Three", "A")
+        val s4 = SongItem("trk_4", "Four", "A")
+        devA.repo.addTrackToPlaylist(plIdA, s1)
+        devA.repo.addTrackToPlaylist(plIdA, s2)
+        devA.repo.addTrackToPlaylist(plIdA, s3)
+
+        val cA1 = devA.createCoordinator()
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(cA1.syncNowAndAwait()).isTrue() }
+        cA1.shutdown()
+
+        val cB1 = devB.createCoordinator()
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(cB1.syncNowAndAwait()).isTrue() }
+        cB1.shutdown()
+        val plIdB = devB.dao.getPlaylistsOnce().single().id
+
+        // Device A removes s2 and reorders remaining tracks [s3, s1] -> syncs
+        devA.repo.removeTrackFromPlaylist(plIdA, "trk_2")
+        devA.repo.reorderPlaylistTracksByIndex(plIdA, 1, 0) // [s3, s1]
+        val cA2 = devA.createCoordinator()
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(cA2.syncNowAndAwait()).isTrue() }
+        cA2.shutdown()
+
+        // Device B picks up the removal and reorder, then intentionally re-adds s2 & adds s4 later
+        val cB2 = devB.createCoordinator()
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(cB2.syncNowAndAwait()).isTrue() }
+        assertThat(devB.dao.getPlaylistTracks(plIdB).map { it.videoId }).containsExactly("trk_3", "trk_1").inOrder()
+        kotlinx.coroutines.delay(10L)
+        devB.repo.addTrackToPlaylist(plIdB, s2)
+        devB.repo.addTrackToPlaylist(plIdB, s4)
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(cB2.syncNowAndAwait()).isTrue() }
+        cB2.shutdown()
+
+        // Device A syncs repeatedly -> converges idempotently without duplicates
+        val cA3 = devA.createCoordinator()
+        withTimeout(SYNC_TIMEOUT_MS) {
+            assertThat(cA3.syncNowAndAwait()).isTrue()
+            assertThat(cA3.syncNowAndAwait()).isTrue()
+        }
+        cA3.shutdown()
+
+        val finalA = devA.dao.getPlaylistTracks(plIdA).map { it.videoId }
+        val finalB = devB.dao.getPlaylistTracks(plIdB).map { it.videoId }
+        assertThat(finalA).hasSize(4)
+        assertThat(finalA.toSet()).containsExactly("trk_1", "trk_2", "trk_3", "trk_4")
+        assertThat(finalB).isEqualTo(finalA)
+    }
+
+    @Test
+    fun playlistThreeWayMerger_sameTimestampDifferentDeviceIdAndOrderConvergence_arePerspectiveIndependent() {
+        val t1 = SongItem("trk_1", "One", "A")
+        val t2 = SongItem("trk_2", "Two", "A")
+        val t3 = SongItem("trk_3", "Three", "A")
+        val base = PlaylistBaselineSnapshot(
+            title = "Shared",
+            description = "Orig",
+            remoteCoverUri = null,
+            coverRemoved = false,
+            trackIds = listOf("trk_1"),
+            trackOps = mapOf("trk_1" to BaselineTrackOp(false, SyncMutationStamp(1_000L, 1L, "dev_a", "op_0")))
+        )
+        val tsSame = 5_000L
+        val titleA = SyncMutationStamp(tsSame, 2L, "dev_alpha", "op_a")
+        val titleB = SyncMutationStamp(tsSame, 2L, "dev_beta", "op_b")
+        val addA = SyncMutationStamp(tsSame, 3L, "dev_alpha", "op_add_a")
+        val addB = SyncMutationStamp(tsSame, 3L, "dev_beta", "op_add_b")
+
+        val fromPerspectiveAlpha = PlaylistThreeWayMerger.merge(
+            baseline = base,
+            localTitle = "Title From Alpha",
+            localDescription = "Orig",
+            localRemoteCoverUri = null,
+            localCoverRemoved = false,
+            localTracks = listOf(t1, t2),
+            localUpdatedAt = tsSame,
+            remoteTitle = "Title From Beta",
+            remoteDescription = "Orig",
+            remoteCoverUri = "https://cdn.example.com/beta.jpg",
+            remoteCoverRemoved = false,
+            remoteTracks = listOf(t1, t3),
+            remoteUpdatedAt = tsSame,
+            localDeviceId = "dev_alpha",
+            localFieldStamps = mapOf(PlaylistThreeWayMerger.FIELD_TITLE to titleA),
+            localTrackOps = mapOf("trk_2" to BaselineTrackOp(false, addA)),
+            remoteDeviceId = "dev_beta",
+            remoteFieldStamps = mapOf(
+                PlaylistThreeWayMerger.FIELD_TITLE to titleB,
+                PlaylistThreeWayMerger.FIELD_COVER to titleB
+            ),
+            remoteTrackAddStamps = mapOf("trk_3" to addB)
+        )
+
+        val fromPerspectiveBeta = PlaylistThreeWayMerger.merge(
+            baseline = base,
+            localTitle = "Title From Beta",
+            localDescription = "Orig",
+            localRemoteCoverUri = "https://cdn.example.com/beta.jpg",
+            localCoverRemoved = false,
+            localTracks = listOf(t1, t3),
+            localUpdatedAt = tsSame,
+            remoteTitle = "Title From Alpha",
+            remoteDescription = "Orig",
+            remoteCoverUri = null,
+            remoteCoverRemoved = false,
+            remoteTracks = listOf(t1, t2),
+            remoteUpdatedAt = tsSame,
+            localDeviceId = "dev_beta",
+            localFieldStamps = mapOf(
+                PlaylistThreeWayMerger.FIELD_TITLE to titleB,
+                PlaylistThreeWayMerger.FIELD_COVER to titleB
+            ),
+            localTrackOps = mapOf("trk_3" to BaselineTrackOp(false, addB)),
+            remoteDeviceId = "dev_alpha",
+            remoteFieldStamps = mapOf(PlaylistThreeWayMerger.FIELD_TITLE to titleA),
+            remoteTrackAddStamps = mapOf("trk_2" to addA)
+        )
+
+        assertThat(fromPerspectiveAlpha.title).isEqualTo(fromPerspectiveBeta.title)
+        assertThat(fromPerspectiveAlpha.title).isEqualTo("Title From Beta")
+        assertThat(fromPerspectiveAlpha.remoteCoverUri).isEqualTo(fromPerspectiveBeta.remoteCoverUri)
+        assertThat(fromPerspectiveAlpha.tracks.map { it.videoId })
+            .isEqualTo(fromPerspectiveBeta.tracks.map { it.videoId })
+        assertThat(fromPerspectiveAlpha.winningPlaylistStamp).isEqualTo(fromPerspectiveBeta.winningPlaylistStamp)
+
+        // Duplicate identical op delivery never creates duplicate tracks
+        val dupOpCheck = PlaylistThreeWayMerger.merge(
+            baseline = base,
+            localTitle = "Title From Beta",
+            localDescription = "Orig",
+            localRemoteCoverUri = null,
+            localCoverRemoved = false,
+            localTracks = listOf(t1, t2),
+            localUpdatedAt = tsSame,
+            remoteTitle = "Title From Beta",
+            remoteDescription = "Orig",
+            remoteCoverUri = null,
+            remoteCoverRemoved = false,
+            remoteTracks = listOf(t1, t2),
+            remoteUpdatedAt = tsSame,
+            localDeviceId = "dev_beta",
+            localTrackOps = mapOf("trk_2" to BaselineTrackOp(false, addB)),
+            remoteDeviceId = "dev_beta",
+            remoteTrackAddStamps = mapOf("trk_2" to addB)
+        )
+        assertThat(dupOpCheck.tracks.map { it.videoId }).containsExactly("trk_1", "trk_2")
+        assertThat(dupOpCheck.needsLocalUpdate).isFalse()
+    }
+
+    @Test
+    fun playlistMerge_legacyV4BaselineWithoutSnapshotJson_migratesAndMergesSafely(): Unit = runBlocking {
+        val email = "leg_base_${UUID.randomUUID()}@test.com"
+        val uid = signInTestUser(email)
+
+        val dev = TestDevice("LegacyBase")
+        val plId = dev.dao.createPlaylistWithTracks(
+            playlist = com.example.data.local.LocalPlaylistEntity(
+                cloudKey = "pl_local_42",
+                title = "Legacy Album Mix",
+                description = "From v4",
+                createdAt = 1700000000000L,
+                updatedAt = 1700000001000L,
+                syncRevision = 1L
+            ),
+            tracks = listOf(
+                com.example.data.local.LocalPlaylistTrackEntity(
+                    playlistId = 0,
+                    videoId = "trk_leg_1",
+                    songJson = dev.repo.encodeSong(SongItem("trk_leg_1", "Leg 1", "Artist")),
+                    position = 0,
+                    addedAt = 1700000000000L
+                )
+            )
+        )
+        // Legacy baseline row has empty snapshotJson
+        dev.dao.upsertSyncBaseline(
+            com.example.data.local.SyncBaselineEntity(
+                userId = uid,
+                entityType = SyncEntityTypes.PLAYLIST,
+                entityKey = "pl_local_42",
+                revision = 1L,
+                signature = "old_sig",
+                clientUpdatedAt = 1700000001000L,
+                deleted = false,
+                updatedAt = 1700000001000L,
+                snapshotJson = ""
+            )
+        )
+        dev.prefsRepo.setActiveCloudUid(uid)
+
+        val coord = dev.createCoordinator()
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(coord.syncNowAndAwait()).isTrue() }
+        coord.shutdown()
+
+        val upgradedBase = dev.dao.getAllSyncBaselinesForUser(uid)
+            .first { it.entityType == SyncEntityTypes.PLAYLIST && it.entityKey == "pl_local_42" }
+        assertThat(upgradedBase.snapshotJson).isNotEmpty()
+        assertThat(dev.dao.getPlaylistById(plId)?.cloudKey).isEqualTo("pl_local_42")
+        assertThat(dev.dao.getPlaylistTracks(plId).map { it.videoId }).containsExactly("trk_leg_1")
+    }
+
+    @Test
+    fun unknownOwnerUpgrade_failsClosedIntoQuarantine_andSupportsExplicitMergeOrDiscard(): Unit = runBlocking {
+        val emailB = "unowned_b_${UUID.randomUUID()}@test.com"
+        // Seed Account B cloud first with B's own cloud playlist
+        signInTestUser(emailB)
+        val cloudRepo = CloudSyncRepository(firestore, auth)
+        cloudRepo.upsertPlaylist(
+            playlistKey = "pl_bob_cloud",
+            title = "Bob Cloud List",
+            description = "From cloud",
+            coverUri = null,
+            tracks = listOf(SongItem("bob_trk", "Bob Song", "Bob")),
+            clientUpdatedAt = System.currentTimeMillis(),
+            syncRevision = 1L
+        )
+
+        // Device 1: simulate legacy pre-ACTIVE_CLOUD_UID upgrade with pl_local_* + like + blocked + tombstone + device-only SavedAlbum
+        val devMerge = TestDevice("UpgradeMerge")
+        devMerge.dao.createPlaylistWithTracks(
+            playlist = com.example.data.local.LocalPlaylistEntity(
+                cloudKey = "pl_local_1",
+                title = "Unowned Local List",
+                description = "Pre-upgrade",
+                createdAt = 1700000000000L,
+                updatedAt = 1700000005000L,
+                syncRevision = 1L
+            ),
+            tracks = listOf(
+                com.example.data.local.LocalPlaylistTrackEntity(
+                    playlistId = 0,
+                    videoId = "unowned_trk",
+                    songJson = devMerge.repo.encodeSong(SongItem("unowned_trk", "Unowned Song", "A")),
+                    position = 0,
+                    addedAt = 1700000005000L
+                )
+            )
+        )
+        devMerge.repo.toggleLike(SongItem("unowned_like", "Unowned Like", "A"))
+        devMerge.repo.blockArtist("Unowned Blocked")
+        devMerge.dao.insertSavedAlbum(SavedAlbumEntity("keep_alb", "Keep Album", "Device only", null))
+        assertThat(devMerge.prefsRepo.getActiveCloudUid()).isNull()
+
+        val coordMerge = devMerge.createCoordinator()
+        // Fail closed! Must NOT sync into Bob's cloud automatically
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(coordMerge.syncNowAndAwait()).isFalse() }
+        assertThat(coordMerge.authState.value.hasUnownedDataConflict).isTrue()
+        assertThat(coordMerge.authState.value.unownedDataItemCount).isAtLeast(3)
+        assertThat(coordMerge.readQuarantineFile()).isNotNull()
+        assertThat(devMerge.dao.getPlaylistsOnce()).isEmpty()
+        assertThat(devMerge.dao.getSavedAlbumsOnce().map { it.albumId }).containsExactly("keep_alb")
+
+        // Verify Bob's cloud still contains ONLY Bob's original playlist!
+        val cloudWhileQuarantined = cloudRepo.fetchAccountSnapshot()
+        assertThat(cloudWhileQuarantined.playlists.map { it.playlist.title }).containsExactly("Bob Cloud List")
+        assertThat(cloudWhileQuarantined.likedSongs).isEmpty()
+
+        // Explicit Merge option restores quarantine, adopts ownership, and merges with Bob's cloud
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(coordMerge.resolveUnownedDataMergeAndAwait()).isTrue() }
+        assertThat(coordMerge.authState.value.hasUnownedDataConflict).isFalse()
+        assertThat(coordMerge.readQuarantineFile()).isNull()
+        assertThat(devMerge.dao.getPlaylistsOnce().map { it.title })
+            .containsExactly("Bob Cloud List", "Unowned Local List")
+        assertThat(devMerge.dao.getSavedAlbumsOnce().map { it.albumId }).containsExactly("keep_alb")
+        coordMerge.shutdown()
+
+        // Device 2: same unowned upgrade state, user chooses Discard & Sync Account
+        val devDiscard = TestDevice("UpgradeDiscard")
+        devDiscard.dao.createPlaylistWithTracks(
+            playlist = com.example.data.local.LocalPlaylistEntity(
+                cloudKey = "pl_local_99",
+                title = "Should Discard Only Synced",
+                description = "",
+                createdAt = 1700000000000L,
+                updatedAt = 1700000005000L,
+                syncRevision = 1L
+            ),
+            tracks = emptyList()
+        )
+        devDiscard.dao.insertSavedAlbum(SavedAlbumEntity("keep_alb_2", "Keep Album 2", "Device only", null))
+        val coordDiscard = devDiscard.createCoordinator()
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(coordDiscard.syncNowAndAwait()).isFalse() }
+        assertThat(coordDiscard.authState.value.hasUnownedDataConflict).isTrue()
+
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(coordDiscard.resolveUnownedDataDiscardAndAwait()).isTrue() }
+        assertThat(coordDiscard.authState.value.hasUnownedDataConflict).isFalse()
+        assertThat(coordDiscard.readQuarantineFile()).isNull()
+        assertThat(devDiscard.dao.getPlaylistsOnce().map { it.title }).contains("Bob Cloud List")
+        assertThat(devDiscard.dao.getPlaylistsOnce().map { it.title }).doesNotContain("Should Discard Only Synced")
+        assertThat(devDiscard.dao.getSavedAlbumsOnce().map { it.albumId }).containsExactly("keep_alb_2")
+        coordDiscard.shutdown()
+    }
+
+    @Test
+    fun foreignBaselinesWithoutActiveUid_failsClosed_andProcessDeathDuringAccountSwitchRecoversSafely(): Unit = runBlocking {
+        val emailA = "sw_a_${UUID.randomUUID()}@test.com"
+        val emailB = "sw_b_${UUID.randomUUID()}@test.com"
+        val uidA = signInTestUser(emailA)
+
+        // Part 1: Device has baselines for uidA without ACTIVE_CLOUD_UID (corrupted/legacy prefs), signs in as B -> fails closed!
+        val devForeign = TestDevice("ForeignBase")
+        devForeign.repo.createPlaylist("Alice UUID Pl", "")
+        devForeign.dao.upsertSyncBaseline(
+            com.example.data.local.SyncBaselineEntity(
+                userId = uidA,
+                entityType = SyncEntityTypes.PLAYLIST,
+                entityKey = devForeign.dao.getPlaylistsOnce().single().cloudKey,
+                revision = 1L,
+                signature = "sig",
+                clientUpdatedAt = 1000L,
+                deleted = false,
+                updatedAt = 1000L
+            )
+        )
+        val uidB = signInTestUser(emailB)
+        val coordForeign = devForeign.createCoordinator()
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(coordForeign.syncNowAndAwait()).isFalse() }
+        assertThat(coordForeign.authState.value.hasUnownedDataConflict).isTrue()
+        assertThat(CloudSyncRepository(firestore, auth).fetchAccountSnapshot().playlists).isEmpty()
+        coordForeign.shutdown()
+
+        // Part 2: Account A -> B transition process death mid-wipe, followed by B -> A round-trip
+        signInTestUser(emailA)
+        val dev = TestDevice("CrashSwitch")
+        val plIdA = dev.repo.createPlaylist("Alice Real Data", "")
+        dev.repo.addTrackToPlaylist(plIdA, SongItem("a_trk", "Alice Song", "Alice"))
+        dev.dao.insertSavedAlbum(SavedAlbumEntity("dev_alb_switch", "Device Album", "Keep", null))
+        val cA1 = dev.createCoordinator()
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(cA1.syncNowAndAwait()).isTrue() }
+        cA1.shutdown()
+
+        // Start switch to B and simulate crash right after PENDING_ACCOUNT_TRANSITION_UID is persisted
+        signInTestUser(emailB)
+        val cCrash = dev.createCoordinator(autoStartSync = false)
+        cCrash.onAfterAccountTransitionWipeBeforeFinalize = { _, _ ->
+            throw IllegalStateException("Simulated crash mid-account transition")
+        }
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(cCrash.syncNowAndAwait()).isFalse() }
+        assertThat(dev.prefsRepo.getPendingAccountTransitionUid()).isEqualTo(uidB)
+        cCrash.shutdown()
+
+        // Process restarts on Account B -> resumes pending transition wipe before touching cloud B!
+        val cBResume = dev.createCoordinator()
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(cBResume.syncNowAndAwait()).isTrue() }
+        cBResume.shutdown()
+
+        assertThat(dev.prefsRepo.getPendingAccountTransitionUid()).isNull()
+        assertThat(dev.prefsRepo.getActiveCloudUid()).isEqualTo(uidB)
+        assertThat(dev.dao.getPlaylistsOnce()).isEmpty()
+        assertThat(dev.dao.getSavedAlbumsOnce().map { it.albumId }).containsExactly("dev_alb_switch")
+        assertThat(CloudSyncRepository(firestore, auth).fetchAccountSnapshot().playlists).isEmpty()
+
+        // Now switch B -> A: A's cloud data restores cleanly while device-only album stays
+        signInTestUser(emailA)
+        val cBackToA = dev.createCoordinator()
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(cBackToA.syncNowAndAwait()).isTrue() }
+        cBackToA.shutdown()
+        assertThat(dev.prefsRepo.getActiveCloudUid()).isEqualTo(uidA)
+        assertThat(dev.dao.getPlaylistsOnce().map { it.title }).containsExactly("Alice Real Data")
+        assertThat(dev.dao.getSavedAlbumsOnce().map { it.albumId }).containsExactly("dev_alb_switch")
+    }
+
+    @Test
+    fun partialCollectionSyncFailure_keepsSyncNowFalseAndDoesNotAdvanceFailingWatermark(): Unit = runBlocking {
+        val email = "partial_fail_${UUID.randomUUID()}@test.com"
+        signInTestUser(email)
+
+        val dev = TestDevice("PartialFail")
+        dev.repo.toggleLike(SongItem("like_ok", "Liked Ok", "A"))
+        dev.repo.createPlaylist("Failing Upload Pl", "Will fail tx")
+        dev.repo.blockArtist("Blocked Ok")
+
+        val faultRepo = CloudSyncRepository(firestore, auth).apply {
+            onBeforePublishTransaction = { _, _ ->
+                throw java.io.IOException("Simulated playlist publish network failure")
+            }
+        }
+        val coord = dev.createCoordinator(customCloudRepo = faultRepo)
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(coord.syncNowAndAwait()).isFalse() }
+
+        // Honest error reporting: errorMessage non-null, pending > 0, playlists watermark stayed at 0L
+        assertThat(coord.authState.value.errorMessage).isNotNull()
+        assertThat(coord.authState.value.pendingUnsyncedCount).isAtLeast(1)
+        assertThat(dev.prefsRepo.getSyncWatermark(UserPrefsRepository.WATERMARK_PLAYLISTS)).isEqualTo(0L)
+
+        // Likes and hidden artists were NOT rolled back or lost
+        val snapDuringFailure = CloudSyncRepository(firestore, auth).fetchAccountSnapshot()
+        assertThat(snapDuringFailure.likedSongs.map { it.videoId }).containsExactly("like_ok")
+        assertThat(snapDuringFailure.hiddenArtists.map { it.name }).containsExactly("Blocked Ok")
+
+        // Clear fault and retry -> full sync succeeds cleanly
+        faultRepo.onBeforePublishTransaction = null
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(coord.syncNowAndAwait()).isTrue() }
+        assertThat(coord.authState.value.errorMessage).isNull()
+        assertThat(coord.authState.value.pendingUnsyncedCount).isEqualTo(0)
+        assertThat(CloudSyncRepository(firestore, auth).fetchAccountSnapshot().playlists.map { it.playlist.title })
+            .containsExactly("Failing Upload Pl")
+        coord.shutdown()
+    }
+
+    @Test
+    fun staleOfflineClient_zeroLastSuccessAtWithBaselines_triggersCompactionFullFetch(): Unit = runBlocking {
+        val email = "stale_zero_${UUID.randomUUID()}@test.com"
+        val uid = signInTestUser(email)
+
+        val dev = TestDevice("StaleZero")
+        val compactedId = dev.repo.createPlaylist("Old Deleted Remotely", "")
+        val keepId = dev.repo.createPlaylist("Keep Stale", "")
+        val c1 = dev.createCoordinator()
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(c1.syncNowAndAwait()).isTrue() }
+        c1.shutdown()
+
+        val oldKey = dev.dao.getPlaylistById(compactedId)!!.cloudKey
+        val realLastSuccess = dev.prefsRepo.getLastSuccessfulSyncAtMs(uid)
+        val cloudRepo = CloudSyncRepository(firestore, auth)
+        val oldTombTs = realLastSuccess - 40L * 24L * 3600L * 1000L
+        cloudRepo.deletePlaylist(oldKey, clientUpdatedAt = oldTombTs, syncRevision = 2L)
+        cloudRepo.purgeExpiredCloudTombstones(uid, realLastSuccess + 60_000L)
+
+        // Simulate reset/zeroed lastSuccessfulSyncAtMs while durable baselines remain
+        dev.prefsRepo.setLastSuccessfulSyncAtMs(uid, 0L)
+        dev.repo.updatePlaylist(keepId, "Keep Updated", "", null)
+
+        val c2 = dev.createCoordinator()
+        withTimeout(SYNC_TIMEOUT_MS) { assertThat(c2.syncNowAndAwait()).isTrue() }
+        c2.shutdown()
+
+        assertThat(dev.dao.getPlaylistsOnce().map { it.title }).containsExactly("Keep Updated")
+        assertThat(cloudRepo.fetchAccountSnapshot().playlists.filter { !it.playlist.deleted }.map { it.playlist.title })
+            .containsExactly("Keep Updated")
     }
 
     private companion object {

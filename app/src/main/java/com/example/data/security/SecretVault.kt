@@ -1,7 +1,9 @@
 package com.example.data.security
 
 import android.content.Context
+import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyInfo
 import android.security.keystore.KeyProperties
 import android.util.Base64
 import kotlinx.serialization.encodeToString
@@ -16,6 +18,7 @@ import java.security.SecureRandom
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
+import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
@@ -29,6 +32,22 @@ interface VaultCipher {
     fun decrypt(ciphertextWithIv: ByteArray): ByteArray
     fun deleteKey()
 }
+
+enum class KeySecurityLevel {
+    SOFTWARE,
+    TRUSTED_ENVIRONMENT,
+    STRONGBOX,
+    UNKNOWN_HARDWARE,
+    UNAVAILABLE
+}
+
+data class KeySecurityReport(
+    val keyAlias: String,
+    val securityLevel: KeySecurityLevel,
+    val isInsideSecureHardware: Boolean,
+    val apiLevel: Int,
+    val details: String
+)
 
 class AndroidKeyStoreVaultCipher(
     private val keyAlias: String = DEFAULT_KEY_ALIAS
@@ -51,6 +70,58 @@ class AndroidKeyStoreVaultCipher(
             .build()
         generator.init(spec)
         return generator.generateKey()
+    }
+
+    fun inspectKeySecurity(): KeySecurityReport {
+        val api = Build.VERSION.SDK_INT
+        return try {
+            val key = getOrCreateKey()
+            val factory = SecretKeyFactory.getInstance(key.algorithm, ANDROID_KEYSTORE)
+            val keyInfo = factory.getKeySpec(key, KeyInfo::class.java) as KeyInfo
+            if (api >= Build.VERSION_CODES.S) {
+                val rawLevel = keyInfo.securityLevel
+                val level = when (rawLevel) {
+                    KeyProperties.SECURITY_LEVEL_STRONGBOX -> KeySecurityLevel.STRONGBOX
+                    KeyProperties.SECURITY_LEVEL_TRUSTED_ENVIRONMENT -> KeySecurityLevel.TRUSTED_ENVIRONMENT
+                    KeyProperties.SECURITY_LEVEL_SOFTWARE -> KeySecurityLevel.SOFTWARE
+                    KeyProperties.SECURITY_LEVEL_UNKNOWN_SECURE -> KeySecurityLevel.UNKNOWN_HARDWARE
+                    else -> KeySecurityLevel.SOFTWARE
+                }
+                val inHardware = level == KeySecurityLevel.STRONGBOX ||
+                    level == KeySecurityLevel.TRUSTED_ENVIRONMENT ||
+                    level == KeySecurityLevel.UNKNOWN_HARDWARE
+                KeySecurityReport(
+                    keyAlias = keyAlias,
+                    securityLevel = level,
+                    isInsideSecureHardware = inHardware,
+                    apiLevel = api,
+                    details = "API $api KeyInfo.securityLevel=$rawLevel ($level)"
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                val inHardware = keyInfo.isInsideSecureHardware
+                val level = if (inHardware) KeySecurityLevel.TRUSTED_ENVIRONMENT else KeySecurityLevel.SOFTWARE
+                KeySecurityReport(
+                    keyAlias = keyAlias,
+                    securityLevel = level,
+                    isInsideSecureHardware = inHardware,
+                    apiLevel = api,
+                    details = if (inHardware) {
+                        "API $api KeyInfo.isInsideSecureHardware=true (TEE/StrongBox indistinct below API 31)"
+                    } else {
+                        "API $api KeyInfo.isInsideSecureHardware=false (software-backed Keystore)"
+                    }
+                )
+            }
+        } catch (t: Throwable) {
+            KeySecurityReport(
+                keyAlias = keyAlias,
+                securityLevel = KeySecurityLevel.UNAVAILABLE,
+                isInsideSecureHardware = false,
+                apiLevel = api,
+                details = "KeyInfo inspection failed: ${t::class.java.simpleName}: ${t.message}"
+            )
+        }
     }
 
     override fun encrypt(plaintext: ByteArray): ByteArray {

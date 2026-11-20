@@ -711,6 +711,8 @@ private fun SettingsTabPane(
     val onDeleteAccount = remember(context, container) { { container.cloudSyncCoordinator.deleteAccount(context) } }
     val onClearDeleteAccountError = remember(container) { { container.cloudSyncCoordinator.clearDeleteAccountError() } }
     val onSyncNow = remember(container) { { container.cloudSyncCoordinator.syncNow() } }
+    val onMergeUnownedData = remember(container) { { container.cloudSyncCoordinator.resolveUnownedDataMergeIntoCurrentAccount() } }
+    val onDiscardUnownedData = remember(container) { { container.cloudSyncCoordinator.resolveUnownedDataDiscardAndSyncAccount() } }
 
     SettingsScreen(
         prefs = prefs,
@@ -728,6 +730,8 @@ private fun SettingsTabPane(
         onDeleteAccount = onDeleteAccount,
         onClearDeleteAccountError = onClearDeleteAccountError,
         onSyncNow = onSyncNow,
+        onMergeUnownedData = onMergeUnownedData,
+        onDiscardUnownedData = onDiscardUnownedData,
         onOpenTasteOnboarding = onOpenTasteOnboarding,
         onSetThemePreset = libraryStatsVm::setThemePreset,
         onSetThemeMode = libraryStatsVm::setThemeMode,

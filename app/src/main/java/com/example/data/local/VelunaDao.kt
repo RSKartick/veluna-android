@@ -5,6 +5,7 @@ import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Transaction
+import com.example.data.cloud.SyncMutationStamp
 import kotlinx.coroutines.flow.Flow
 
 data class PlaylistTrackCountRow(
@@ -34,7 +35,9 @@ data class LibraryRestoreSnapshot(
     val listenSongs: List<ListenSongEntity>,
     val listens: List<ListenEntity>,
     val playlists: List<LocalPlaylistEntity>,
-    val playlistTracks: List<LocalPlaylistTrackEntity>
+    val playlistTracks: List<LocalPlaylistTrackEntity>,
+    val playlistTrackOps: List<PlaylistTrackOpEntity> = emptyList(),
+    val playlistFieldOps: List<PlaylistFieldOpEntity> = emptyList()
 )
 
 @Dao
@@ -195,10 +198,120 @@ interface VelunaDao {
     @Query("UPDATE local_playlist_tracks SET position = :position WHERE id = :rowId")
     suspend fun updatePlaylistTrackPosition(rowId: Long, position: Int)
 
+    // --- Local Device Clock & Causal Playlist Ops ---
+    @Query("SELECT * FROM local_device_clock WHERE id = 1")
+    suspend fun getLocalDeviceClock(): LocalDeviceClockEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertLocalDeviceClock(clock: LocalDeviceClockEntity)
+
+    @Transaction
+    suspend fun allocateNextOperationStamp(
+        timestampMs: Long = System.currentTimeMillis(),
+        preferredDeviceId: String? = null,
+        opId: String = ""
+    ): SyncMutationStamp {
+        val existing = getLocalDeviceClock()
+        val deviceId = preferredDeviceId?.trim()?.takeIf { it.isNotBlank() }?.take(128)
+            ?: existing?.deviceId?.takeIf { it.isNotBlank() }
+            ?: ("dev_" + java.util.UUID.randomUUID().toString().replace("-", "").take(16))
+        val nextSeq = (existing?.lastSeq ?: 0L) + 1L
+        upsertLocalDeviceClock(LocalDeviceClockEntity(id = 1, deviceId = deviceId, lastSeq = nextSeq))
+        return SyncMutationStamp(
+            timestampMs = timestampMs.coerceAtLeast(0L),
+            seq = nextSeq,
+            deviceId = deviceId,
+            opId = opId.ifBlank { java.util.UUID.randomUUID().toString().replace("-", "").take(16) }
+        )
+    }
+
+    @Query("SELECT * FROM playlist_track_ops WHERE playlistId = :playlistId")
+    suspend fun getPlaylistTrackOps(playlistId: Long): List<PlaylistTrackOpEntity>
+
+    @Query("SELECT * FROM playlist_track_ops")
+    suspend fun getAllPlaylistTrackOpsOnce(): List<PlaylistTrackOpEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertPlaylistTrackOp(op: PlaylistTrackOpEntity)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertPlaylistTrackOps(ops: List<PlaylistTrackOpEntity>)
+
+    @Query("DELETE FROM playlist_track_ops WHERE playlistId = :playlistId")
+    suspend fun clearPlaylistTrackOps(playlistId: Long)
+
+    @Query("DELETE FROM playlist_track_ops")
+    suspend fun clearAllPlaylistTrackOps()
+
+    @Query("SELECT * FROM playlist_field_ops WHERE playlistId = :playlistId")
+    suspend fun getPlaylistFieldOps(playlistId: Long): List<PlaylistFieldOpEntity>
+
+    @Query("SELECT * FROM playlist_field_ops")
+    suspend fun getAllPlaylistFieldOpsOnce(): List<PlaylistFieldOpEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertPlaylistFieldOp(op: PlaylistFieldOpEntity)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertPlaylistFieldOps(ops: List<PlaylistFieldOpEntity>)
+
+    @Query("DELETE FROM playlist_field_ops WHERE playlistId = :playlistId")
+    suspend fun clearPlaylistFieldOps(playlistId: Long)
+
+    @Query("DELETE FROM playlist_field_ops")
+    suspend fun clearAllPlaylistFieldOps()
+
+    @Transaction
+    suspend fun updatePlaylistMetadataAtomic(
+        id: Long,
+        title: String,
+        description: String,
+        coverUri: String?,
+        remoteCoverUri: String?,
+        coverRemoved: Boolean,
+        updatedAt: Long,
+        preferredDeviceId: String? = null
+    ) {
+        val existing = getPlaylistById(id) ?: return
+        updatePlaylistWithCoverMeta(
+            id = id,
+            title = title,
+            description = description,
+            coverUri = coverUri,
+            remoteCoverUri = remoteCoverUri,
+            coverRemoved = coverRemoved,
+            updatedAt = updatedAt
+        )
+        val stamp = allocateNextOperationStamp(updatedAt, preferredDeviceId)
+        val existingFields = getPlaylistFieldOps(id).associateBy { it.fieldName }
+        if (existing.title != title || PlaylistFieldNames.TITLE !in existingFields) {
+            upsertPlaylistFieldOp(
+                PlaylistFieldOpEntity(id, PlaylistFieldNames.TITLE, stamp.timestampMs, stamp.seq, stamp.deviceId, stamp.opId)
+            )
+        }
+        if (existing.description != description || PlaylistFieldNames.DESCRIPTION !in existingFields) {
+            upsertPlaylistFieldOp(
+                PlaylistFieldOpEntity(id, PlaylistFieldNames.DESCRIPTION, stamp.timestampMs, stamp.seq, stamp.deviceId, stamp.opId)
+            )
+        }
+        if (existing.coverUri != coverUri ||
+            existing.remoteCoverUri != remoteCoverUri ||
+            existing.coverRemoved != coverRemoved ||
+            PlaylistFieldNames.COVER !in existingFields
+        ) {
+            upsertPlaylistFieldOp(
+                PlaylistFieldOpEntity(id, PlaylistFieldNames.COVER, stamp.timestampMs, stamp.seq, stamp.deviceId, stamp.opId)
+            )
+        }
+    }
+
     @Transaction
     suspend fun createPlaylistWithTracks(
         playlist: LocalPlaylistEntity,
-        tracks: List<LocalPlaylistTrackEntity>
+        tracks: List<LocalPlaylistTrackEntity>,
+        trackOps: List<PlaylistTrackOpEntity>? = null,
+        fieldOps: List<PlaylistFieldOpEntity>? = null,
+        preferredDeviceId: String? = null
     ): Long {
         require(playlist.cloudKey.isNotBlank()) { "Playlist cloudKey must not be blank" }
         val newId = insertPlaylist(playlist)
@@ -208,6 +321,40 @@ interface VelunaDao {
             }
             insertPlaylistTracks(normalized)
         }
+        if (fieldOps != null) {
+            if (fieldOps.isNotEmpty()) {
+                insertPlaylistFieldOps(fieldOps.map { it.copy(playlistId = newId) })
+            }
+        } else {
+            val stamp = allocateNextOperationStamp(playlist.updatedAt, preferredDeviceId)
+            insertPlaylistFieldOps(
+                listOf(
+                    PlaylistFieldOpEntity(newId, PlaylistFieldNames.TITLE, stamp.timestampMs, stamp.seq, stamp.deviceId, stamp.opId),
+                    PlaylistFieldOpEntity(newId, PlaylistFieldNames.DESCRIPTION, stamp.timestampMs, stamp.seq, stamp.deviceId, stamp.opId),
+                    PlaylistFieldOpEntity(newId, PlaylistFieldNames.COVER, stamp.timestampMs, stamp.seq, stamp.deviceId, stamp.opId),
+                    PlaylistFieldOpEntity(newId, PlaylistFieldNames.ORDER, stamp.timestampMs, stamp.seq, stamp.deviceId, stamp.opId)
+                )
+            )
+        }
+        if (trackOps != null) {
+            if (trackOps.isNotEmpty()) {
+                insertPlaylistTrackOps(trackOps.map { it.copy(playlistId = newId) })
+            }
+        } else if (tracks.isNotEmpty()) {
+            val resolvedTrackOps = tracks.distinctBy { it.videoId }.map { trk ->
+                val trkStamp = allocateNextOperationStamp(trk.addedAt, preferredDeviceId)
+                PlaylistTrackOpEntity(
+                    playlistId = newId,
+                    videoId = trk.videoId,
+                    deleted = false,
+                    timestampMs = trkStamp.timestampMs,
+                    opSeq = trkStamp.seq,
+                    deviceId = trkStamp.deviceId,
+                    opId = trkStamp.opId
+                )
+            }
+            insertPlaylistTrackOps(resolvedTrackOps)
+        }
         return newId
     }
 
@@ -216,7 +363,8 @@ interface VelunaDao {
         playlistId: Long,
         track: LocalPlaylistTrackEntity,
         skipDuplicates: Boolean,
-        updatedAt: Long
+        updatedAt: Long,
+        preferredDeviceId: String? = null
     ): Boolean {
         if (getPlaylistById(playlistId) == null) return false
         val existing = getPlaylistTracks(playlistId)
@@ -224,6 +372,28 @@ interface VelunaDao {
         val pos = (existing.maxOfOrNull { it.position } ?: -1) + 1
         insertPlaylistTrack(track.copy(id = 0, playlistId = playlistId, position = pos))
         touchPlaylistRevision(playlistId, updatedAt)
+        val stamp = allocateNextOperationStamp(updatedAt, preferredDeviceId)
+        upsertPlaylistTrackOp(
+            PlaylistTrackOpEntity(
+                playlistId = playlistId,
+                videoId = track.videoId,
+                deleted = false,
+                timestampMs = stamp.timestampMs,
+                opSeq = stamp.seq,
+                deviceId = stamp.deviceId,
+                opId = stamp.opId
+            )
+        )
+        upsertPlaylistFieldOp(
+            PlaylistFieldOpEntity(
+                playlistId = playlistId,
+                fieldName = PlaylistFieldNames.ORDER,
+                timestampMs = stamp.timestampMs,
+                opSeq = stamp.seq,
+                deviceId = stamp.deviceId,
+                opId = stamp.opId
+            )
+        )
         return true
     }
 
@@ -231,7 +401,8 @@ interface VelunaDao {
     suspend fun removeTrackFromPlaylistAtomic(
         playlistId: Long,
         videoId: String,
-        updatedAt: Long
+        updatedAt: Long,
+        preferredDeviceId: String? = null
     ): Boolean {
         val existing = getPlaylistTracks(playlistId)
         val remaining = existing.filterNot { it.videoId == videoId }
@@ -243,13 +414,36 @@ interface VelunaDao {
             }
         }
         touchPlaylistRevision(playlistId, updatedAt)
+        val stamp = allocateNextOperationStamp(updatedAt, preferredDeviceId)
+        upsertPlaylistTrackOp(
+            PlaylistTrackOpEntity(
+                playlistId = playlistId,
+                videoId = videoId,
+                deleted = true,
+                timestampMs = stamp.timestampMs,
+                opSeq = stamp.seq,
+                deviceId = stamp.deviceId,
+                opId = stamp.opId
+            )
+        )
+        upsertPlaylistFieldOp(
+            PlaylistFieldOpEntity(
+                playlistId = playlistId,
+                fieldName = PlaylistFieldNames.ORDER,
+                timestampMs = stamp.timestampMs,
+                opSeq = stamp.seq,
+                deviceId = stamp.deviceId,
+                opId = stamp.opId
+            )
+        )
         return true
     }
 
     @Transaction
     suspend fun removeDuplicateTracksFromPlaylistAtomic(
         playlistId: Long,
-        updatedAt: Long
+        updatedAt: Long,
+        preferredDeviceId: String? = null
     ): Int {
         val tracks = getPlaylistTracks(playlistId)
         val seen = HashSet<String>(tracks.size)
@@ -270,6 +464,17 @@ interface VelunaDao {
                 }
             }
             touchPlaylistRevision(playlistId, updatedAt)
+            val stamp = allocateNextOperationStamp(updatedAt, preferredDeviceId)
+            upsertPlaylistFieldOp(
+                PlaylistFieldOpEntity(
+                    playlistId = playlistId,
+                    fieldName = PlaylistFieldNames.ORDER,
+                    timestampMs = stamp.timestampMs,
+                    opSeq = stamp.seq,
+                    deviceId = stamp.deviceId,
+                    opId = stamp.opId
+                )
+            )
         }
         return removed
     }
@@ -278,7 +483,8 @@ interface VelunaDao {
     suspend fun reorderPlaylistTracksAtomic(
         playlistId: Long,
         orderedRowIds: List<Long>,
-        updatedAt: Long
+        updatedAt: Long,
+        preferredDeviceId: String? = null
     ): Boolean {
         val existing = getPlaylistTracks(playlistId)
         if (existing.size <= 1) return false
@@ -303,6 +509,17 @@ interface VelunaDao {
             }
         }
         touchPlaylistRevision(playlistId, updatedAt)
+        val stamp = allocateNextOperationStamp(updatedAt, preferredDeviceId)
+        upsertPlaylistFieldOp(
+            PlaylistFieldOpEntity(
+                playlistId = playlistId,
+                fieldName = PlaylistFieldNames.ORDER,
+                timestampMs = stamp.timestampMs,
+                opSeq = stamp.seq,
+                deviceId = stamp.deviceId,
+                opId = stamp.opId
+            )
+        )
         return true
     }
 
@@ -316,7 +533,9 @@ interface VelunaDao {
         coverRemoved: Boolean = false,
         updatedAt: Long,
         syncRevision: Long,
-        tracks: List<LocalPlaylistTrackEntity>
+        tracks: List<LocalPlaylistTrackEntity>,
+        trackOps: List<PlaylistTrackOpEntity>? = null,
+        fieldOps: List<PlaylistFieldOpEntity>? = null
     ) {
         updatePlaylistFromCloud(
             id = playlistId,
@@ -335,11 +554,25 @@ interface VelunaDao {
             }
             insertPlaylistTracks(normalized)
         }
+        if (trackOps != null) {
+            clearPlaylistTrackOps(playlistId)
+            if (trackOps.isNotEmpty()) {
+                insertPlaylistTrackOps(trackOps.map { it.copy(playlistId = playlistId) })
+            }
+        }
+        if (fieldOps != null) {
+            clearPlaylistFieldOps(playlistId)
+            if (fieldOps.isNotEmpty()) {
+                insertPlaylistFieldOps(fieldOps.map { it.copy(playlistId = playlistId) })
+            }
+        }
     }
 
     @Transaction
     suspend fun deletePlaylistAtomic(playlistId: Long, shortcutId: String) {
         clearPlaylistTracks(playlistId)
+        clearPlaylistTrackOps(playlistId)
+        clearPlaylistFieldOps(playlistId)
         deletePlaylist(playlistId)
         deleteShortcut(shortcutId)
     }
@@ -556,6 +789,12 @@ interface VelunaDao {
     @Query("DELETE FROM sync_baselines WHERE userId = :userId")
     suspend fun clearSyncBaselinesForUser(userId: String)
 
+    @Query("SELECT EXISTS(SELECT 1 FROM sync_baselines WHERE userId != :uid)")
+    suspend fun hasSyncBaselinesForOtherUsers(uid: String): Boolean
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertTombstones(tombstones: List<SyncTombstoneEntity>)
+
     @Query("DELETE FROM sync_baselines")
     suspend fun clearAllSyncBaselines()
 
@@ -623,7 +862,9 @@ interface VelunaDao {
             listenSongs = getAllListenSongs(),
             listens = getAllListensAsc(),
             playlists = getPlaylistsOnce(),
-            playlistTracks = getAllPlaylistTracksOnce()
+            playlistTracks = getAllPlaylistTracksOnce(),
+            playlistTrackOps = getAllPlaylistTrackOpsOnce(),
+            playlistFieldOps = getAllPlaylistFieldOpsOnce()
         )
     }
 
@@ -638,6 +879,8 @@ interface VelunaDao {
         clearListens()
         clearListenSongs()
         clearAllPlaylistTracks()
+        clearAllPlaylistTrackOps()
+        clearAllPlaylistFieldOps()
         clearPlaylists()
 
         if (snapshot.likedSongs.isNotEmpty()) insertLikedSongs(snapshot.likedSongs)
@@ -650,6 +893,8 @@ interface VelunaDao {
         if (snapshot.listens.isNotEmpty()) insertListens(snapshot.listens)
         if (snapshot.playlists.isNotEmpty()) insertPlaylists(snapshot.playlists)
         if (snapshot.playlistTracks.isNotEmpty()) insertPlaylistTracks(snapshot.playlistTracks)
+        if (snapshot.playlistTrackOps.isNotEmpty()) insertPlaylistTrackOps(snapshot.playlistTrackOps)
+        if (snapshot.playlistFieldOps.isNotEmpty()) insertPlaylistFieldOps(snapshot.playlistFieldOps)
     }
 
     /**
@@ -661,6 +906,8 @@ interface VelunaDao {
     suspend fun clearSyncedAccountData() {
         clearLikedSongs()
         clearAllPlaylistTracks()
+        clearAllPlaylistTrackOps()
+        clearAllPlaylistFieldOps()
         clearPlaylists()
         clearBlockedArtists()
         clearTombstones()

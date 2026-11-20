@@ -67,6 +67,8 @@ fun SettingsScreen(
     onDeleteAccount: () -> Unit = {},
     onClearDeleteAccountError: () -> Unit = {},
     onSyncNow: () -> Unit = {},
+    onMergeUnownedData: () -> Unit = {},
+    onDiscardUnownedData: () -> Unit = {},
     onOpenTasteOnboarding: () -> Unit = {},
     onSetThemePreset: (VelunaThemePreset) -> Unit,
     onSetThemeMode: (ThemeMode) -> Unit,
@@ -186,7 +188,9 @@ fun SettingsScreen(
                     onSyncNow = onSyncNow,
                     onOpenTasteOnboarding = onOpenTasteOnboarding,
                     onSetDisplayName = onSetDisplayName,
-                    onStatusMessage = onStatusMessage
+                    onStatusMessage = onStatusMessage,
+                    onMergeUnownedData = onMergeUnownedData,
+                    onDiscardUnownedData = onDiscardUnownedData
                 )
             }
 

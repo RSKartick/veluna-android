@@ -33,7 +33,7 @@ jobs:
           node-version: "20"
 
       - name: Set up JDK 21
-        uses: actions/setup-java@7a6d8a8234af8eb2242217b70068324b1c157384 # v4.2.2
+        uses: actions/setup-java@6a0805fcefea3d4657a47ac4c165951e33482018 # v4.2.2
         with:
           distribution: temurin
           java-version: "21"
@@ -107,7 +107,7 @@ jobs:
           retention-days: 7
 
   instrumentation-test:
-    name: Verify Hardware Keystore & Instrumentation Tests
+    name: Android Keystore Instrumentation Tests
     runs-on: ubuntu-latest
 
     steps:
@@ -117,7 +117,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up JDK 21
-        uses: actions/setup-java@7a6d8a8234af8eb2242217b70068324b1c157384 # v4.2.2
+        uses: actions/setup-java@6a0805fcefea3d4657a47ac4c165951e33482018 # v4.2.2
         with:
           distribution: temurin
           java-version: "21"
@@ -246,7 +246,7 @@ jobs:
           [ -s app/google-services.json ] || { echo "Failed to write google-services.json"; exit 1; }
 
       - name: Set up JDK 21
-        uses: actions/setup-java@7a6d8a8234af8eb2242217b70068324b1c157384 # v4.2.2
+        uses: actions/setup-java@6a0805fcefea3d4657a47ac4c165951e33482018 # v4.2.2
         with:
           distribution: temurin
           java-version: "21"
@@ -304,7 +304,7 @@ jobs:
           retention-days: 30
 
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@3d0d98811d7f6d4d14210d7e6827038e3523f663 # v3.0.2
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           tag_name: ${{ github.ref_name }}
           name: Veluna ${{ github.ref_name }}

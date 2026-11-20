@@ -34,7 +34,7 @@ class SecretVaultAndroidTest {
     }
 
     @Test
-    fun androidKeyStoreCipher_usesUniqueHardwareIvAndRoundTripsPlaintext() {
+    fun androidKeyStoreCipher_usesUniqueRandomIvAndRoundTripsPlaintext() {
         val payload = "sensitive-lastfm-session-key".toByteArray(Charsets.UTF_8)
         val first = cipher.encrypt(payload)
         val second = cipher.encrypt(payload)
@@ -44,6 +44,26 @@ class SecretVaultAndroidTest {
         assertThat(first.toList()).isNotEqualTo(second.toList())
         assertThat(cipher.decrypt(first)).isEqualTo(payload)
         assertThat(cipher.decrypt(second)).isEqualTo(payload)
+    }
+
+    @Test
+    fun androidKeyStoreCipher_reportsActualKeyInfoSecurityLevel() {
+        val ciphertext = cipher.encrypt("probe".toByteArray(Charsets.UTF_8))
+        assertThat(ciphertext).isNotEmpty()
+
+        val report = cipher.inspectKeySecurity()
+        android.util.Log.i("SecretVaultAndroidTest", "KeyInfo report: $report")
+
+        assertThat(report.keyAlias).isEqualTo(testAlias)
+        assertThat(report.securityLevel).isNotEqualTo(KeySecurityLevel.UNAVAILABLE)
+        // Do not claim hardware/StrongBox unless KeyInfo itself reports hardware backing.
+        val expectedHardware = report.securityLevel == KeySecurityLevel.STRONGBOX ||
+            report.securityLevel == KeySecurityLevel.TRUSTED_ENVIRONMENT ||
+            report.securityLevel == KeySecurityLevel.UNKNOWN_HARDWARE
+        assertThat(report.isInsideSecureHardware).isEqualTo(expectedHardware)
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.S) {
+            assertThat(report.securityLevel).isNotEqualTo(KeySecurityLevel.STRONGBOX)
+        }
     }
 
     @Test

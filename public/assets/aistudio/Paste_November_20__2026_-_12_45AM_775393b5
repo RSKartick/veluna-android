@@ -1,0 +1,1047 @@
+# This is a continuation of an earlier production-hardening pass. Do not repeat work that is already correctly implemented. Do not assume that the previous implementation is correct merely because tests or documentation claim it is.
+
+## 0. Repository and starting point
+
+Repository:
+
+`https://github.com/RSKartick/veluna-android`
+
+Latest previously audited commit:
+
+`01006100ee0829209c774374bc6af596dbf9cf5c`
+
+Expected branch: `main`.
+
+Before doing anything:
+
+1. Fetch the actual latest repository state. The repository may have advanced since the commit above.
+2. Inspect the current branch, HEAD, working-tree status, and all changes since the audited commit.
+3. Read the complete implementations of the affected classes, database entities, Firestore rules, migration files, and tests.
+4. Identify unfinished work, uncommitted changes, and newly introduced defects.
+5. Check whether another developer or AI agent has already addressed any item below.
+6. Do not overwrite existing work or revert unrelated changes.
+
+**Do not blindly apply patches based on this prompt.** It identifies known defects and required outcomes. Inspect the current implementation and choose the safest compatible solution.
+
+This is an implementation assignment. Produce a brief execution plan, then implement the changes directly. Do not stop after making recommendations.
+
+---
+
+# 1. P0 — Repair the broken GitHub Actions workflow
+
+This is the first task because the current CI workflow cannot reach its tests.
+
+The latest audited workflow run failed during action resolution:
+
+- `actions/setup-java` could not resolve the specified commit.
+- `actions/upload-artifact` could not resolve the specified commit.
+- The same problem affected both the test job and instrumentation job.
+- No application tests were executed.
+
+## 1.1 Correct the three invalid action references
+
+Use these verified upstream commit references:
+
+```yaml
+# actions/setup-java v4.2.2
+uses: actions/setup-java@6a0805fcefea3d4657a47ac4c165951e33482018
+
+# actions/upload-artifact v4.4.3
+uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882
+
+# softprops/action-gh-release v3.0.2
+uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228
+```
+
+These are full commit SHAs, not tag names.
+
+The previous workflow used incorrect SHAs for all three.
+
+Do not merely replace the strings without verification.
+
+## 1.2 Audit every third-party action reference
+
+Inspect every `uses:` entry in all repository workflows.
+
+Requirements:
+
+- Pin every third-party action to a verified immutable commit SHA.
+- Keep a comment identifying the corresponding upstream release.
+- Verify the SHA against the official repository's tag reference.
+- Do not pin an annotated tag object when the actual commit SHA is required.
+- Do not silently change action versions without checking compatibility.
+- Do not use floating references such as `@main`, `@master`, or `@v4`.
+
+Confirm that the existing verified references remain valid:
+
+- `actions/checkout`
+- `actions/setup-node`
+- `gradle/actions/setup-gradle`
+- `reactivecircus/android-emulator-runner`
+
+## 1.3 Verify the workflow's actual execution
+
+After repairing the references:
+
+- Run the workflow on the actual repository state.
+- Confirm both normal CI and instrumentation jobs start successfully.
+- Inspect the logs of every job.
+- Confirm that test execution reaches the actual Gradle and Firebase commands.
+- Do not count a workflow that only initializes successfully as a passed test suite.
+
+Keep production release secrets isolated from pull-request jobs.
+
+Do not publish a release or deploy Firebase as part of this assignment.
+
+---
+
+# 2. P1 — Eliminate the remaining playlist snapshot GC race
+
+File:
+
+`app/src/main/java/com/example/data/cloud/CloudSyncRepository.kt`
+
+The previous implementation improved snapshot retention, but `garbageCollectPlaylistSnapshots()` is still not safe under concurrent publication.
+
+This must be fixed at the data-model and transaction level.
+
+## 2.1 Fix the incorrect snapshot age calculation
+
+The current implementation prioritizes:
+
+```kotlin
+val ageTs = doc.getLong("clientUpdatedAt")
+    ?: doc.getTimestamp("updatedAt")?.toDate()?.time
+    ?: nowMs
+```
+
+This is incorrect for lifecycle retention.
+
+`clientUpdatedAt` describes when a user edited the playlist. It does not tell us when the snapshot was created on Firestore.
+
+Example:
+
+- A device edits a playlist.
+- It remains offline for 14 days.
+- It reconnects and creates a new snapshot.
+- Its old `clientUpdatedAt` makes the newly created snapshot appear 14 days old.
+- Garbage collection may immediately consider it eligible for deletion.
+
+Requirements:
+
+- Determine snapshot retention from a trustworthy server-generated creation timestamp.
+- Never use the client's original edit timestamp to determine snapshot age.
+- Handle missing, malformed, or unavailable server timestamps conservatively.
+- Never treat an unknown creation time as proof that a snapshot is expired.
+
+## 2.2 Never garbage-collect a recently created STAGING snapshot
+
+The current cleanup candidates are not sufficiently restricted by snapshot state.
+
+A snapshot in `STAGING` may still be receiving track batches or waiting for publication.
+
+Requirements:
+
+- Never delete a recently created `STAGING` snapshot.
+- Never delete a snapshot while its publisher can still publish it.
+- Use a dedicated lifecycle policy for abandoned staging snapshots.
+- An abandoned staging snapshot may only become eligible after its server creation time exceeds the configured safety window.
+- Retain superseded committed snapshots for at least seven days.
+- Preserve a reasonable number of recent committed snapshots.
+- Never delete the active snapshot.
+- Never delete a snapshot whose publication is in progress.
+
+## 2.3 Implement an atomic garbage-collection claim
+
+The existing sequence is unsafe:
+
+1. Read the playlist parent.
+2. Read the candidate snapshot.
+3. Re-read the parent.
+4. Delete nested tracks.
+5. Delete the snapshot document.
+
+A publisher can activate the candidate after the second parent check but before deletion.
+
+A simple additional read does not eliminate this race.
+
+Implement a concurrency-safe lifecycle transition.
+
+Evaluate a design using explicit states such as:
+
+`STAGING → COMMITTED → DELETING`
+
+The exact state design may differ, but it must establish the following invariant:
+
+**A snapshot must not be publishable after garbage collection has successfully claimed it for deletion.**
+
+A transaction-based approach should:
+
+1. Read the playlist parent.
+2. Read the candidate snapshot.
+3. Confirm that the parent does not reference that snapshot.
+4. Confirm that its lifecycle and server creation time permit deletion.
+5. Atomically transition the candidate into a deletion state.
+6. Commit the claim.
+7. Delete nested tracks.
+8. Delete the manifest only after nested deletion succeeds.
+
+The publication transaction must read the snapshot lifecycle state and reject a snapshot that is no longer publishable.
+
+Both GC and publication must participate in the same transaction-conflict boundary.
+
+Consider both possible races:
+
+- GC claims first: publication must fail.
+- Publication commits first: GC must retry and recognize that the snapshot is now active.
+
+Do not rely on an application-level mutex. Different devices do not share a process or mutex.
+
+## 2.4 Fix ambiguous publication failures
+
+Inspect this logic:
+
+```kotlin
+var committedParent = false
+```
+
+The current implementation can experience an ambiguous outcome:
+
+- Firestore commits the parent publication.
+- The client loses the response or is cancelled.
+- The local flag remains false.
+- The exception handler assumes publication failed.
+- `cleanupSnapshotBestEffort()` can delete a snapshot that the parent already references.
+
+Do not assume that a client-side transaction exception proves that the server did not commit.
+
+Requirements:
+
+- Distinguish confirmed publication failure from ambiguous transaction outcome.
+- Never immediately delete a snapshot after an ambiguous publication result.
+- Before any cleanup, verify that the parent does not reference the snapshot.
+- Use a safe deferred-GC path whenever publication status cannot be established.
+- Cleanup must be idempotent and retry-safe.
+- A failed cleanup must not invalidate an active playlist.
+
+## 2.5 Add actual concurrency tests
+
+Existing sequential GC tests are insufficient.
+
+Add deterministic Firestore-emulator tests with controlled barriers.
+
+At minimum:
+
+- GC runs while a publisher is staging a snapshot.
+- GC reaches its deletion-claim transaction while a publisher attempts publication.
+- Publication wins the transaction race.
+- GC wins the transaction race.
+- GC must never delete the active snapshot.
+- A recently created snapshot with an old client timestamp survives.
+- A recently created `STAGING` snapshot survives.
+- An abandoned staging snapshot becomes collectible only after the retention period.
+- Deleting tracks fails midway and can be retried safely.
+- Snapshot manifest deletion occurs only after track deletion succeeds.
+- Ambiguous publication failure cannot delete an active snapshot.
+- Two concurrent publishers cannot produce an invalid parent pointer.
+- Readers remain able to access an older committed snapshot during publication.
+- Partial track upload failure preserves the previously published snapshot.
+- More than 400 tracks work across multiple batches.
+
+Use the Firebase emulator and inspect actual persisted documents.
+
+Do not validate concurrency exclusively through mocked Firestore calls.
+
+---
+
+# 3. P1 — Make three-way playlist conflict resolution deterministic
+
+File:
+
+`app/src/main/java/com/example/data/cloud/PlaylistThreeWayMerger.kt`
+
+Related files:
+
+- `CloudSyncCoordinator.kt`
+- `CloudSyncModels.kt`
+- `CloudSyncRepository.kt`
+- `Entities.kt`
+- `VelunaDao.kt`
+- `VelunaDatabase.kt`
+- `firestore.rules`
+
+The new three-way merger is a useful improvement, but its current baseline model does not preserve sufficient mutation history.
+
+The existing baseline stores a playlist state and track IDs. It cannot always distinguish an intentional removal from the absence of a previously synchronized track.
+
+## 3.1 Fix add-then-remove versus concurrent addition
+
+Reproduce this scenario:
+
+1. Both devices start from a baseline without track X.
+2. Device A adds X.
+3. Device A removes X before synchronizing.
+4. Device B independently adds X.
+5. Device B synchronizes.
+6. Device A reconnects.
+
+Device A has no baseline membership record for X, so the current merger can interpret the remote X as a new independent addition and restore it.
+
+The system loses the meaning of Device A's removal.
+
+Implement a conflict model that preserves the necessary mutation information.
+
+Evaluate:
+
+- Stable per-operation IDs.
+- Persistent per-device identifiers.
+- Monotonic logical operation counters.
+- Per-track addition metadata.
+- Per-track removal metadata or tombstones.
+- Stable track identity.
+- Deterministic conflict resolution.
+- Idempotent operation processing.
+- Reordering operations and position metadata.
+- Safe tombstone compaction.
+
+You may introduce an operation-based or another suitable synchronization architecture.
+
+Do not introduce unnecessary complexity without justification.
+
+However, complete playlist snapshots alone must not silently erase meaningful concurrent edits.
+
+## 3.2 Define deterministic same-timestamp conflict resolution
+
+The current merger uses:
+
+```kotlin
+val remoteNewer = remoteUpdatedAt > localUpdatedAt
+```
+
+With equal timestamps, each device can prefer its own local conflicting change.
+
+That is not a deterministic distributed conflict policy.
+
+Requirements:
+
+- The same conflict must resolve identically on every device.
+- Never use perspective-dependent local preference as the final tie-breaker.
+- Use stable mutation identity, logical ordering, or another documented deterministic ordering mechanism.
+- Do not claim wall-clock timestamps provide causal ordering.
+- Account for device clock skew and duplicate timestamps.
+- Preserve backward compatibility with existing snapshots and baseline records.
+
+For deterministic metadata conflicts, the complete winning mutation identity must be comparable regardless of which device performs the merge.
+
+## 3.3 Define explicit semantics
+
+Document the behavior for:
+
+- Concurrent addition of the same track.
+- Addition and removal of the same track.
+- Add followed by remove while offline.
+- Remove followed by intentional re-add.
+- Concurrent reorder operations.
+- Concurrent title and description changes.
+- Concurrent cover replacement and deletion.
+- Two mutations with identical timestamps.
+- An old device reconnecting after newer changes.
+- Duplicate event delivery.
+- Partial synchronization and process interruption.
+
+An explicit removal must not disappear silently.
+
+An intentional later re-add must remain possible.
+
+If conflicts cannot be automatically resolved without data loss, preserve a recoverable conflict instead of silently selecting an arbitrary state.
+
+## 3.4 Required regression tests
+
+Add tests for:
+
+1. Two independent additions.
+2. Independent additions and removal of a baseline track.
+3. Add-then-remove versus concurrent addition of the same track.
+4. Remove-then-re-add after synchronization.
+5. Concurrent reorder operations.
+6. Same timestamp, different device IDs.
+7. Identical mutation IDs delivered multiple times.
+8. Duplicate track insertion prevention.
+9. Offline reconnection after multiple edits.
+10. Old-device reconnection.
+11. Process death during pending synchronization.
+12. Repeated merge convergence.
+13. Legacy baseline migration.
+14. Deterministic convergence regardless of which device synchronizes first.
+
+Run the tests against the real merger and synchronization repository.
+
+---
+
+# 4. P1 — Make restore recovery survive cancellation and process death
+
+File:
+
+`app/src/main/java/com/example/data/repository/VelunaRepository.kt`
+
+Related:
+
+- `UserPrefsRepository.kt`
+- `VelunaDao.kt`
+- `VelunaDatabase.kt`
+- `CloudSyncCoordinator.kt`
+- `BackupAndCsvTest.kt`
+
+The new implementation captures pre-restore Room and DataStore state and attempts compensating rollback.
+
+This is a substantial improvement, but it is not a durable transaction across two independent persistence systems.
+
+## 4.1 Fix coroutine cancellation during rollback
+
+The current catch block performs suspending rollback operations inside the cancelled coroutine context.
+
+It also uses `runCatching`, which can conceal rollback failures.
+
+Requirements:
+
+- Rollback must not be abandoned merely because the original restore coroutine was cancelled.
+- Use an appropriate `NonCancellable` recovery context.
+- Propagate or report rollback failures.
+- Never report a fully recovered state unless recovery actually succeeded.
+- Preserve a recovery marker whenever rollback remains incomplete.
+- Avoid swallowing filesystem, Room, or DataStore failures.
+
+## 4.2 Implement durable recovery for process interruption
+
+The following sequence must not leave the application in a permanent partial restore state:
+
+1. Old Room state is captured.
+2. Room restore transaction commits.
+3. The process dies.
+4. DataStore restore never happens.
+
+A normal catch block cannot solve process death.
+
+Implement a durable restore journal or an equivalent staged-restore architecture.
+
+Requirements:
+
+- Persist recovery information before changing application data.
+- Record the restore operation's identity and lifecycle.
+- Preserve sufficient information to restore all affected Room and DataStore state.
+- Make the journal durable before mutating data.
+- Ensure startup recovery executes before cloud sync starts or restored data becomes eligible for upload.
+- Make recovery idempotent.
+- Do not delete the journal until all storage systems are confirmed consistent.
+- If rollback fails, preserve enough information to retry after restart.
+- Handle newly created playlist cover files and other filesystem effects.
+- Do not include scrobble credentials or other secrets in ordinary backup/recovery exports.
+
+Choose an implementation that is appropriate for the existing application.
+
+A serialized backup pre-image, dedicated journal table, staged tables, or a carefully designed file-backed journal may be appropriate.
+
+Do not simply add another `try/catch`.
+
+## 4.3 Preserve sync isolation
+
+The restore operation must prevent synchronization from observing intermediate state.
+
+Verify the semantics of:
+
+`CloudSyncCoordinator.runWithLocalSyncSuppressed()`
+
+Ensure the sync lock and suppression logic cover the entire restore and recovery lifecycle.
+
+A partial restore must never be uploaded to Firestore.
+
+## 4.4 Required failure tests
+
+Inject failures at:
+
+- Input validation.
+- Journal creation.
+- Journal persistence.
+- Cover file creation.
+- Room write.
+- Room transaction commit.
+- DataStore edit.
+- Restore finalization.
+- Journal cleanup.
+- Rollback.
+- Coroutine cancellation.
+- Process interruption after Room commit.
+- Startup recovery.
+
+For every simulated interruption, verify all affected Room tables, DataStore keys, and managed cover files against the original state.
+
+Verify:
+
+- Likes.
+- Playlists.
+- Playlist tracks.
+- Blocked artists.
+- Taste profile and seeds.
+- Saved albums.
+- Followed artists.
+- Shortcuts.
+- Search history.
+- Listening history and song metadata.
+- Preferences.
+- Backup versions 1–4.
+- Scrobble-secret redaction.
+
+Do not accept a rollback test that only checks one or two tables.
+
+---
+
+# 5. P1 — Fix account ownership when the persisted UID is unknown
+
+Files:
+
+- `CloudSyncCoordinator.kt`
+- `UserPrefsRepository.kt`
+- `VelunaDao.kt`
+- `VelunaDatabase.kt`
+
+The previous pass introduced `ACTIVE_CLOUD_UID` and clears account-owned local data when a known account transitions to a different UID.
+
+However, the logic does not fully resolve unknown ownership.
+
+The current check effectively distinguishes a known different UID from a missing UID.
+
+Consider an upgrade:
+
+- Room contains synchronized data from an earlier account.
+- The new `ACTIVE_CLOUD_UID` DataStore key does not exist.
+- Another account is authenticated.
+- The application begins its first synchronization under the new ownership mechanism.
+
+The old local data has no reliable owner marker.
+
+Do not assume it belongs to the currently signed-in account.
+
+## Requirements
+
+1. Inspect the migration path from every previous supported application version.
+2. Determine what data can exist without an ownership marker.
+3. When account-owned local data exists but its owner cannot be determined, fail closed.
+4. Never automatically upload unowned records into an arbitrary current account.
+5. Preserve user data rather than silently deleting it.
+6. Provide a safe, explicit migration or recovery procedure.
+7. Keep device-only data intact.
+8. Ensure UID transitions cancel or stop old watchers before activating a new synchronization session.
+9. Prevent overlapping account transitions.
+10. Make the process safe across cancellation and restart.
+
+Possible approaches include preserving an unowned local backup and requesting explicit account migration, or safely isolating old account-owned records before new synchronization starts.
+
+Choose the least destructive reliable solution.
+
+## Required tests
+
+- First installation with no owner marker.
+- Upgrade from an earlier version with populated Room tables and no owner marker.
+- Account A to Account B transition.
+- Account B to Account A transition.
+- Process death during account transition.
+- Cancelled transition.
+- Failed sign-in after old session shutdown.
+- Existing account baselines with missing ownership marker.
+- Device-only data preservation.
+
+Prove that Account A data cannot enter Account B's cloud account.
+
+---
+
+# 6. P1 — Enforce immutable monotonic playlist revisions in Firestore rules
+
+File:
+
+`firestore.rules`
+
+Related:
+
+`firestore.test.js`
+
+The application repository performs revision checks, but Firestore rules currently allow an established revision to be omitted from an incoming update.
+
+The existing `isMonotonicPlaylistUpdate()` logic includes optional checks that can bypass comparison when `syncRevision` is missing.
+
+That weakens the server-side invariant.
+
+## Requirements
+
+Once a playlist document has a `syncRevision`:
+
+- Every subsequent update must include it.
+- It must be an integer.
+- It must not decrease.
+- It must not be removed.
+- A deleted playlist can only be recreated with a strictly higher revision.
+- Same-revision conflicts must follow the documented policy.
+- Deletion updates must preserve monotonic version semantics.
+- Snapshot publication must reference a valid committed snapshot.
+- Snapshot state transitions must not permit downgrading or publication after deletion has been claimed.
+
+Ensure the Firestore rules and application repository enforce the same state machine.
+
+Do not weaken owner-only authorization or schema validation.
+
+## Required emulator tests
+
+- Missing revision on existing playlist update.
+- Revision removed from an existing document.
+- Lower revision update.
+- Same revision update.
+- Higher revision update.
+- Stale recreation after deletion.
+- Valid higher-revision recreation.
+- Invalid tombstone transition.
+- Snapshot downgrade from `COMMITTED`.
+- Attempted publication of a `DELETING` snapshot.
+- Unauthorized cross-user access.
+- Unauthenticated access.
+
+Run all tests against the Firestore emulator.
+
+---
+
+# 7. P2 — Verify the actual Android Keystore security level
+
+Files:
+
+- `SecretVault.kt`
+- `SecretVaultAndroidTest.kt`
+- `.github/workflows/release-apk.yml`
+
+The new instrumentation tests verify Android Keystore encryption, IV uniqueness, round trips, persistence, tampering detection, and key deletion.
+
+However, this does not establish that the generated AES key is hardware-backed.
+
+Android Keystore may use a software security implementation depending on the device and runtime.
+
+## Requirements
+
+- Inspect the generated key's actual `KeyInfo` security characteristics.
+- Verify whether the key is inside secure hardware where supported.
+- Distinguish software-backed, TEE-backed, and StrongBox-backed implementations when the platform exposes that information.
+- Do not claim StrongBox protection unless StrongBox is actually verified.
+- Do not silently describe every Android Keystore key as hardware-backed.
+- Keep the application compatible with the existing minimum supported Android API.
+- Avoid making unsupported hardware assumptions about an emulator.
+
+The test should report the actual security level.
+
+If the emulator cannot provide the required hardware security property, report the limitation honestly. Do not turn an emulator pass into proof of physical hardware-backed storage.
+
+Consider a separate physical-device verification process when the security guarantee requires it.
+
+Rename the CI job to **Android Keystore Instrumentation Tests** unless hardware backing is explicitly and successfully verified.
+
+---
+
+# 8. P2 — Revalidate watermark and tombstone compaction guarantees
+
+Files:
+
+- `CloudSyncRepository.kt`
+- `CloudSyncCoordinator.kt`
+- `UserPrefsRepository.kt`
+- `firestore.rules`
+
+The previous changes introduced:
+
+- A 10-second overlap for incremental reads.
+- 90-day tombstone retention.
+- `tombstoneCompactedBeforeMs`.
+- `syncGeneration`.
+- Full-fetch behavior for stale clients.
+
+Do not assume those mechanisms are correct solely because their fields exist.
+
+Verify the full lifecycle.
+
+Requirements:
+
+1. Multiple documents with identical timestamps must not be skipped.
+2. A document updated while synchronization is running must be included in the current or next synchronization pass.
+3. Partial processing failure must not advance the watermark past unprocessed data.
+4. Timestamp precision must be consistent between query construction and watermark calculation.
+5. Pagination must not permanently skip data.
+6. Old devices must not silently resurrect compacted deletions.
+7. Devices with missing or reset sync metadata must recover safely.
+8. Empty or zero last-successful-sync timestamps must not bypass stale-device protection.
+9. Compaction must be monotonic and idempotent.
+10. Data that is legitimately newer than a compacted deletion must remain recoverable.
+
+Add emulator tests covering all relevant edge cases.
+
+Document any unavoidable stale-device limitations.
+
+---
+
+# 9. P2 — Re-audit cover lifecycle after the previous fixes
+
+Files:
+
+- `VelunaRepository.kt`
+- `CloudSyncCoordinator.kt`
+- `CloudSyncRepository.kt`
+- `VelunaDao.kt`
+- Android backup rules.
+
+The previous pass introduced:
+
+- Separate local and remote cover fields.
+- Explicit `coverRemoved`.
+- Portable backup artwork.
+- Image magic-byte validation.
+- Managed file size and decoding bounds.
+- Android backup exclusions for `playlist_covers`.
+
+Verify that the entire lifecycle remains correct after the latest changes.
+
+Test:
+
+- Local cover creation.
+- Remote cover synchronization.
+- Local cover replacement while a remote cover exists.
+- Remote cover replacement while a local file exists.
+- Explicit removal.
+- Removal propagation to another device.
+- Backup export and restoration.
+- Invalid image bytes.
+- Oversized images.
+- Corrupted cover files.
+- Missing cover files.
+- File replacement failure.
+- Failed restore cleanup.
+- Orphaned cover cleanup.
+- Device-transfer exclusions.
+
+Local-only artwork must never accidentally erase a remote cover.
+
+An explicit remote cover removal must never be ignored because of a local fallback.
+
+---
+
+# 10. Full synchronization and data-integrity regression review
+
+The new synchronization architecture must be reviewed as a whole.
+
+Inspect:
+
+- `CloudSyncCoordinator`
+- `CloudSyncRepository`
+- `MergeEngine`
+- `PlaylistThreeWayMerger`
+- `SyncSignatureHelper`
+- `CloudSyncModels`
+- Room baselines and tombstones.
+- Firestore documents and subcollections.
+- Sign-out and account deletion.
+- Incremental reads and compaction.
+
+Verify:
+
+- Offline additions and removals.
+- Device reconnect.
+- Concurrent uploads.
+- Duplicate retries.
+- Partial upload failures.
+- Process death.
+- Account switching.
+- Stale devices.
+- Parent document deletion.
+- Legacy playlist migration.
+- Snapshot garbage collection.
+- Baseline migration.
+- Consistent revision advancement.
+- Deterministic convergence.
+
+A successful `syncNowAndAwait()` must not conceal partial failures.
+
+Do not report synchronization as healthy while one or more collections have unresolved failures.
+
+---
+
+# 11. CI/CD — Required final workflow structure
+
+Keep the existing separation between unprivileged CI and signed release publishing.
+
+The normal CI pipeline must:
+
+1. Check out the repository using a pinned action.
+2. Set up the required Node.js and JDK versions.
+3. Validate the Gradle wrapper.
+4. Run `npm ci`.
+5. Materialize only emulator-safe Firebase configuration.
+6. Run Firestore security-rule emulator tests.
+7. Run JVM, Robolectric, and Room migration tests.
+8. Compile Android instrumentation tests.
+9. Run Android lint.
+10. Compile release Kotlin.
+11. Execute Android instrumentation tests on an emulator.
+12. Upload useful test reports when jobs fail.
+
+The release pipeline must:
+
+- Depend on successful normal and instrumentation jobs.
+- Run only for approved version tags.
+- Verify the release tag belongs to an approved branch.
+- Never expose signing secrets to pull-request jobs.
+- Require all necessary release secrets.
+- Build the release APK.
+- Verify that it is not debuggable.
+- Verify its APK signing certificate fingerprint.
+- Upload the artifact.
+- Publish only after all checks succeed.
+
+Do not publish or deploy during this assignment.
+
+## Required verification commands
+
+Use the committed wrapper:
+
+```bash
+npm ci
+
+npx firebase emulators:exec --only firestore,auth --project veluna-ci-test \
+  "FIRESTORE_EMULATOR_HOST=127.0.0.1:8085 FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:9099 node --test firestore.test.js"
+
+./gradlew :app:testDebugUnitTest
+
+./gradlew :app:compileDebugAndroidTestKotlin
+
+./gradlew :app:lintDebug
+
+./gradlew :app:compileReleaseKotlin
+
+./gradlew :app:assembleDebug
+
+./gradlew :app:assembleRelease
+
+./gradlew :app:connectedDebugAndroidTest
+```
+
+Adapt the Firebase emulator command to the existing workflow and environment without bypassing rules tests.
+
+Run the instrumentation suite on an actual emulator.
+
+Do not claim that compiling instrumentation tests is equivalent to executing them.
+
+Do not claim the release APK is signed unless signing verification succeeds.
+
+If a command cannot execute:
+
+- State exactly why.
+- Identify whether the limitation is environmental or caused by the repository.
+- Provide the reproducible command.
+- Mark the corresponding verification as unverified.
+
+---
+
+# 12. Regression test quality requirements
+
+Tests must validate behavior, not merely implementation details.
+
+For critical synchronization and persistence behavior:
+
+- Use Firebase emulator state where applicable.
+- Use real Room database operations.
+- Use actual DataStore persistence.
+- Use controlled coroutine scheduling or barriers for concurrency.
+- Use failure injection at meaningful operation boundaries.
+- Test process interruption through durable recovery-state simulation.
+- Verify the final persisted state.
+- Verify that retries do not duplicate data.
+- Verify that migrations preserve realistic historical datasets.
+
+Do not:
+
+- Delete failing tests.
+- Weaken assertions to make CI green.
+- Replace real operations with mocks for critical integration guarantees.
+- Add tests that only assert helper-function return values while the production path remains broken.
+- Mark a test as passed when it did not execute.
+
+Every significant fix requires a regression test.
+
+---
+
+# 13. Preserve existing application behavior
+
+Veluna is an existing application, not a blank project.
+
+Preserve:
+
+- Kotlin and Jetpack Compose architecture.
+- Room and DataStore.
+- Media3 playback.
+- Firebase authentication and Firestore.
+- Existing local music and offline behavior.
+- SecretVault.
+- Scrobbling.
+- Existing navigation and visual identity.
+- Existing user libraries and playlists.
+- Database compatibility.
+
+Do not redesign functional UI components without a demonstrated defect.
+
+Do not introduce unnecessary libraries, infrastructure, or large rewrites.
+
+Do not perform destructive database migrations.
+
+Do not discard user data to simplify account transitions or synchronization.
+
+Do not remove useful local functionality to make cloud synchronization easier.
+
+---
+
+# 14. Documentation
+
+Update README and relevant engineering documentation only after the implementation is verified.
+
+Document accurately:
+
+- Snapshot lifecycle and GC safety.
+- Playlist conflict-resolution semantics.
+- Track removal and re-add behavior.
+- Revision and deletion guarantees.
+- Account ownership migration.
+- Backup recovery behavior.
+- Crash and cancellation recovery.
+- Tombstone compaction.
+- Android Keystore security level.
+- How to run emulator and instrumentation tests.
+- CI and release requirements.
+
+Do not promise hardware-backed security unless verified.
+
+Do not describe restore as crash-atomic unless the durable recovery mechanism proves it.
+
+Do not describe cloud sync as conflict-free unless the implemented semantics justify that guarantee.
+
+---
+
+# 15. Mandatory final engineering report
+
+When implementation and verification are complete, provide a precise report.
+
+## A. Repository state
+
+- Repository URL.
+- Branch.
+- Final HEAD SHA.
+- Previous HEAD SHA.
+- Working-tree status.
+- Files modified.
+- Files added.
+- Files removed, if any.
+
+## B. CI repair
+
+- Incorrect action references.
+- Corrected commit SHAs.
+- Verification of upstream action references.
+- Latest workflow run URL.
+- Job-by-job results.
+- Any remaining workflow problems.
+
+## C. Snapshot consistency
+
+- Root cause of each race.
+- New lifecycle state machine.
+- Publication transaction behavior.
+- GC claim behavior.
+- Ambiguous transaction handling.
+- Concurrency tests and results.
+
+## D. Conflict resolution
+
+- Selected conflict model.
+- How additions and removals are represented.
+- How same-timestamp conflicts resolve.
+- How reorder operations work.
+- How re-additions work.
+- Backward compatibility.
+- Test results.
+
+## E. Restore recovery
+
+- Recovery design.
+- Durable journal or equivalent.
+- Startup recovery behavior.
+- Cancellation behavior.
+- Failure-injection test results.
+- Remaining recovery limitations.
+
+## F. Account isolation and Firestore rules
+
+- Unknown-owner migration behavior.
+- UID transition behavior.
+- Revision enforcement.
+- Tombstone and snapshot state-transition validation.
+- Emulator test results.
+
+## G. Android Keystore
+
+- Actual key security level.
+- Whether hardware backing was verified.
+- Emulator limitations.
+- Instrumentation results.
+
+## H. Complete verification
+
+For every command, show:
+
+- Exact command.
+- Whether it executed.
+- Pass or fail.
+- Test counts where available.
+- Relevant report or log location.
+
+Do not summarize an unexecuted test as passed.
+
+## I. Remaining risks
+
+Identify everything not implemented, tested, or verified.
+
+Explicitly identify infrastructure or external configuration still required.
+
+## J. Release assessment
+
+Give separate conclusions for:
+
+- Local development readiness.
+- Internal testing readiness.
+- Multi-device cloud synchronization readiness.
+- Backup and restore reliability.
+- Production data-integrity readiness.
+- Signed production release readiness.
+
+Do not award a high readiness score because the application compiles or CI passes.
+
+---
+
+# Final engineering objective
+
+Veluna will eventually store real users' listening histories, playlists, preferences, account-linked data, and credentials.
+
+These are not disposable test records.
+
+The implementation must prioritize:
+
+1. Data integrity over synchronization speed.
+2. Deterministic distributed behavior over convenient assumptions.
+3. Recoverability over silent failure.
+4. Server-enforced invariants over client-side trust.
+5. Accurate security claims over impressive documentation.
+6. Reproducible verification over optimistic build results.
+
+**Implement the fixes directly in the existing repository. Do not finish with another plan. Do not claim production readiness without evidence.**
+
+The target is a system that remains correct when multiple devices edit offline, uploads overlap, devices reconnect months later, a process dies halfway through restoration, a network response is lost after a server commit, and a user switches accounts.
+
+That is the standard this engineering pass must meet.

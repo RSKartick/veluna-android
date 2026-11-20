@@ -52,6 +52,35 @@ service cloud.firestore {
              isNotFutureTimestamp(data.updatedAt);
     }
 
+    function isValidMutationStamp(stamp) {
+      return stamp is map &&
+             stamp.size() == 4 &&
+             stamp.keys().hasAll(['timestampMs', 'seq', 'deviceId', 'opId']) &&
+             stamp.timestampMs is int && stamp.timestampMs >= 0 &&
+             stamp.seq is int && stamp.seq >= 0 &&
+             stamp.deviceId is string && stamp.deviceId.size() <= 128 &&
+             stamp.opId is string && stamp.opId.size() <= 128;
+    }
+
+    function isValidFieldStamps(fs) {
+      return fs is map &&
+             fs.size() <= 4 &&
+             fs.keys().hasOnly(['title', 'description', 'cover', 'order']) &&
+             (!('title' in fs) || isValidMutationStamp(fs.title)) &&
+             (!('description' in fs) || isValidMutationStamp(fs.description)) &&
+             (!('cover' in fs) || isValidMutationStamp(fs.cover)) &&
+             (!('order' in fs) || isValidMutationStamp(fs.order));
+    }
+
+    function isValidPlaylistCausalMeta(data) {
+      return isValidOptionalString(data, 'lastDeviceId', 128) &&
+             (!('lastOpSeq' in data) || (data.lastOpSeq is int && data.lastOpSeq >= 0)) &&
+             isValidOptionalString(data, 'lastOpId', 128) &&
+             (!('fieldStamps' in data) || isValidFieldStamps(data.fieldStamps)) &&
+             (!('trackTombstones' in data) ||
+              (data.trackTombstones is map && data.trackTombstones.size() <= 500));
+    }
+
     function isValidPlaylistTombstone(data) {
       return isTombstone(data) &&
              (!('syncRevision' in data) || (data.syncRevision is int && data.syncRevision >= 0)) &&
@@ -125,7 +154,7 @@ service cloud.firestore {
     }
 
     function isValidPlaylistSnapshot(data) {
-      return data.state in ['STAGING', 'COMMITTED'] &&
+      return data.state in ['STAGING', 'COMMITTED', 'DELETING'] &&
              data.syncRevision is int && data.syncRevision >= 1 &&
              data.trackCount is int && data.trackCount >= 0 &&
              isValidClientTimestamp(data.clientUpdatedAt) &&
@@ -149,6 +178,10 @@ service cloud.firestore {
              data.explicit is bool &&
              data.position is int && data.position >= 0 &&
              data.addedAt is int && data.addedAt >= 0 &&
+             (!('opTs' in data) || isValidClientTimestamp(data.opTs)) &&
+             (!('opSeq' in data) || (data.opSeq is int && data.opSeq >= 0)) &&
+             isValidOptionalString(data, 'deviceId', 128) &&
+             isValidOptionalString(data, 'opId', 128) &&
              isNotFutureTimestamp(data.updatedAt);
     }
 
@@ -282,71 +315,86 @@ service cloud.firestore {
       }
 
       match /playlists/{playlistKey} {
-        function isCommittedSnapshotTarget(snapId) {
+        function isCommittedSnapshotTarget(snapId, inc) {
           let snapPath = /databases/$(database)/documents/users/$(userId)/playlists/$(playlistKey)/snapshots/$(snapId);
           return exists(snapPath) &&
                  get(snapPath).data.state == 'COMMITTED' &&
-                 (!('syncRevision' in incoming()) || get(snapPath).data.syncRevision == incoming().syncRevision);
+                 (!('syncRevision' in inc) || get(snapPath).data.syncRevision == inc.syncRevision);
         }
 
-        function isMonotonicPlaylistUpdate() {
-          let prevRev = existing().get('syncRevision', 0);
-          return (!('syncRevision' in existing()) ||
-                  !('syncRevision' in incoming()) ||
-                  incoming().syncRevision >= prevRev) &&
-                 (!(existing().deleted == true && incoming().deleted == false) ||
-                  ('syncRevision' in incoming() && incoming().syncRevision > prevRev));
+        function isMonotonicPlaylistUpdate(inc, ext) {
+          let prevRev = ext.get('syncRevision', 0);
+          let revValid = (!('syncRevision' in ext) &&
+                          (!('syncRevision' in inc) || (inc.syncRevision is int && inc.syncRevision >= 0))) ||
+                         (('syncRevision' in ext) &&
+                          ('syncRevision' in inc) &&
+                          inc.syncRevision is int &&
+                          inc.syncRevision >= ext.syncRevision);
+          let unDeleteValid = !(ext.deleted == true && inc.deleted == false) ||
+                              ('syncRevision' in inc && inc.syncRevision is int && inc.syncRevision > prevRev);
+          return revValid && unDeleteValid;
+        }
+
+        function canCreatePlaylist() {
+          let inc = request.resource.data;
+          return isOwner(userId) &&
+                 isValidId(playlistKey) &&
+                 isNotFutureTimestamp(inc.createdAt) &&
+                 isValidPlaylistCausalMeta(inc) &&
+                 (
+                   (inc.keys().hasAll([
+                      'title', 'description', 'deleted', 'clientUpdatedAt', 'createdAt', 'updatedAt'
+                    ]) &&
+                    inc.keys().hasOnly([
+                      'title', 'description', 'coverUri', 'coverRemoved', 'deleted',
+                      'syncRevision', 'activeSnapshotId', 'trackCount',
+                      'lastDeviceId', 'lastOpSeq', 'lastOpId', 'fieldStamps', 'trackTombstones',
+                      'clientUpdatedAt', 'createdAt', 'updatedAt'
+                    ]) &&
+                    isValidSyncedPlaylist(inc) &&
+                    (!('activeSnapshotId' in inc) ||
+                     inc.activeSnapshotId == null ||
+                     isCommittedSnapshotTarget(inc.activeSnapshotId, inc))) ||
+                   (inc.keys().hasAll(['deleted', 'clientUpdatedAt', 'createdAt', 'updatedAt']) &&
+                    inc.keys().hasOnly([
+                      'deleted', 'syncRevision', 'activeSnapshotId', 'trackCount', 'coverRemoved',
+                      'lastDeviceId', 'lastOpSeq', 'lastOpId', 'fieldStamps', 'trackTombstones',
+                      'clientUpdatedAt', 'createdAt', 'updatedAt'
+                    ]) &&
+                    isValidPlaylistTombstone(inc))
+                 );
+        }
+
+        function canUpdatePlaylist() {
+          let inc = request.resource.data;
+          let ext = resource.data;
+          let diffKeys = inc.diff(ext).affectedKeys();
+          return isOwner(userId) &&
+                 isValidId(playlistKey) &&
+                 createdAtPreservedOnUpdate() &&
+                 isMonotonicPlaylistUpdate(inc, ext) &&
+                 isValidPlaylistCausalMeta(inc) &&
+                 diffKeys.hasOnly([
+                   'title', 'description', 'coverUri', 'coverRemoved', 'tracks', 'deleted',
+                   'syncRevision', 'activeSnapshotId', 'trackCount',
+                   'lastDeviceId', 'lastOpSeq', 'lastOpId', 'fieldStamps', 'trackTombstones',
+                   'clientUpdatedAt', 'updatedAt'
+                 ]) &&
+                 (
+                   (isValidSyncedPlaylist(inc) &&
+                    (!('activeSnapshotId' in inc) ||
+                     inc.activeSnapshotId == null ||
+                     (('activeSnapshotId' in ext) && inc.activeSnapshotId == ext.activeSnapshotId) ||
+                     isCommittedSnapshotTarget(inc.activeSnapshotId, inc))) ||
+                   (isValidPlaylistTombstone(inc) &&
+                    !diffKeys.hasAny(['title', 'description', 'coverUri']))
+                 );
         }
 
         allow get: if isOwner(userId) && isValidId(playlistKey);
         allow list: if isOwner(userId);
-
-        allow create: if isOwner(userId) &&
-                         isValidId(playlistKey) &&
-                         isNotFutureTimestamp(incoming().createdAt) &&
-                         (
-                           (incoming().keys().hasAll([
-                              'title', 'description', 'deleted', 'clientUpdatedAt', 'createdAt', 'updatedAt'
-                            ]) &&
-                            incoming().keys().hasOnly([
-                              'title', 'description', 'coverUri', 'coverRemoved', 'deleted',
-                              'syncRevision', 'activeSnapshotId', 'trackCount',
-                              'clientUpdatedAt', 'createdAt', 'updatedAt'
-                            ]) &&
-                            isValidSyncedPlaylist(incoming()) &&
-                            (!('activeSnapshotId' in incoming()) ||
-                             incoming().activeSnapshotId == null ||
-                             isCommittedSnapshotTarget(incoming().activeSnapshotId))) ||
-                           (incoming().keys().hasAll(['deleted', 'clientUpdatedAt', 'createdAt', 'updatedAt']) &&
-                            incoming().keys().hasOnly([
-                              'deleted', 'syncRevision', 'activeSnapshotId', 'trackCount', 'coverRemoved',
-                              'clientUpdatedAt', 'createdAt', 'updatedAt'
-                            ]) &&
-                            isValidPlaylistTombstone(incoming()))
-                         );
-
-        allow update: if isOwner(userId) &&
-                         isValidId(playlistKey) &&
-                         createdAtPreservedOnUpdate() &&
-                         isMonotonicPlaylistUpdate() &&
-                         (
-                           (isValidSyncedPlaylist(incoming()) &&
-                            (!('activeSnapshotId' in incoming()) ||
-                             incoming().activeSnapshotId == null ||
-                             (('activeSnapshotId' in existing()) && incoming().activeSnapshotId == existing().activeSnapshotId) ||
-                             isCommittedSnapshotTarget(incoming().activeSnapshotId)) &&
-                            incoming().diff(existing()).affectedKeys().hasOnly([
-                              'title', 'description', 'coverUri', 'coverRemoved', 'tracks', 'deleted',
-                              'syncRevision', 'activeSnapshotId', 'trackCount',
-                              'clientUpdatedAt', 'updatedAt'
-                            ])) ||
-                           (isValidPlaylistTombstone(incoming()) &&
-                            incoming().diff(existing()).affectedKeys().hasOnly([
-                              'tracks', 'deleted', 'syncRevision', 'activeSnapshotId', 'trackCount', 'coverRemoved',
-                              'clientUpdatedAt', 'updatedAt'
-                            ]))
-                         );
-
+        allow create: if canCreatePlaylist();
+        allow update: if canUpdatePlaylist();
         allow delete: if isOwner(userId) && isValidId(playlistKey);
 
         match /snapshots/{snapshotId} {
@@ -364,6 +412,7 @@ service cloud.firestore {
                              'state', 'syncRevision', 'trackCount',
                              'clientUpdatedAt', 'createdAt', 'updatedAt'
                            ]) &&
+                           incoming().state in ['STAGING', 'COMMITTED'] &&
                            isValidPlaylistSnapshot(incoming());
 
           allow update: if isOwner(userId) &&
@@ -373,6 +422,10 @@ service cloud.firestore {
                            isValidPlaylistSnapshot(incoming()) &&
                            incoming().syncRevision == existing().syncRevision &&
                            incoming().trackCount == existing().trackCount &&
+                           (
+                             (existing().state == 'STAGING' && incoming().state in ['COMMITTED', 'DELETING']) ||
+                             (existing().state == 'COMMITTED' && incoming().state == 'DELETING')
+                           ) &&
                            incoming().diff(existing()).affectedKeys().hasOnly(['state', 'updatedAt']);
 
           allow delete: if isOwner(userId) && isValidId(playlistKey) && isValidId(snapshotId);
@@ -393,7 +446,8 @@ service cloud.firestore {
                              incoming().keys().hasOnly([
                                'videoId', 'title', 'artists', 'album', 'albumId', 'artistId',
                                'duration', 'durationSecs', 'thumbnail', 'explicit',
-                               'position', 'addedAt', 'deleted', 'clientUpdatedAt', 'createdAt', 'updatedAt'
+                               'position', 'addedAt', 'opTs', 'opSeq', 'deviceId', 'opId',
+                               'deleted', 'clientUpdatedAt', 'createdAt', 'updatedAt'
                              ]) &&
                              isValidPlaylistTrack(incoming());
 
@@ -406,7 +460,8 @@ service cloud.firestore {
                              incoming().diff(existing()).affectedKeys().hasOnly([
                                'videoId', 'title', 'artists', 'album', 'albumId', 'artistId',
                                'duration', 'durationSecs', 'thumbnail', 'explicit',
-                               'position', 'addedAt', 'deleted', 'clientUpdatedAt', 'updatedAt'
+                               'position', 'addedAt', 'opTs', 'opSeq', 'deviceId', 'opId',
+                               'deleted', 'clientUpdatedAt', 'updatedAt'
                              ]);
 
             allow delete: if isOwner(userId) && isValidId(playlistKey) && isValidId(snapshotId) && isValidId(trackDocId);
@@ -430,7 +485,8 @@ service cloud.firestore {
                               incoming().keys().hasOnly([
                                 'videoId', 'title', 'artists', 'album', 'albumId', 'artistId',
                                 'duration', 'durationSecs', 'thumbnail', 'explicit',
-                                'position', 'addedAt', 'deleted', 'clientUpdatedAt', 'createdAt', 'updatedAt'
+                                'position', 'addedAt', 'opTs', 'opSeq', 'deviceId', 'opId',
+                                'deleted', 'clientUpdatedAt', 'createdAt', 'updatedAt'
                               ]) &&
                               isValidPlaylistTrack(incoming())) ||
                              (incoming().keys().hasAll(['deleted', 'clientUpdatedAt', 'createdAt', 'updatedAt']) &&
@@ -447,7 +503,8 @@ service cloud.firestore {
                               incoming().diff(existing()).affectedKeys().hasOnly([
                                 'videoId', 'title', 'artists', 'album', 'albumId', 'artistId',
                                 'duration', 'durationSecs', 'thumbnail', 'explicit',
-                                'position', 'addedAt', 'deleted', 'clientUpdatedAt', 'updatedAt'
+                                'position', 'addedAt', 'opTs', 'opSeq', 'deviceId', 'opId',
+                                'deleted', 'clientUpdatedAt', 'updatedAt'
                               ])) ||
                              (isTombstone(incoming()) &&
                               incoming().diff(existing()).affectedKeys().hasOnly([

@@ -679,3 +679,303 @@ test("User profile enforces monotonic tombstoneCompactedBeforeMs and syncGenerat
   );
 });
 
+test("Established playlist syncRevision cannot be omitted, removed, non-integer, or lowered on update", async () => {
+  const path = require("node:path");
+  const rutDir = path.dirname(require.resolve("@firebase/rules-unit-testing"));
+  const firebase = require(require.resolve("firebase/compat/app", { paths: [__dirname, rutDir] }));
+  require(require.resolve("firebase/compat/firestore", { paths: [__dirname, rutDir] }));
+  const { FieldValue } = firebase.firestore;
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const plRef = aliceDb.collection("users").doc(ALICE_UID).collection("playlists").doc("pl_strict_rev");
+  const snap2Ref = plRef.collection("snapshots").doc("snap_2");
+  const snap3Ref = plRef.collection("snapshots").doc("snap_3");
+
+  await assertSucceeds(
+    snap2Ref.set({
+      state: "COMMITTED",
+      syncRevision: 2,
+      trackCount: 0,
+      clientUpdatedAt: 1700000000000,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    })
+  );
+  await assertSucceeds(
+    snap3Ref.set({
+      state: "COMMITTED",
+      syncRevision: 3,
+      trackCount: 0,
+      clientUpdatedAt: 1700000002000,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  await assertSucceeds(
+    plRef.set(
+      validPlaylistPayload({
+        syncRevision: 2,
+        activeSnapshotId: "snap_2",
+        trackCount: 0,
+      })
+    )
+  );
+
+  // Overwrite missing syncRevision fails
+  await assertFails(
+    plRef.set(validPlaylistPayload({ title: "Stripped", activeSnapshotId: "snap_2", trackCount: 0 }))
+  );
+
+  // Explicit FieldValue.delete() removing syncRevision fails
+  await assertFails(
+    plRef.update({
+      syncRevision: FieldValue.delete(),
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  // Non-integer syncRevision fails
+  await assertFails(
+    plRef.update({
+      syncRevision: 2.5,
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  // Lower syncRevision fails
+  await assertFails(
+    plRef.update({
+      syncRevision: 1,
+      title: "Lower",
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  // Same revision metadata update succeeds when syncRevision is preserved
+  await assertSucceeds(
+    plRef.update({
+      syncRevision: 2,
+      title: "Renamed At Rev 2",
+      clientUpdatedAt: 1700000001000,
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  // Higher revision pointing to valid COMMITTED snapshot succeeds
+  await assertSucceeds(
+    plRef.update({
+      syncRevision: 3,
+      activeSnapshotId: "snap_3",
+      trackCount: 0,
+      clientUpdatedAt: 1700000002000,
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  // Invalid tombstone transitions: deleting with lower revision or non-null activeSnapshotId fails
+  await assertFails(
+    plRef.update({
+      deleted: true,
+      syncRevision: 2,
+      activeSnapshotId: null,
+      trackCount: 0,
+      clientUpdatedAt: 1700000003000,
+      updatedAt: serverTimestamp(),
+    })
+  );
+  await assertFails(
+    plRef.update({
+      deleted: true,
+      syncRevision: 3,
+      activeSnapshotId: "snap_3",
+      trackCount: 0,
+      clientUpdatedAt: 1700000003000,
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  // Valid deletion at rev 3 then stale vs valid recreation
+  await assertSucceeds(
+    plRef.update({
+      deleted: true,
+      syncRevision: 3,
+      activeSnapshotId: null,
+      trackCount: 0,
+      clientUpdatedAt: 1700000003000,
+      updatedAt: serverTimestamp(),
+    })
+  );
+  await assertFails(
+    plRef.update(
+      validPlaylistPayload({
+        syncRevision: 3,
+        activeSnapshotId: "snap_3",
+        trackCount: 0,
+        clientUpdatedAt: 1700000004000,
+      })
+    )
+  );
+  const snap4Ref = plRef.collection("snapshots").doc("snap_4");
+  await assertSucceeds(
+    snap4Ref.set({
+      state: "COMMITTED",
+      syncRevision: 4,
+      trackCount: 0,
+      clientUpdatedAt: 1700000005000,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    })
+  );
+  await assertSucceeds(
+    plRef.update({
+      deleted: false,
+      title: "Recreated Cleanly",
+      description: "",
+      syncRevision: 4,
+      activeSnapshotId: "snap_4",
+      trackCount: 0,
+      clientUpdatedAt: 1700000005000,
+      updatedAt: serverTimestamp(),
+    })
+  );
+});
+
+test("Snapshot state machine forbids COMMITTED->STAGING downgrade, creating in DELETING, transitions out of DELETING, and publishing DELETING snapshot", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const plRef = aliceDb.collection("users").doc(ALICE_UID).collection("playlists").doc("pl_sm");
+  const stagingRef = plRef.collection("snapshots").doc("snap_stg");
+  const committedRef = plRef.collection("snapshots").doc("snap_cmt");
+  const deletingCreateRef = plRef.collection("snapshots").doc("snap_del_create");
+
+  // Cannot create directly in DELETING
+  await assertFails(
+    deletingCreateRef.set({
+      state: "DELETING",
+      syncRevision: 1,
+      trackCount: 0,
+      clientUpdatedAt: 1700000000000,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  await assertSucceeds(
+    stagingRef.set({
+      state: "STAGING",
+      syncRevision: 1,
+      trackCount: 0,
+      clientUpdatedAt: 1700000000000,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    })
+  );
+  await assertSucceeds(
+    committedRef.set({
+      state: "COMMITTED",
+      syncRevision: 2,
+      trackCount: 0,
+      clientUpdatedAt: 1700000001000,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  // COMMITTED -> STAGING downgrade is forbidden
+  await assertFails(
+    committedRef.update({ state: "STAGING", updatedAt: serverTimestamp() })
+  );
+
+  // STAGING -> DELETING and COMMITTED -> DELETING are allowed
+  await assertSucceeds(
+    stagingRef.update({ state: "DELETING", updatedAt: serverTimestamp() })
+  );
+  await assertSucceeds(
+    committedRef.update({ state: "DELETING", updatedAt: serverTimestamp() })
+  );
+
+  // Any transition out of DELETING is forbidden
+  await assertFails(
+    committedRef.update({ state: "COMMITTED", updatedAt: serverTimestamp() })
+  );
+  await assertFails(
+    committedRef.update({ state: "STAGING", updatedAt: serverTimestamp() })
+  );
+
+  // Publishing a playlist pointing to a DELETING snapshot is forbidden
+  await assertFails(
+    plRef.set(
+      validPlaylistPayload({
+        syncRevision: 2,
+        activeSnapshotId: "snap_cmt",
+        trackCount: 0,
+      })
+    )
+  );
+});
+
+test("Playlist causal metadata fields (fieldStamps, trackTombstones, lastDeviceId) validate bounds", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const plRef = aliceDb.collection("users").doc(ALICE_UID).collection("playlists").doc("pl_causal");
+
+  await assertSucceeds(
+    plRef.set(
+      validPlaylistPayload({
+        syncRevision: 1,
+        lastDeviceId: "dev_a",
+        lastOpSeq: 5,
+        lastOpId: "op_5",
+        fieldStamps: {
+          title: { timestampMs: 1700000000000, seq: 2, deviceId: "dev_a", opId: "op_2" },
+          order: { timestampMs: 1700000000500, seq: 5, deviceId: "dev_a", opId: "op_5" },
+        },
+        trackTombstones: {
+          trk_removed: { timestampMs: 1700000000300, seq: 4, deviceId: "dev_a", opId: "op_4" },
+        },
+      })
+    )
+  );
+
+  await assertSucceeds(
+    plRef.collection("snapshots").doc("snap_causal_2").set({
+      state: "COMMITTED",
+      syncRevision: 2,
+      trackCount: 1,
+      clientUpdatedAt: 1700000000900,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  // Full update with all 4 fieldStamps + activeSnapshotId rotation must succeed within rules budget
+  await assertSucceeds(
+    plRef.update({
+      title: "Updated Causal",
+      description: "Desc",
+      syncRevision: 2,
+      activeSnapshotId: "snap_causal_2",
+      trackCount: 1,
+      lastDeviceId: "dev_b",
+      lastOpSeq: 9,
+      lastOpId: "op_9",
+      fieldStamps: {
+        title: { timestampMs: 1700000000600, seq: 6, deviceId: "dev_b", opId: "op_6" },
+        description: { timestampMs: 1700000000700, seq: 7, deviceId: "dev_b", opId: "op_7" },
+        cover: { timestampMs: 1700000000800, seq: 8, deviceId: "dev_b", opId: "op_8" },
+        order: { timestampMs: 1700000000900, seq: 9, deviceId: "dev_b", opId: "op_9" },
+      },
+      clientUpdatedAt: 1700000000900,
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  // Unknown fieldStamps key rejected
+  await assertFails(
+    plRef.update({
+      fieldStamps: {
+        unknownKey: { timestampMs: 1700000001000, seq: 6, deviceId: "dev_a", opId: "op_6" },
+      },
+      updatedAt: serverTimestamp(),
+    })
+  );
+});
+

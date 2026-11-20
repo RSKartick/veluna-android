@@ -21,6 +21,7 @@ import com.example.model.TasteProfile
 import com.google.common.truth.Truth.assertThat
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
 import org.junit.After
@@ -63,7 +64,8 @@ class BackupAndCsvTest {
             dao = db.velunaDao(),
             prefsRepo = prefsRepo,
             innerTube = InnerTubeClient(OkHttpClient()),
-            database = db
+            database = db,
+            journalDir = File(tempDir, "journal")
         )
     }
 
@@ -420,7 +422,8 @@ class BackupAndCsvTest {
             dao = db.velunaDao(),
             prefsRepo = failingPrefsRepo,
             innerTube = InnerTubeClient(OkHttpClient()),
-            database = db
+            database = db,
+            journalDir = File(tempDir, "journal_failing")
         )
         val existingId = localRepo.createPlaylist("Preexisting", "Stay intact")
         localRepo.addTrackToPlaylist(existingId, SongItem(videoId = "vid_keep", title = "Keep", artists = "Artist"))
@@ -632,10 +635,33 @@ class BackupAndCsvTest {
         val exportedJson = repo.exportBackupJson(prefsRepo.prefsFlow.first())
         assertThat(exportedJson).contains("coverImageBase64")
 
-        // Attempting to attach an external /etc/passwd or corrupt file URI must reject rather than persist it
+        // Attempting to attach an external or corrupt file URI must throw explicit error and keep existing valid cover intact
         val externalPath = File(tempDir, "outside.png").apply { writeBytes(pngBytes) }
-        repo.updatePlaylist(plId, "Portable Art", "Bad file uri", android.net.Uri.fromFile(externalPath).toString())
+        var rejectedExternal = false
+        try {
+            repo.updatePlaylist(plId, "Portable Art", "Bad file uri", android.net.Uri.fromFile(externalPath).toString())
+        } catch (_: IllegalArgumentException) {
+            rejectedExternal = true
+        }
+        assertThat(rejectedExternal).isTrue()
+        assertThat(db.velunaDao().getPlaylistById(plId)!!.coverUri).isEqualTo(android.net.Uri.fromFile(managedFile).toString())
+
+        // Attempting invalid image bytes inside managed cover location must also throw and keep previous valid cover intact
+        val corruptManagedFile = File(coversDir, "corrupt.png").apply { writeBytes("NOT_PNG".toByteArray()) }
+        var rejectedCorrupt = false
+        try {
+            repo.updatePlaylist(plId, "Portable Art", "Corrupt file", android.net.Uri.fromFile(corruptManagedFile).toString())
+        } catch (_: IllegalArgumentException) {
+            rejectedCorrupt = true
+        }
+        assertThat(rejectedCorrupt).isTrue()
+        assertThat(db.velunaDao().getPlaylistById(plId)!!.coverUri).isEqualTo(android.net.Uri.fromFile(managedFile).toString())
+        corruptManagedFile.delete()
+
+        // Explicit removal with null clears cover cleanly
+        repo.updatePlaylist(plId, "Portable Art", "Removed cover", null)
         assertThat(db.velunaDao().getPlaylistById(plId)!!.coverUri).isNull()
+        assertThat(db.velunaDao().getPlaylistById(plId)!!.coverRemoved).isTrue()
 
         // Wipe local DB and managed cover, then restore from backup JSON -> cover file is recreated atomically
         db.velunaDao().clearSyncedAccountData()
@@ -648,6 +674,227 @@ class BackupAndCsvTest {
         val restoredCoverFile = File(android.net.Uri.parse(restoredPl.coverUri!!).path!!)
         assertThat(restoredCoverFile.exists()).isTrue()
         assertThat(restoredCoverFile.readBytes()).isEqualTo(pngBytes)
+    }
+
+    @Test
+    fun backupRestore_coroutineCancellationDuringDataStore_completesRollbackViaNonCancellable(): Unit = runBlocking {
+        val dao = db.velunaDao()
+        val origPlId = repo.createPlaylist("Keep Playlist", "Original")
+        val origSong = SongItem(videoId = "orig_cancel_1", title = "Keep Track", artists = "Keep Artist")
+        repo.addTrackToPlaylist(origPlId, origSong)
+        repo.toggleLike(origSong)
+        repo.blockArtist("Keep Blocked")
+        prefsRepo.setCornerRadius(10)
+
+        val backupJson = buildRichBackupJson(version = 4, coverB64 = android.util.Base64.encodeToString(valid1x1PngBytes(), android.util.Base64.NO_WRAP))
+
+        val reachedDataStore = kotlinx.coroutines.CompletableDeferred<Unit>()
+        repo.onBeforeDataStoreRestore = {
+            reachedDataStore.complete(Unit)
+            // Suspend until caller cancels us right before DataStore mutation
+            kotlinx.coroutines.delay(5_000L)
+        }
+        val child = kotlinx.coroutines.Job(coroutineContext[kotlinx.coroutines.Job])
+        val scope = kotlinx.coroutines.CoroutineScope(coroutineContext + child)
+        val importJob = scope.launch {
+            repo.importBackupJson(backupJson)
+        }
+        reachedDataStore.await()
+        importJob.cancel(kotlinx.coroutines.CancellationException("Cancelled mid-restore"))
+        importJob.join()
+        repo.onBeforeDataStoreRestore = null
+        assertThat(importJob.isCancelled).isTrue()
+
+        // Despite cancellation, NonCancellable rollback restored original state & cleaned journal and cover files
+        assertThat(repo.hasUncommittedRestoreJournal()).isFalse()
+        assertThat(dao.getPlaylistsOnce().map { it.title }).containsExactly("Keep Playlist")
+        assertThat(dao.getPlaylistTracks(origPlId).map { it.videoId }).containsExactly("orig_cancel_1")
+        assertThat(dao.getLikedSongsOnce().map { it.videoId }).containsExactly("orig_cancel_1")
+        assertThat(dao.getBlockedArtistsOnce().map { it.name }).containsExactly("Keep Blocked")
+        assertThat(prefsRepo.prefsFlow.first().cornerRadiusDp).isEqualTo(10)
+        val coversDir = File(ApplicationProvider.getApplicationContext<Context>().filesDir, "playlist_covers")
+        assertThat(coversDir.listFiles()?.toList().orEmpty().filter { it.name.startsWith("restore_") }).isEmpty()
+    }
+
+    @Test
+    fun backupRestore_processDeathAfterRoomCommit_recoversCompletelyOnRestartBeforeSync(): Unit = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val journalFolder = File(tempDir, "process_death_journal").apply { mkdirs() }
+        val localRepo = VelunaRepository(
+            context = context,
+            dao = db.velunaDao(),
+            prefsRepo = prefsRepo,
+            innerTube = InnerTubeClient(OkHttpClient()),
+            database = db,
+            journalDir = journalFolder
+        )
+        val dao = db.velunaDao()
+        val origPlId = localRepo.createPlaylist("Pre-Crash Pl", "Safe")
+        val origSong = SongItem(videoId = "pre_trk", title = "Pre Song", artists = "Artist")
+        localRepo.addTrackToPlaylist(origPlId, origSong)
+        localRepo.toggleLike(origSong)
+        prefsRepo.setCornerRadius(14)
+
+        var capturedJournal: RestoreJournalRecord? = null
+        localRepo.onBeforeJournalPersist = { rec ->
+            if (rec.createdCoverPaths.isNotEmpty()) {
+                capturedJournal = rec
+            }
+        }
+        val b64 = android.util.Base64.encodeToString(valid1x1PngBytes(), android.util.Base64.NO_WRAP)
+        val backupJson = buildRichBackupJson(version = 4, coverB64 = b64)
+        // Perform restore once capturing journal with cover path, then simulate process restart BEFORE commit
+        localRepo.importBackupJson(backupJson).getOrThrow()
+        localRepo.onBeforeJournalPersist = null
+
+        val crashedJournal = checkNotNull(capturedJournal).copy(state = RestoreJournalState.ROOM_APPLIED)
+        val createdCoverPath = crashedJournal.createdCoverPaths.first()
+        File(createdCoverPath).apply {
+            parentFile?.mkdirs()
+            writeBytes(valid1x1PngBytes())
+        }
+        // Re-create the restore journal on disk as if process died at ROOM_APPLIED right after Room commit
+        val journalJson = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
+        File(journalFolder, VelunaRepository.RESTORE_JOURNAL_FILENAME).writeText(
+            journalJson.encodeToString(RestoreJournalRecord.serializer(), crashedJournal)
+        )
+
+        // Fresh repository instance simulates restarted process
+        val restartedRepo = VelunaRepository(
+            context = context,
+            dao = dao,
+            prefsRepo = prefsRepo,
+            innerTube = InnerTubeClient(OkHttpClient()),
+            database = db,
+            journalDir = journalFolder
+        )
+        assertThat(restartedRepo.hasUncommittedRestoreJournal()).isTrue()
+
+        val didRecover = restartedRepo.recoverIncompleteRestoreIfNeeded()
+        assertThat(didRecover).isTrue()
+        assertThat(restartedRepo.hasUncommittedRestoreJournal()).isFalse()
+        assertThat(File(createdCoverPath).exists()).isFalse()
+        assertThat(dao.getPlaylistsOnce().map { it.title }).containsExactly("Pre-Crash Pl")
+        assertThat(dao.getPlaylistTracks(origPlId).map { it.videoId }).containsExactly("pre_trk")
+        assertThat(dao.getLikedSongsOnce().map { it.videoId }).containsExactly("pre_trk")
+        assertThat(prefsRepo.prefsFlow.first().cornerRadiusDp).isEqualTo(14)
+
+        // Idempotent second call does nothing and returns false
+        assertThat(restartedRepo.recoverIncompleteRestoreIfNeeded()).isFalse()
+    }
+
+    @Test
+    fun backupRestore_failedRollbackPersistsRollbackFailedJournal_andRecoversOnRetry(): Unit = runBlocking {
+        val dao = db.velunaDao()
+        repo.createPlaylist("Orig Before Double Fail", "Safe")
+        prefsRepo.setCornerRadius(12)
+
+        val backupJson = buildRichBackupJson(version = 3, coverB64 = null)
+        repo.onBeforeDataStoreRestore = { throw IOException("Primary DataStore fault") }
+        repo.onBeforeRollbackAttempt = { throw IOException("Transient rollback DB fault") }
+
+        val res = try {
+            repo.importBackupJson(backupJson)
+        } finally {
+            repo.onBeforeDataStoreRestore = null
+            repo.onBeforeRollbackAttempt = null
+        }
+
+        assertThat(res.exceptionOrNull()).isInstanceOf(RestoreRollbackException::class.java)
+        assertThat(repo.hasUncommittedRestoreJournal()).isTrue()
+        assertThat(repo.readRestoreJournal()?.state).isEqualTo(RestoreJournalState.ROLLBACK_FAILED)
+
+        // Retry startup recovery cleanly restores original state and clears journal
+        val recovered = repo.recoverIncompleteRestoreIfNeeded()
+        assertThat(recovered).isTrue()
+        assertThat(repo.hasUncommittedRestoreJournal()).isFalse()
+        assertThat(dao.getPlaylistsOnce().map { it.title }).containsExactly("Orig Before Double Fail")
+        assertThat(prefsRepo.prefsFlow.first().cornerRadiusDp).isEqualTo(12)
+    }
+
+    @Test
+    fun backupRestore_failureAtEveryStage_preservesFullOriginalStateAndCommittedPostFinalizeKeepsRestore(): Unit = runBlocking {
+        val dao = db.velunaDao()
+        val origPl = repo.createPlaylist("Stage Check Pl", "Stay")
+        val origSong = SongItem("stg_1", "Stage 1", "A")
+        repo.addTrackToPlaylist(origPl, origSong)
+        repo.toggleLike(origSong)
+        prefsRepo.setCornerRadius(16)
+
+        val backupJson = buildRichBackupJson(
+            version = 3,
+            coverB64 = android.util.Base64.encodeToString(valid1x1PngBytes(), android.util.Base64.NO_WRAP)
+        )
+
+        val hookSetters = listOf<(() -> Unit)>(
+            { repo.onBeforeJournalCreate = { throw IOException("Fail journal create") } },
+            { repo.onBeforeJournalPersist = { throw IOException("Fail journal persist") } },
+            { repo.onBeforeCoverCreate = { throw IOException("Fail cover create") } },
+            { repo.onBeforeRoomRestoreWrite = { throw IOException("Fail room write") } },
+            { repo.onAfterRoomRestoreCommit = { throw IOException("Fail after room commit") } },
+            { repo.onBeforeDataStoreRestore = { throw IOException("Fail ds restore") } },
+            { repo.onBeforeRestoreFinalize = { throw IOException("Fail finalize") } }
+        )
+
+        hookSetters.forEach { installHook ->
+            repo.onBeforeJournalCreate = null
+            repo.onBeforeJournalPersist = null
+            repo.onBeforeCoverCreate = null
+            repo.onBeforeRoomRestoreWrite = null
+            repo.onAfterRoomRestoreCommit = null
+            repo.onBeforeDataStoreRestore = null
+            repo.onBeforeRestoreFinalize = null
+            installHook()
+
+            val res = repo.importBackupJson(backupJson)
+            assertThat(res.isFailure).isTrue()
+            assertThat(repo.hasUncommittedRestoreJournal()).isFalse()
+            assertThat(dao.getPlaylistsOnce().map { it.title }).containsExactly("Stage Check Pl")
+            assertThat(dao.getLikedSongsOnce().map { it.videoId }).containsExactly("stg_1")
+            assertThat(prefsRepo.prefsFlow.first().cornerRadiusDp).isEqualTo(16)
+        }
+        repo.onBeforeRestoreFinalize = null
+
+        // Failure at journal cleanup AFTER COMMITTED keeps the committed restore intact and clears stale journal
+        repo.onBeforeJournalCleanup = { throw IOException("Fail cleanup after COMMITTED") }
+        val resCleanupFail = try {
+            repo.importBackupJson(backupJson)
+        } finally {
+            repo.onBeforeJournalCleanup = null
+        }
+        assertThat(resCleanupFail.isFailure).isTrue()
+        assertThat(repo.readRestoreJournal()?.state).isEqualTo(RestoreJournalState.COMMITTED)
+        assertThat(dao.getPlaylistsOnce().map { it.title }).containsExactly("Rich Imported Pl")
+        // Startup recovery sees COMMITTED journal -> deletes stale journal WITHOUT reverting committed data
+        assertThat(repo.recoverIncompleteRestoreIfNeeded()).isFalse()
+        assertThat(repo.hasUncommittedRestoreJournal()).isFalse()
+        assertThat(dao.getPlaylistsOnce().map { it.title }).containsExactly("Rich Imported Pl")
+    }
+
+    private fun buildRichBackupJson(version: Int, coverB64: String?): String {
+        val coverLine = if (coverB64 != null) "\"coverImageBase64\": \"$coverB64\"," else ""
+        return """
+            {
+              "version": $version,
+              "exportedAt": 1700000009000,
+              "prefs": { "cornerRadiusDp": 24, "lastFmApiKey": "must_redact", "listenBrainzToken": "must_redact" },
+              "playlists": [
+                {
+                  "cloudKey": "pl_rich_import",
+                  "title": "Rich Imported Pl",
+                  "description": "Rich desc",
+                  $coverLine
+                  "tracks": [
+                    { "videoId": "rich_vid", "title": "Rich Track", "artists": "Rich Artist" }
+                  ]
+                }
+              ],
+              "likedSongs": [
+                { "videoId": "rich_like", "title": "Rich Like", "artists": "Artist" }
+              ],
+              "blockedArtists": ["Rich Blocked"]
+            }
+        """.trimIndent()
     }
 
     private fun valid1x1PngBytes(): ByteArray {

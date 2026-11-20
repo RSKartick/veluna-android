@@ -276,5 +276,123 @@ class VelunaDatabaseMigrationTest {
         }
         migratedDb.close()
     }
+
+    @Test
+    fun migrate4To5_createsCausalOpTablesAndBackfillsExistingTracks() {
+        val dbName = "veluna_migration_4_5.db"
+        helper.createDatabase(dbName, 4).use { db ->
+            db.execSQL(
+                "INSERT INTO local_playlists (id, cloudKey, title, description, coverUri, remoteCoverUri, coverRemoved, createdAt, updatedAt, syncRevision) " +
+                    "VALUES (5, 'pl_local_5', 'Focus v4', 'Desc', 'https://cdn.example.com/c.jpg', 'https://cdn.example.com/c.jpg', 0, 1700000000000, 1700000001000, 3)"
+            )
+            db.execSQL(
+                "INSERT INTO local_playlist_tracks (id, playlistId, videoId, songJson, position, addedAt) " +
+                    "VALUES (21, 5, 'trk_a', '{\"videoId\":\"trk_a\",\"title\":\"A\"}', 0, 1700000000100)"
+            )
+            db.execSQL(
+                "INSERT INTO local_playlist_tracks (id, playlistId, videoId, songJson, position, addedAt) " +
+                    "VALUES (22, 5, 'trk_b', '{\"videoId\":\"trk_b\",\"title\":\"B\"}', 1, 1700000000200)"
+            )
+            db.execSQL(
+                "INSERT INTO sync_baselines (userId, entityType, entityKey, revision, signature, clientUpdatedAt, deleted, updatedAt, snapshotJson) " +
+                    "VALUES ('uid_4', 'PLAYLIST', 'pl_local_5', 3, 'sig_4', 1700000001000, 0, 1700000001000, '{\"title\":\"Focus v4\",\"description\":\"Desc\"}')"
+            )
+        }
+
+        val migratedDb = helper.runMigrationsAndValidate(
+            dbName,
+            5,
+            true,
+            VelunaDatabase.MIGRATION_4_5
+        )
+
+        migratedDb.query("SELECT cloudKey, syncRevision FROM local_playlists WHERE id = 5").use { c ->
+            assertThat(c.moveToFirst()).isTrue()
+            assertThat(c.getString(0)).isEqualTo("pl_local_5")
+            assertThat(c.getLong(1)).isEqualTo(3L)
+        }
+        migratedDb.query(
+            "SELECT videoId, deleted, timestampMs, opSeq, deviceId, opId FROM playlist_track_ops WHERE playlistId = 5 ORDER BY videoId ASC"
+        ).use { c ->
+            assertThat(c.moveToFirst()).isTrue()
+            assertThat(c.getString(0)).isEqualTo("trk_a")
+            assertThat(c.getInt(1)).isEqualTo(0)
+            assertThat(c.getLong(2)).isEqualTo(1700000000100L)
+            assertThat(c.getLong(3)).isEqualTo(21L)
+            assertThat(c.getString(4)).isEqualTo("legacy_v4")
+            assertThat(c.getString(5)).isEqualTo("mig_trk_21")
+
+            assertThat(c.moveToNext()).isTrue()
+            assertThat(c.getString(0)).isEqualTo("trk_b")
+            assertThat(c.getString(5)).isEqualTo("mig_trk_22")
+        }
+        migratedDb.query("SELECT COUNT(*) FROM playlist_field_ops").use { c ->
+            assertThat(c.moveToFirst()).isTrue()
+            assertThat(c.getInt(0)).isEqualTo(0)
+        }
+        migratedDb.query("SELECT COUNT(*) FROM local_device_clock").use { c ->
+            assertThat(c.moveToFirst()).isTrue()
+            assertThat(c.getInt(0)).isEqualTo(0)
+        }
+        // Unique index on cloudKey remains enforced in v5
+        try {
+            migratedDb.execSQL(
+                "INSERT INTO local_playlists (cloudKey, title, description, coverUri, remoteCoverUri, coverRemoved, createdAt, updatedAt, syncRevision) " +
+                    "VALUES ('pl_local_5', 'Dup', '', NULL, NULL, 0, 1, 1, 1)"
+            )
+            fail("Expected SQLiteConstraintException on duplicate cloudKey in v5")
+        } catch (_: SQLiteConstraintException) {
+            // Expected
+        }
+        migratedDb.close()
+    }
+
+    @Test
+    fun migrate1To5_preservesLegacyCloudKeyTracksAndAllSyncTables() {
+        val dbName = "veluna_migration_1_5.db"
+        helper.createDatabase(dbName, 1).use { db ->
+            db.execSQL(
+                "INSERT INTO liked_songs (videoId, songJson, likedAt) VALUES ('trk_v1_five', '{\"videoId\":\"trk_v1_five\",\"title\":\"E2E v5\"}', 1700000000000)"
+            )
+            db.execSQL(
+                "INSERT INTO local_playlists (id, title, description, coverUri, createdAt, updatedAt) " +
+                    "VALUES (9, 'V1 Playlist', 'Since v1', 'https://cdn.example.com/v1.png', 1700000000000, 1700000005000)"
+            )
+            db.execSQL(
+                "INSERT INTO local_playlist_tracks (id, playlistId, videoId, songJson, position, addedAt) " +
+                    "VALUES (100, 9, 'trk_legacy_1', '{}', 0, 1700000000500)"
+            )
+        }
+
+        val migratedDb = helper.runMigrationsAndValidate(
+            dbName,
+            5,
+            true,
+            VelunaDatabase.MIGRATION_1_2,
+            VelunaDatabase.MIGRATION_2_3,
+            VelunaDatabase.MIGRATION_3_4,
+            VelunaDatabase.MIGRATION_4_5
+        )
+
+        migratedDb.query(
+            "SELECT cloudKey, remoteCoverUri, coverRemoved, syncRevision FROM local_playlists WHERE id = 9"
+        ).use { c ->
+            assertThat(c.moveToFirst()).isTrue()
+            assertThat(c.getString(0)).isEqualTo("pl_local_9")
+            assertThat(c.getString(1)).isEqualTo("https://cdn.example.com/v1.png")
+            assertThat(c.getInt(2)).isEqualTo(0)
+            assertThat(c.getLong(3)).isEqualTo(0L)
+        }
+        migratedDb.query("SELECT videoId, deviceId FROM playlist_track_ops WHERE playlistId = 9").use { c ->
+            assertThat(c.moveToFirst()).isTrue()
+            assertThat(c.getString(0)).isEqualTo("trk_legacy_1")
+            assertThat(c.getString(1)).isEqualTo("legacy_v4")
+        }
+        migratedDb.query("SELECT COUNT(*) FROM local_playlists WHERE TRIM(cloudKey) = ''").use { c ->
+            assertThat(c.moveToFirst()).isTrue()
+            assertThat(c.getInt(0)).isEqualTo(0)
+        }
+        migratedDb.close()
+    }
 }
 

@@ -161,6 +161,17 @@
         "syncRevision": { "type": "integer" },
         "activeSnapshotId": { "type": "string" },
         "trackCount": { "type": "integer" },
+        "lastDeviceId": { "type": "string" },
+        "lastOpSeq": { "type": "integer" },
+        "lastOpId": { "type": "string" },
+        "fieldStamps": {
+          "type": "object",
+          "description": "Per-field causal SyncMutationStamp records (title, description, cover, order)."
+        },
+        "trackTombstones": {
+          "type": "object",
+          "description": "Bounded per-track causal removal stamps preventing offline add-then-remove resurrection."
+        },
         "clientUpdatedAt": { "type": "integer" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
@@ -169,10 +180,10 @@
     },
     "PlaylistSnapshotDoc": {
       "title": "PlaylistSnapshotDoc",
-      "description": "Versioned snapshot metadata staged and committed before atomically switching playlist.activeSnapshotId.",
+      "description": "Versioned snapshot metadata staged, committed, and atomically transitioned to DELETING before track cleanup.",
       "type": "object",
       "properties": {
-        "state": { "type": "string", "enum": ["STAGING", "COMMITTED"] },
+        "state": { "type": "string", "enum": ["STAGING", "COMMITTED", "DELETING"] },
         "syncRevision": { "type": "integer" },
         "trackCount": { "type": "integer" },
         "clientUpdatedAt": { "type": "integer" },
@@ -198,6 +209,10 @@
         "explicit": { "type": "boolean" },
         "position": { "type": "integer" },
         "addedAt": { "type": "integer" },
+        "opTs": { "type": "integer" },
+        "opSeq": { "type": "integer" },
+        "deviceId": { "type": "string" },
+        "opId": { "type": "string" },
         "deleted": { "type": "boolean" },
         "clientUpdatedAt": { "type": "integer" },
         "createdAt": { "type": "string", "format": "date-time" },
