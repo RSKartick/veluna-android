@@ -1176,7 +1176,7 @@ class CloudSyncCoordinatorTest : FirestoreEmulatorTestBase() {
                 throw java.io.IOException("Simulated playlist publish network failure")
             }
         }
-        val coord = dev.createCoordinator(customCloudRepo = faultRepo)
+        val coord = dev.createCoordinator(customCloudRepo = faultRepo, autoStartSync = false)
         withTimeout(SYNC_TIMEOUT_MS) { assertThat(coord.syncNowAndAwait()).isFalse() }
 
         // Honest error reporting: errorMessage non-null, pending > 0, playlists watermark stayed at 0L

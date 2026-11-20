@@ -699,10 +699,14 @@ class BackupAndCsvTest {
         val importJob = scope.launch {
             repo.importBackupJson(backupJson)
         }
-        reachedDataStore.await()
-        importJob.cancel(kotlinx.coroutines.CancellationException("Cancelled mid-restore"))
-        importJob.join()
-        repo.onBeforeDataStoreRestore = null
+        try {
+            reachedDataStore.await()
+            importJob.cancel(kotlinx.coroutines.CancellationException("Cancelled mid-restore"))
+            importJob.join()
+        } finally {
+            repo.onBeforeDataStoreRestore = null
+            child.cancel()
+        }
         assertThat(importJob.isCancelled).isTrue()
 
         // Despite cancellation, NonCancellable rollback restored original state & cleaned journal and cover files
@@ -864,11 +868,11 @@ class BackupAndCsvTest {
         }
         assertThat(resCleanupFail.isFailure).isTrue()
         assertThat(repo.readRestoreJournal()?.state).isEqualTo(RestoreJournalState.COMMITTED)
-        assertThat(dao.getPlaylistsOnce().map { it.title }).containsExactly("Rich Imported Pl")
+        assertThat(dao.getPlaylistsOnce().map { it.title }).containsExactly("Rich Imported Pl", "Stage Check Pl")
         // Startup recovery sees COMMITTED journal -> deletes stale journal WITHOUT reverting committed data
         assertThat(repo.recoverIncompleteRestoreIfNeeded()).isFalse()
         assertThat(repo.hasUncommittedRestoreJournal()).isFalse()
-        assertThat(dao.getPlaylistsOnce().map { it.title }).containsExactly("Rich Imported Pl")
+        assertThat(dao.getPlaylistsOnce().map { it.title }).containsExactly("Rich Imported Pl", "Stage Check Pl")
     }
 
     private fun buildRichBackupJson(version: Int, coverB64: String?): String {

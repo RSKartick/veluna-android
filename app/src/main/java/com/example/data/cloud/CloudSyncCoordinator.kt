@@ -1095,7 +1095,11 @@ class CloudSyncCoordinator(
             if (!allowDuringSignOut && isSigningOut.get()) return@withLock false
 
             _authState.update {
-                it.copy(isSyncing = true, syncStatus = "Syncing…", errorMessage = null)
+                it.copy(
+                    isSyncing = true,
+                    syncStatus = "Syncing…",
+                    errorMessage = if (failedCollections.isEmpty()) null else it.errorMessage
+                )
             }
             suppressLocalPushCount.incrementAndGet()
             try {
