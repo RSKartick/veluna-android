@@ -99,7 +99,7 @@ jobs:
 
       - name: Upload test and lint reports on failure
         if: failure()
-        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf88e # v4.4.3
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
         with:
           name: ci-test-lint-reports
           path: app/build/reports/
@@ -192,7 +192,7 @@ jobs:
 
       - name: Upload instrumentation reports on failure
         if: failure()
-        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf88e # v4.4.3
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
         with:
           name: ci-instrumentation-reports
           path: app/build/reports/androidTests/
@@ -297,7 +297,7 @@ jobs:
             || { echo "APK certificate SHA-256 mismatch"; exit 1; }
 
       - name: Upload release APK artifact
-        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf88e # v4.4.3
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
         with:
           name: veluna-android-release-apk
           path: dist/veluna-android.apk

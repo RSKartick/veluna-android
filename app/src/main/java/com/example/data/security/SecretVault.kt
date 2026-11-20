@@ -78,7 +78,7 @@ class AndroidKeyStoreVaultCipher(
             val key = getOrCreateKey()
             val factory = SecretKeyFactory.getInstance(key.algorithm, ANDROID_KEYSTORE)
             val keyInfo = factory.getKeySpec(key, KeyInfo::class.java) as KeyInfo
-            if (api >= Build.VERSION_CODES.S) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 val rawLevel = keyInfo.securityLevel
                 val level = when (rawLevel) {
                     KeyProperties.SECURITY_LEVEL_STRONGBOX -> KeySecurityLevel.STRONGBOX
