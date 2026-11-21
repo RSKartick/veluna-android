@@ -315,11 +315,22 @@ service cloud.firestore {
       }
 
       match /playlists/{playlistKey} {
+        function snapshotMatchesParent(snapData, inc) {
+          return snapData.state == 'COMMITTED' &&
+                 snapData.syncRevision == inc.syncRevision &&
+                 snapData.trackCount == inc.trackCount;
+        }
+
         function isCommittedSnapshotTarget(snapId, inc) {
           let snapPath = /databases/$(database)/documents/users/$(userId)/playlists/$(playlistKey)/snapshots/$(snapId);
-          return exists(snapPath) &&
-                 get(snapPath).data.state == 'COMMITTED' &&
-                 (!('syncRevision' in inc) || get(snapPath).data.syncRevision == inc.syncRevision);
+          return ('syncRevision' in inc) &&
+                 inc.syncRevision is int &&
+                 inc.syncRevision >= 1 &&
+                 ('trackCount' in inc) &&
+                 inc.trackCount is int &&
+                 inc.trackCount >= 0 &&
+                 exists(snapPath) &&
+                 snapshotMatchesParent(get(snapPath).data, inc);
         }
 
         function isMonotonicPlaylistUpdate(inc, ext) {
@@ -384,7 +395,6 @@ service cloud.firestore {
                    (isValidSyncedPlaylist(inc) &&
                     (!('activeSnapshotId' in inc) ||
                      inc.activeSnapshotId == null ||
-                     (('activeSnapshotId' in ext) && inc.activeSnapshotId == ext.activeSnapshotId) ||
                      isCommittedSnapshotTarget(inc.activeSnapshotId, inc))) ||
                    (isValidPlaylistTombstone(inc) &&
                     !diffKeys.hasAny(['title', 'description', 'coverUri']))
@@ -398,6 +408,11 @@ service cloud.firestore {
         allow delete: if isOwner(userId) && isValidId(playlistKey);
 
         match /snapshots/{snapshotId} {
+          function isParentReferencingSnapshot() {
+            let plPath = /databases/$(database)/documents/users/$(userId)/playlists/$(playlistKey);
+            return exists(plPath) && get(plPath).data.get('activeSnapshotId', null) == snapshotId;
+          }
+
           allow get: if isOwner(userId) && isValidId(playlistKey) && isValidId(snapshotId);
           allow list: if isOwner(userId) && isValidId(playlistKey);
 
@@ -412,7 +427,7 @@ service cloud.firestore {
                              'state', 'syncRevision', 'trackCount',
                              'clientUpdatedAt', 'createdAt', 'updatedAt'
                            ]) &&
-                           incoming().state in ['STAGING', 'COMMITTED'] &&
+                           incoming().state == 'STAGING' &&
                            isValidPlaylistSnapshot(incoming());
 
           allow update: if isOwner(userId) &&
@@ -422,15 +437,37 @@ service cloud.firestore {
                            isValidPlaylistSnapshot(incoming()) &&
                            incoming().syncRevision == existing().syncRevision &&
                            incoming().trackCount == existing().trackCount &&
+                           incoming().diff(existing()).affectedKeys().hasOnly(['state', 'updatedAt']) &&
                            (
-                             (existing().state == 'STAGING' && incoming().state in ['COMMITTED', 'DELETING']) ||
-                             (existing().state == 'COMMITTED' && incoming().state == 'DELETING')
-                           ) &&
-                           incoming().diff(existing()).affectedKeys().hasOnly(['state', 'updatedAt']);
+                             (existing().state == 'STAGING' && incoming().state == 'COMMITTED') ||
+                             ((existing().state == 'STAGING' || existing().state == 'COMMITTED') &&
+                              incoming().state == 'DELETING' &&
+                              !isParentReferencingSnapshot())
+                           );
 
-          allow delete: if isOwner(userId) && isValidId(playlistKey) && isValidId(snapshotId);
+          allow delete: if isOwner(userId) &&
+                           isValidId(playlistKey) &&
+                           isValidId(snapshotId) &&
+                           existing().state == 'DELETING' &&
+                           !isParentReferencingSnapshot();
 
           match /tracks/{trackDocId} {
+            function parentSnapshotRef() {
+              return /databases/$(database)/documents/users/$(userId)/playlists/$(playlistKey)/snapshots/$(snapshotId);
+            }
+
+            function isStagingSnapshot() {
+              let snapPath = parentSnapshotRef();
+              return exists(snapPath) && get(snapPath).data.state == 'STAGING';
+            }
+
+            function canDeleteSnapshotTrack() {
+              let snapPath = parentSnapshotRef();
+              return exists(snapPath) &&
+                     get(snapPath).data.state == 'DELETING' &&
+                     !isParentReferencingSnapshot();
+            }
+
             allow get: if isOwner(userId) && isValidId(playlistKey) && isValidId(snapshotId) && isNonLocalTrackId(trackDocId);
             allow list: if isOwner(userId) && isValidId(playlistKey) && isValidId(snapshotId);
 
@@ -438,6 +475,7 @@ service cloud.firestore {
                              isValidId(playlistKey) &&
                              isValidId(snapshotId) &&
                              isNonLocalTrackId(trackDocId) &&
+                             isStagingSnapshot() &&
                              isNotFutureTimestamp(incoming().createdAt) &&
                              incoming().keys().hasAll([
                                'videoId', 'title', 'artists', 'durationSecs', 'explicit',
@@ -455,6 +493,7 @@ service cloud.firestore {
                              isValidId(playlistKey) &&
                              isValidId(snapshotId) &&
                              isNonLocalTrackId(trackDocId) &&
+                             isStagingSnapshot() &&
                              createdAtPreservedOnUpdate() &&
                              isValidPlaylistTrack(incoming()) &&
                              incoming().diff(existing()).affectedKeys().hasOnly([
@@ -464,7 +503,11 @@ service cloud.firestore {
                                'deleted', 'clientUpdatedAt', 'updatedAt'
                              ]);
 
-            allow delete: if isOwner(userId) && isValidId(playlistKey) && isValidId(snapshotId) && isValidId(trackDocId);
+            allow delete: if isOwner(userId) &&
+                             isValidId(playlistKey) &&
+                             isValidId(snapshotId) &&
+                             isValidId(trackDocId) &&
+                             canDeleteSnapshotTrack();
           }
         }
 
@@ -547,6 +590,18 @@ service cloud.firestore {
                          );
 
         allow delete: if isOwner(userId) && isValidId(artistKey);
+      }
+
+      match /sync_meta/{metaId} {
+        allow get: if isOwner(userId) && isValidId(metaId);
+        allow list: if isOwner(userId);
+        allow create, update: if isOwner(userId) &&
+                                 isValidId(metaId) &&
+                                 metaId == 'clock' &&
+                                 incoming().keys().hasAll(['serverTime']) &&
+                                 incoming().keys().hasOnly(['serverTime']) &&
+                                 isNotFutureTimestamp(incoming().serverTime);
+        allow delete: if isOwner(userId) && isValidId(metaId);
       }
     }
   }

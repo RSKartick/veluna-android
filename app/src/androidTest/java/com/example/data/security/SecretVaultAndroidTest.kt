@@ -1,8 +1,12 @@
 package com.example.data.security
 
+import android.app.Activity
 import android.content.Context
+import android.os.Bundle
+import android.util.Log
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
 import com.google.common.truth.Truth.assertThat
 import org.junit.After
 import org.junit.Before
@@ -47,12 +51,67 @@ class SecretVaultAndroidTest {
     }
 
     @Test
+    fun androidKeyStoreCipher_rejectsMissingTruncatedAndTamperedCiphertext() {
+        val payload = "roundtrip-secret".toByteArray(Charsets.UTF_8)
+        val valid = cipher.encrypt(payload)
+
+        // Missing IV / too-short payload
+        val truncated = valid.copyOf(12)
+        var failedShort = false
+        try {
+            cipher.decrypt(truncated)
+        } catch (_: IllegalArgumentException) {
+            failedShort = true
+        }
+        assertThat(failedShort).isTrue()
+
+        // Tampered IV byte must fail GCM authentication
+        val badIv = valid.copyOf()
+        badIv[0] = (badIv[0].toInt() xor 0x5A).toByte()
+        var failedIv = false
+        try {
+            cipher.decrypt(badIv)
+        } catch (_: Exception) {
+            failedIv = true
+        }
+        assertThat(failedIv).isTrue()
+
+        // Tampered ciphertext/tag byte must fail GCM authentication
+        val badBody = valid.copyOf()
+        badBody[badBody.lastIndex] = (badBody[badBody.lastIndex].toInt() xor 0x01).toByte()
+        var failedBody = false
+        try {
+            cipher.decrypt(badBody)
+        } catch (_: Exception) {
+            failedBody = true
+        }
+        assertThat(failedBody).isTrue()
+    }
+
+    @Test
     fun androidKeyStoreCipher_reportsActualKeyInfoSecurityLevel() {
         val ciphertext = cipher.encrypt("probe".toByteArray(Charsets.UTF_8))
         assertThat(ciphertext).isNotEmpty()
 
         val report = cipher.inspectKeySecurity()
-        android.util.Log.i("SecretVaultAndroidTest", "KeyInfo report: $report")
+        val summary = "KEYSTORE_SECURITY_REPORT alias=${report.keyAlias} " +
+            "securityLevel=${report.securityLevel} " +
+            "isInsideSecureHardware=${report.isInsideSecureHardware} " +
+            "apiLevel=${report.apiLevel} " +
+            "details=${report.details}"
+
+        Log.i("SecretVaultAndroidTest", summary)
+        println(summary)
+        InstrumentationRegistry.getInstrumentation().sendStatus(
+            Activity.RESULT_OK,
+            Bundle().apply {
+                putString("keystore_security_report", summary)
+                putString("keystore_security_level", report.securityLevel.name)
+                putBoolean("keystore_in_secure_hardware", report.isInsideSecureHardware)
+                putInt("keystore_api_level", report.apiLevel)
+                putString("keystore_details", report.details)
+            }
+        )
 
         assertThat(report.keyAlias).isEqualTo(testAlias)
         assertThat(report.securityLevel).isNotEqualTo(KeySecurityLevel.UNAVAILABLE)
@@ -67,34 +126,54 @@ class SecretVaultAndroidTest {
     }
 
     @Test
-    fun secretVault_withAndroidKeyStore_persistsWipesAndDetectsTampering() {
+    fun secretVault_withAndroidKeyStore_persistsAcrossRestartWipesAndDetectsTampering() {
         val storageFile = File(tempDir, SecretVault.VAULT_FILENAME)
         val vault = SecretVault(storageFile, cipher)
 
         vault.putAll(
             mapOf(
                 SecretVault.KEY_LASTFM_KEY to "k_prod_123",
-                SecretVault.KEY_LASTFM_SESSION to "s_prod_456"
+                SecretVault.KEY_LASTFM_SECRET to "sec_prod_789",
+                SecretVault.KEY_LASTFM_SESSION to "s_prod_456",
+                SecretVault.KEY_LISTENBRAINZ_TOKEN to "lb_tok_999"
             )
         )
-        assertThat(vault.get(SecretVault.KEY_LASTFM_KEY)).isEqualTo("k_prod_123")
-        assertThat(vault.get(SecretVault.KEY_LASTFM_SESSION)).isEqualTo("s_prod_456")
+
+        // Simulate app restart with fresh SecretVault + fresh AndroidKeyStoreVaultCipher pointing at same alias/file
+        val restartedVault = SecretVault(storageFile, AndroidKeyStoreVaultCipher(testAlias))
+        assertThat(restartedVault.get(SecretVault.KEY_LASTFM_KEY)).isEqualTo("k_prod_123")
+        assertThat(restartedVault.get(SecretVault.KEY_LASTFM_SECRET)).isEqualTo("sec_prod_789")
+        assertThat(restartedVault.get(SecretVault.KEY_LASTFM_SESSION)).isEqualTo("s_prod_456")
+        assertThat(restartedVault.get(SecretVault.KEY_LISTENBRAINZ_TOKEN)).isEqualTo("lb_tok_999")
+
+        // Snapshot ciphertext, then wipeAll() (deletes file and Keystore key). Even if old ciphertext were
+        // restored to disk afterward, the regenerated Keystore key must NOT decrypt old data.
+        val savedCiphertext = storageFile.readText(Charsets.UTF_8)
+        restartedVault.wipeAll()
+        assertThat(storageFile.exists()).isFalse()
+        assertThat(restartedVault.getAll()).isEmpty()
+
+        storageFile.writeText(savedCiphertext, Charsets.UTF_8)
+        var threwAfterKeyDeletion = false
+        try {
+            restartedVault.getAll()
+        } catch (_: SecretVaultCorruptionException) {
+            threwAfterKeyDeletion = true
+        }
+        assertThat(threwAfterKeyDeletion).isTrue()
 
         // Tamper ciphertext byte -> must raise SecretVaultCorruptionException rather than returning partial/spoofed data
-        val corrupted = storageFile.readText(Charsets.UTF_8).toCharArray()
+        val corrupted = savedCiphertext.toCharArray()
         corrupted[corrupted.size / 2] = if (corrupted[corrupted.size / 2] == 'A') 'B' else 'A'
         storageFile.writeText(String(corrupted), Charsets.UTF_8)
 
         var threwCorruption = false
         try {
-            vault.getAll()
+            restartedVault.getAll()
         } catch (_: SecretVaultCorruptionException) {
             threwCorruption = true
         }
         assertThat(threwCorruption).isTrue()
-
-        vault.wipeAll()
-        assertThat(storageFile.exists()).isFalse()
-        assertThat(vault.getAll()).isEmpty()
     }
 }
+

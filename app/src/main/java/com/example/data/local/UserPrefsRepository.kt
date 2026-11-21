@@ -83,6 +83,12 @@ data class SerializablePrefEntry(
     val value: String
 )
 
+enum class LocalDataProvenance {
+    FRESH_LOCAL,
+    ACCOUNT_OWNED,
+    UNKNOWN_OR_LEGACY
+}
+
 class UserPrefsRepository(
     context: Context,
     val secretVault: SecretVault = SecretVault(context.applicationContext),
@@ -133,6 +139,7 @@ class UserPrefsRepository(
         val LAST_SUCCESSFUL_SYNC_AT_MS = longPreferencesKey("last_successful_sync_at_ms")
         val LAST_SUCCESSFUL_SYNC_UID = stringPreferencesKey("last_successful_sync_uid")
         val PENDING_ACCOUNT_TRANSITION_UID = stringPreferencesKey("pending_account_transition_uid")
+        val LOCAL_DATA_PROVENANCE = stringPreferencesKey("local_data_provenance")
 
         // Legacy DataStore keys (removed during migration, never written back)
         val LEGACY_CROSSFADE_SECS = intPreferencesKey("crossfade_secs")
@@ -517,13 +524,74 @@ class UserPrefsRepository(
         dataStore.edit { it[Keys.PLAYLIST_TRACKS_V2_MIGRATED] = true }
     }
 
+    suspend fun getLocalDataProvenance(): LocalDataProvenance? {
+        val raw = dataStore.data.first()[Keys.LOCAL_DATA_PROVENANCE] ?: return null
+        return runCatching { LocalDataProvenance.valueOf(raw) }.getOrNull()
+    }
+
+    suspend fun setLocalDataProvenance(provenance: LocalDataProvenance) {
+        dataStore.edit { it[Keys.LOCAL_DATA_PROVENANCE] = provenance.name }
+    }
+
+    /**
+     * Records explicit local-data provenance on startup if not yet initialized:
+     * - If an active or pending cloud UID exists -> ACCOUNT_OWNED
+     * - If all synced Room tables, taste seeds, and legacy cloud sync markers are empty -> FRESH_LOCAL
+     * - Otherwise (pre-provenance upgraded data or partial/untracked state) -> UNKNOWN_OR_LEGACY
+     */
+    suspend fun initializeInstallProvenanceIfClean(dao: VelunaDao) {
+        val current = dataStore.data.first()
+        if (current[Keys.LOCAL_DATA_PROVENANCE] != null) return
+
+        val activeUid = current[Keys.ACTIVE_CLOUD_UID]?.takeIf { it.isNotBlank() }
+        val pendingUid = current[Keys.PENDING_ACCOUNT_TRANSITION_UID]?.takeIf { it.isNotBlank() }
+        if (activeUid != null || pendingUid != null) {
+            dataStore.edit { p ->
+                if (p[Keys.LOCAL_DATA_PROVENANCE] == null) {
+                    p[Keys.LOCAL_DATA_PROVENANCE] = LocalDataProvenance.ACCOUNT_OWNED.name
+                }
+            }
+            return
+        }
+
+        val hasSyncedTablesData = dao.getPlaylistsOnce().isNotEmpty() ||
+            dao.getLikedSongsOnce().any { !it.videoId.startsWith(com.example.model.LOCAL_SONG_PREFIX) } ||
+            dao.getBlockedArtistsOnce().isNotEmpty() ||
+            dao.getAllTombstones().isNotEmpty() ||
+            dao.hasAnySyncBaselines()
+
+        val tasteRaw = current[Keys.TASTE_PROFILE_JSON]
+        val parsedTaste = if (!tasteRaw.isNullOrBlank()) {
+            runCatching { json.decodeFromString<TasteProfile>(tasteRaw) }.getOrNull()
+        } else null
+        val hasTasteSeeds = parsedTaste != null &&
+            (parsedTaste.seedArtists.isNotEmpty() || parsedTaste.seedSongs.isNotEmpty())
+
+        val hasLegacyMarkers = hasLegacyCloudSyncMarkers(targetUid = "")
+
+        val resolved = if (!hasSyncedTablesData && !hasTasteSeeds && !hasLegacyMarkers) {
+            LocalDataProvenance.FRESH_LOCAL
+        } else {
+            LocalDataProvenance.UNKNOWN_OR_LEGACY
+        }
+
+        dataStore.edit { p ->
+            if (p[Keys.LOCAL_DATA_PROVENANCE] == null) {
+                p[Keys.LOCAL_DATA_PROVENANCE] = resolved.name
+            }
+        }
+    }
+
     suspend fun getActiveCloudUid(): String? =
         dataStore.data.first()[Keys.ACTIVE_CLOUD_UID]?.takeIf { it.isNotBlank() }
 
     suspend fun setActiveCloudUid(uid: String?) {
         dataStore.edit { p ->
             if (uid.isNullOrBlank()) p.remove(Keys.ACTIVE_CLOUD_UID)
-            else p[Keys.ACTIVE_CLOUD_UID] = uid
+            else {
+                p[Keys.ACTIVE_CLOUD_UID] = uid
+                p[Keys.LOCAL_DATA_PROVENANCE] = LocalDataProvenance.ACCOUNT_OWNED.name
+            }
         }
     }
 
@@ -598,6 +666,52 @@ class UserPrefsRepository(
             p.remove(Keys.watermarkKey(WATERMARK_PLAYLISTS))
             p.remove(Keys.watermarkKey(WATERMARK_SEEDS))
             p.remove(Keys.watermarkKey(WATERMARK_HIDDEN))
+            p[Keys.LOCAL_DATA_PROVENANCE] = LocalDataProvenance.FRESH_LOCAL.name
+        }
+    }
+
+    suspend fun commitQuarantineMergePrefs(
+        uid: String,
+        tasteProfile: TasteProfile?,
+        displayName: String,
+        prefsUpdatedAtMs: Long
+    ) {
+        dataStore.edit { p ->
+            if (tasteProfile != null) {
+                p[Keys.ONBOARDING_COMPLETED] = tasteProfile.onboardingCompleted
+                p[Keys.TASTE_PROFILE_JSON] = json.encodeToString(tasteProfile)
+            }
+            if (displayName.isNotBlank() && displayName != "Listener") {
+                p[Keys.DISPLAY_NAME] = displayName.trim().take(80)
+                p[Keys.PREFS_UPDATED_AT] = prefsUpdatedAtMs.coerceAtLeast(0L)
+            } else if (prefsUpdatedAtMs > 0L) {
+                p[Keys.PREFS_UPDATED_AT] = prefsUpdatedAtMs.coerceAtLeast(0L)
+            }
+            p.remove(Keys.PENDING_ACCOUNT_TRANSITION_UID)
+            p[Keys.ACTIVE_CLOUD_UID] = uid
+            p[Keys.LOCAL_DATA_PROVENANCE] = LocalDataProvenance.ACCOUNT_OWNED.name
+        }
+    }
+
+    suspend fun commitQuarantineDiscardPrefs(uid: String) {
+        dataStore.edit { p ->
+            p.remove(Keys.DISPLAY_NAME)
+            p.remove(Keys.ONBOARDING_COMPLETED)
+            p.remove(Keys.TASTE_PROFILE_JSON)
+            p.remove(Keys.LAST_PROFILE_PUSH_HASH)
+            p.remove(Keys.LAST_SEEDS_PUSH_HASH)
+            p.remove(Keys.LOCAL_LIKES_SCRUBBED)
+            p.remove(Keys.PLAYLIST_TRACKS_V2_MIGRATED)
+            p.remove(Keys.PREFS_UPDATED_AT)
+            p.remove(Keys.LAST_SUCCESSFUL_SYNC_AT_MS)
+            p.remove(Keys.LAST_SUCCESSFUL_SYNC_UID)
+            p.remove(Keys.PENDING_ACCOUNT_TRANSITION_UID)
+            p.remove(Keys.watermarkKey(WATERMARK_LIKED))
+            p.remove(Keys.watermarkKey(WATERMARK_PLAYLISTS))
+            p.remove(Keys.watermarkKey(WATERMARK_SEEDS))
+            p.remove(Keys.watermarkKey(WATERMARK_HIDDEN))
+            p[Keys.ACTIVE_CLOUD_UID] = uid
+            p[Keys.LOCAL_DATA_PROVENANCE] = LocalDataProvenance.ACCOUNT_OWNED.name
         }
     }
 
@@ -633,6 +747,7 @@ class UserPrefsRepository(
             p.remove(Keys.LEGACY_LASTFM_SECRET)
             p.remove(Keys.LEGACY_LASTFM_SESSION)
             p.remove(Keys.LEGACY_LISTENBRAINZ_TOKEN)
+            p[Keys.LOCAL_DATA_PROVENANCE] = LocalDataProvenance.FRESH_LOCAL.name
         }
     }
 
