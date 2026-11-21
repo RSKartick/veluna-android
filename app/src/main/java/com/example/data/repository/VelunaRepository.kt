@@ -1140,8 +1140,12 @@ class VelunaRepository(
     private fun restoreJournalFile(): File =
         File(journalDir ?: context.noBackupFilesDir, RESTORE_JOURNAL_FILENAME)
 
-    fun hasUncommittedRestoreJournal(): Boolean =
-        readRestoreJournal()?.let { it.state != RestoreJournalState.COMMITTED } == true
+    fun hasUncommittedRestoreJournal(): Boolean {
+        val file = restoreJournalFile()
+        if (!file.exists()) return false
+        val parsed = runCatching { readRestoreJournal() }.getOrNull() ?: return true
+        return parsed.state != RestoreJournalState.COMMITTED
+    }
 
     private fun writeRestoreJournalAtomically(record: RestoreJournalRecord) {
         val journalFile = restoreJournalFile()
@@ -1195,6 +1199,29 @@ class VelunaRepository(
                 block()
             }
             true
+        }
+    }
+
+    /**
+     * Verifies after [recoverIncompleteRestoreIfNeeded] that no pending/corrupt restore journal
+     * remains and that both Room and DataStore can be queried cleanly.
+     */
+    suspend fun verifyRestoreStateStableForStartup() = withContext(Dispatchers.IO) {
+        restoreMutex.withLock {
+            val journalFile = restoreJournalFile()
+            if (journalFile.exists()) {
+                val parsed = runCatching { readRestoreJournal() }.getOrNull()
+                if (parsed == null) {
+                    throw IllegalStateException("Restore journal is corrupt or unreadable.")
+                }
+                if (parsed.state == RestoreJournalState.COMMITTED) {
+                    deleteRestoreJournalStrict()
+                } else {
+                    throw IllegalStateException("Restore journal remains incomplete in state ${parsed.state}.")
+                }
+            }
+            dao.getPlaylistsOnce()
+            prefsRepo.captureRawPreferencesSnapshot()
         }
     }
 

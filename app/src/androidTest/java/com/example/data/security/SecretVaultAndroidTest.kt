@@ -1,12 +1,9 @@
 package com.example.data.security
 
-import android.app.Activity
 import android.content.Context
-import android.os.Bundle
 import android.util.Log
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import androidx.test.platform.app.InstrumentationRegistry
 import com.google.common.truth.Truth.assertThat
 import org.junit.After
 import org.junit.Before
@@ -102,16 +99,6 @@ class SecretVaultAndroidTest {
 
         Log.i("SecretVaultAndroidTest", summary)
         println(summary)
-        InstrumentationRegistry.getInstrumentation().sendStatus(
-            Activity.RESULT_OK,
-            Bundle().apply {
-                putString("keystore_security_report", summary)
-                putString("keystore_security_level", report.securityLevel.name)
-                putBoolean("keystore_in_secure_hardware", report.isInsideSecureHardware)
-                putInt("keystore_api_level", report.apiLevel)
-                putString("keystore_details", report.details)
-            }
-        )
 
         assertThat(report.keyAlias).isEqualTo(testAlias)
         assertThat(report.securityLevel).isNotEqualTo(KeySecurityLevel.UNAVAILABLE)

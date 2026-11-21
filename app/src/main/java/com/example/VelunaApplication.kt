@@ -8,6 +8,7 @@ import coil.memory.MemoryCache
 import coil.size.Precision
 import com.example.data.cloud.CloudSyncCoordinator
 import com.example.data.cloud.CloudSyncRepository
+import com.example.data.cloud.StartupInitializationCoordinator
 import com.example.data.local.UserPrefsRepository
 import com.example.data.local.VelunaDatabase
 import com.example.data.network.InnerTubeClient
@@ -16,6 +17,7 @@ import com.example.data.network.ScrobbleClient
 import com.example.data.repository.TasteEngine
 import com.example.data.repository.VelunaRepository
 import com.example.playback.PlayerController
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -29,9 +31,6 @@ class VelunaAppContainer(
     val database: VelunaDatabase = VelunaDatabase.getInstance(application)
     val dao = database.velunaDao()
     val prefsRepository: UserPrefsRepository = UserPrefsRepository(application)
-    val startupProvenanceJob: Job = appScope.launch {
-        runCatching { prefsRepository.initializeInstallProvenanceIfClean(dao) }
-    }
     val innerTubeClient: InnerTubeClient = InnerTubeClient()
     val lyricsRepository: LyricsRepository = LyricsRepository(dao, innerTubeClient)
     val scrobbleClient: ScrobbleClient = ScrobbleClient(
@@ -51,6 +50,11 @@ class VelunaAppContainer(
         innerTube = innerTubeClient,
         database = database
     )
+    val startupCoordinator: StartupInitializationCoordinator = StartupInitializationCoordinator(
+        repository = repository,
+        prefsRepo = prefsRepository,
+        dao = dao
+    )
     val cloudSyncRepository: CloudSyncRepository = CloudSyncRepository(application)
     val cloudSyncCoordinator: CloudSyncCoordinator = CloudSyncCoordinator(
         context = application,
@@ -58,7 +62,7 @@ class VelunaAppContainer(
         prefsRepo = prefsRepository,
         repository = repository,
         cloudRepo = cloudSyncRepository,
-        awaitStartupProvenance = { startupProvenanceJob.join() }
+        awaitStartupProvenance = { startupCoordinator.ensureInitialized() }
     )
     val playerController: PlayerController = PlayerController(
         context = application,
@@ -69,10 +73,20 @@ class VelunaAppContainer(
         scrobbleClient = scrobbleClient,
         tasteEngine = tasteEngine
     )
+    val startupJob: Job
 
     init {
         repository.runWithSyncSuppressed = { block ->
             cloudSyncCoordinator.runWithLocalSyncSuppressed(block)
+        }
+        startupJob = appScope.launch {
+            try {
+                startupCoordinator.ensureInitialized()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Throwable) {
+                // Leave startupCoordinator uninitialized so callers fail closed loudly on retry/await.
+            }
         }
     }
 }
@@ -88,10 +102,11 @@ class VelunaApplication : Application(), ImageLoaderFactory {
         container = VelunaAppContainer(this, appScope)
         container.scrobbleClient.registerConnectivityFlush(this)
         appScope.launch {
-            container.startupProvenanceJob.join()
-            runCatching { container.repository.recoverIncompleteRestoreIfNeeded() }
-            runCatching { container.prefsRepository.migrateSecretsAndPruneLegacyKeys() }
-            runCatching { container.scrobbleClient.flushPendingScrobbles() }
+            container.startupJob.join()
+            if (container.startupCoordinator.isInitialized()) {
+                runCatching { container.prefsRepository.migrateSecretsAndPruneLegacyKeys() }
+                runCatching { container.scrobbleClient.flushPendingScrobbles() }
+            }
         }
     }
 

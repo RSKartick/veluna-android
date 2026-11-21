@@ -122,6 +122,8 @@ internal enum class QuarantineResolutionState {
     ROOM_APPLIED,
     PREFS_APPLIED,
     QUARANTINE_CLEARED,
+    CLOUD_SYNC_PENDING,
+    CLOUD_SYNC_COMMITTED,
     COMPLETED
 }
 
@@ -136,6 +138,30 @@ internal data class UnownedQuarantineResolutionJournal(
 )
 
 @Serializable
+internal data class QuarantinedSyncableProfilePrefs(
+    val themePresetId: String = VelunaThemePreset.DEFAULT.id,
+    val themeModeName: String = ThemeMode.DARK.name,
+    val customAccentHex: String? = null,
+    val adaptToArtwork: Boolean = true,
+    val cornerRadiusDp: Int = 12,
+    val audioQualityName: String = AudioQuality.HIGH.name,
+    val autoplay: Boolean = true,
+    val loudnessNormalization: Boolean = true,
+    val hideMusicVideos: Boolean = false
+) {
+    fun hasNonDefaultValues(): Boolean =
+        themePresetId != VelunaThemePreset.DEFAULT.id ||
+            themeModeName != ThemeMode.DARK.name ||
+            !customAccentHex.isNullOrBlank() ||
+            !adaptToArtwork ||
+            cornerRadiusDp != 12 ||
+            audioQualityName != AudioQuality.HIGH.name ||
+            !autoplay ||
+            !loudnessNormalization ||
+            hideMusicVideos
+}
+
+@Serializable
 internal data class UnownedAccountDataQuarantine(
     val createdAtMs: Long,
     val likedSongs: List<SerializableLikedSong> = emptyList(),
@@ -147,11 +173,29 @@ internal data class UnownedAccountDataQuarantine(
     val tombstones: List<SerializableSyncTombstone> = emptyList(),
     val tasteProfile: TasteProfile? = null,
     val displayName: String = "Listener",
-    val prefsUpdatedAtMs: Long = 0L
+    val prefsUpdatedAtMs: Long = 0L,
+    val profilePrefs: QuarantinedSyncableProfilePrefs? = null
 ) {
+    fun hasSyncableProfileData(): Boolean {
+        val cleanName = displayName.trim()
+        val hasTaste = tasteProfile != null && (
+            tasteProfile.onboardingCompleted ||
+                tasteProfile.selectedGenres.isNotEmpty() ||
+                tasteProfile.seedArtists.isNotEmpty() ||
+                tasteProfile.seedSongs.isNotEmpty()
+            )
+        return prefsUpdatedAtMs > 0L ||
+            (cleanName.isNotBlank() && cleanName != "Listener") ||
+            hasTaste ||
+            (profilePrefs?.hasNonDefaultValues() == true)
+    }
+
     val itemCount: Int
-        get() = likedSongs.size + playlists.size + blockedArtists.size +
-            (tasteProfile?.let { it.seedArtists.size + it.seedSongs.size } ?: 0)
+        get() {
+            val raw = likedSongs.size + playlists.size + blockedArtists.size +
+                (tasteProfile?.let { it.seedArtists.size + it.seedSongs.size + it.selectedGenres.size } ?: 0)
+            return if (raw > 0) raw else if (hasSyncableProfileData()) 1 else 0
+        }
 }
 
 class CloudSyncCoordinator(
@@ -164,7 +208,7 @@ class CloudSyncCoordinator(
     ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val stateDir: File? = null,
     private val autoStartSync: Boolean = true,
-    private val awaitStartupProvenance: suspend () -> Unit = {}
+    private val awaitStartupProvenance: (suspend () -> Unit)? = null
 ) {
     private val scope = CoroutineScope(SupervisorJob() + ioDispatcher)
     private val syncMutex = Mutex()
@@ -172,6 +216,9 @@ class CloudSyncCoordinator(
     private val suppressLocalPushCount = AtomicInteger(0)
     private val isSigningOut = AtomicBoolean(false)
     private val json = Json { ignoreUnknownKeys = true }
+    private val defaultStartupCoordinator by lazy {
+        StartupInitializationCoordinator(repository, prefsRepo, dao)
+    }
 
     private val _authState = MutableStateFlow(buildUiState(auth.currentUser))
     val authState: StateFlow<CloudAuthUiState> = _authState.asStateFlow()
@@ -196,6 +243,8 @@ class CloudSyncCoordinator(
     internal var onAfterQuarantinePrefsBeforeDeleteFile: (suspend (action: QuarantineResolutionAction, uid: String) -> Unit)? = null
     internal var onAfterQuarantineDeleteBeforeClearedState: (suspend (action: QuarantineResolutionAction, uid: String) -> Unit)? = null
     internal var onAfterQuarantineDeleteBeforeJournalComplete: (suspend (action: QuarantineResolutionAction, uid: String) -> Unit)? = null
+    internal var onAfterQuarantineCloudSyncPendingBeforeSync: (suspend (action: QuarantineResolutionAction, uid: String) -> Unit)? = null
+    internal var onAfterQuarantineCloudSyncCommitted: (suspend (action: QuarantineResolutionAction, uid: String) -> Unit)? = null
     internal var onAfterQuarantineJournalCompletedBeforeCleanup: (suspend (action: QuarantineResolutionAction, uid: String) -> Unit)? = null
     internal var onAfterQuarantinePayloadCleanupBeforeJournalDelete: (suspend (action: QuarantineResolutionAction, uid: String) -> Unit)? = null
 
@@ -376,21 +425,26 @@ class CloudSyncCoordinator(
 
     fun dismissSignOutConfirm() {
         val user = auth.currentUser
+        var needStartSync = false
         synchronized(syncLifecycleLock) {
             signOutJob?.cancel()
             signOutJob = null
             isSigningOut.set(false)
             failedCollections.remove("signout_timeout")
             _authState.update { it.copy(pendingSignOutConfirmCount = null, isAuthBusy = false) }
-            if (user != null && activeUserId == user.uid && watcherJobs.isEmpty() && !hasPendingQuarantineOrJournal()) {
-                launchWatchersLocked(user)
-            } else if (user != null && activeUserId != user.uid) {
+            if (user != null && activeUserId != user.uid) {
                 startSyncForUserLocked(user)
+            } else if (user != null && activeUserId == user.uid && watcherJobs.isEmpty()) {
+                needStartSync = true
             }
+        }
+        if (needStartSync && user != null) {
+            scope.launch { maybeLaunchWatchers(user) }
         }
     }
 
     fun confirmSignOutDiscard() {
+        val discardedForUid = auth.currentUser?.uid
         synchronized(syncLifecycleLock) {
             signOutJob?.cancel()
             signOutJob = null
@@ -399,7 +453,11 @@ class CloudSyncCoordinator(
         }
         _authState.update { it.copy(pendingSignOutConfirmCount = null, isAuthBusy = true) }
         scope.launch {
-            performLocalWipeAndSignOut(signOutAuth = true, clearAllAccountData = false)
+            performLocalWipeAndSignOut(
+                signOutAuth = true,
+                clearAllAccountData = false,
+                discardedPendingUid = discardedForUid
+            )
         }
     }
 
@@ -569,7 +627,8 @@ class CloudSyncCoordinator(
 
     private suspend fun performLocalWipeAndSignOut(
         signOutAuth: Boolean,
-        clearAllAccountData: Boolean
+        clearAllAccountData: Boolean,
+        discardedPendingUid: String? = null
     ) {
         stopSyncForSignedOut(clearFailureState = true)
         syncMutex.withLock {
@@ -584,6 +643,17 @@ class CloudSyncCoordinator(
             } else {
                 dao.clearSyncedAccountData()
                 prefsRepo.resetCloudSyncStateForSignOut()
+                if (!discardedPendingUid.isNullOrBlank()) {
+                    val journal = readQuarantineResolutionJournal()
+                    if (journal != null &&
+                        journal.targetUid == discardedPendingUid &&
+                        journal.action == QuarantineResolutionAction.MERGE &&
+                        journal.state == QuarantineResolutionState.CLOUD_SYNC_PENDING
+                    ) {
+                        deleteRetainedPayloadIfExists(journal)
+                        deleteQuarantineResolutionJournalStrict()
+                    }
+                }
             }
             if (signOutAuth) {
                 GoogleAuthHelper.signOut(context.applicationContext, auth)
@@ -632,34 +702,74 @@ class CloudSyncCoordinator(
         return resolveQuarantineWithJournalAndMerge(user, QuarantineResolutionAction.DISCARD, "Syncing cloud account…")
     }
 
+    private suspend fun awaitAuthoritativeStartupPipeline() {
+        val customBarrier = awaitStartupProvenance
+        if (customBarrier != null) {
+            customBarrier()
+        } else {
+            defaultStartupCoordinator.ensureInitialized()
+        }
+    }
+
     private suspend fun resolveQuarantineWithJournalAndMerge(
         user: FirebaseUser,
         action: QuarantineResolutionAction,
         busyStatus: String
     ): Boolean {
         _authState.update { it.copy(isSyncing = true, errorMessage = null, syncStatus = busyStatus) }
+        try {
+            awaitAuthoritativeStartupPipeline()
+            failedCollections.remove("startup_init")
+        } catch (e: CancellationException) {
+            _authState.update { it.copy(isSyncing = false) }
+            throw e
+        } catch (e: Exception) {
+            val safeMsg = SecurityValidators.safeUserErrorMessage(e, "Startup recovery failed.")
+            failedCollections["startup_init"] = safeMsg
+            _authState.update {
+                it.copy(isSyncing = false, syncStatus = "Sync failed: $safeMsg", errorMessage = safeMsg)
+            }
+            return false
+        }
+
         val resolved = syncMutex.withLock {
             suppressLocalPushCount.incrementAndGet()
             try {
-                // First handle any incomplete journal from a different account or prior interrupted attempt
+                if (repository.hasUncommittedRestoreJournal() || prefsRepo.getLocalDataProvenance() == null) {
+                    failedCollections["startup_init"] = "Pending backup recovery or local provenance incomplete."
+                    _authState.update {
+                        it.copy(
+                            isSyncing = false,
+                            syncStatus = "Quarantine recovery error",
+                            errorMessage = "Pending backup recovery or local provenance incomplete."
+                        )
+                    }
+                    return@withLock false
+                }
+
+                val journalFile = quarantineResolutionJournalFile()
                 val existingJournal = readQuarantineResolutionJournal()
+                if (journalFile.exists() && existingJournal == null) {
+                    throw IllegalStateException("Pending library resolution journal could not be read.")
+                }
+
                 if (existingJournal != null) {
-                    if (existingJournal.state == QuarantineResolutionState.COMPLETED) {
-                        deleteRetainedPayloadIfExists(existingJournal)
-                        deleteQuarantineResolutionJournalStrict()
+                    if (isJournalCommittedGloballyLocked(existingJournal)) {
+                        finalizeCommittedQuarantineCleanupLocked(existingJournal.targetUid, existingJournal)
                     } else if (existingJournal.targetUid != user.uid) {
                         if (!rollbackStaleQuarantineResolutionForForeignUidLocked(existingJournal)) {
                             throw IllegalStateException("Pending library resolution payload could not be restored.")
                         }
                     } else if (existingJournal.action != action) {
-                        // User switched their mind after a crash before commit completed: reset partial state cleanly if recovery payload exists and QUARANTINE_CLEARED hasn't committed
-                        val hasRecoveryPayload = readQuarantineFile() != null ||
-                            (retainedPayloadFile(existingJournal)?.let(::readQuarantineFromFile) != null)
+                        val hasRecoveryPayload = !retainedFilePresentAndCorrupt(existingJournal) &&
+                            resolveReadableRecoveryPayload(existingJournal) != null
                         if (hasRecoveryPayload && existingJournal.state != QuarantineResolutionState.QUARANTINE_CLEARED) {
                             if (!rollbackStaleQuarantineResolutionForForeignUidLocked(existingJournal)) {
                                 throw IllegalStateException("Pending library resolution payload could not be restored.")
                             }
-                        } else if (existingJournal.state == QuarantineResolutionState.QUARANTINE_CLEARED) {
+                        } else if (existingJournal.state == QuarantineResolutionState.QUARANTINE_CLEARED &&
+                            existingJournal.action == QuarantineResolutionAction.DISCARD
+                        ) {
                             executeQuarantineResolutionWithJournalLocked(user.uid, existingJournal)
                             return@withLock true
                         } else {
@@ -671,7 +781,12 @@ class CloudSyncCoordinator(
                     }
                 }
 
-                val hasQuarantine = quarantineFile().exists()
+                val qFile = quarantineFile()
+                if (qFile.exists() && readQuarantineFile() == null) {
+                    throw IllegalStateException("Quarantined local library file could not be read.")
+                }
+
+                val hasQuarantine = qFile.exists()
                 if (!hasQuarantine) {
                     if (action == QuarantineResolutionAction.DISCARD) {
                         dao.clearSyncedAccountData()
@@ -717,7 +832,7 @@ class CloudSyncCoordinator(
                         isSyncing = false,
                         hasUnownedDataConflict = stillConflicted,
                         unownedDataItemCount = if (stillConflicted) conflictCount else 0,
-                        syncStatus = "Resolution failed: $safeMsg",
+                        syncStatus = "Quarantine recovery error",
                         errorMessage = safeMsg
                     )
                 }
@@ -729,15 +844,8 @@ class CloudSyncCoordinator(
         if (!resolved) return false
         _authState.update { it.copy(hasUnownedDataConflict = false, unownedDataItemCount = 0) }
         val ok = runBidirectionalMerge(user)
-        synchronized(syncLifecycleLock) {
-            if (!hasPendingQuarantineOrJournal() &&
-                activeUserId == user.uid &&
-                auth.currentUser?.uid == user.uid &&
-                !isSigningOut.get() &&
-                watcherJobs.isEmpty()
-            ) {
-                launchWatchersLocked(user)
-            }
+        if (ok) {
+            maybeLaunchWatchers(user)
         }
         return ok
     }
@@ -811,17 +919,31 @@ class CloudSyncCoordinator(
                 return@launch
             }
             runBidirectionalMerge(user)
-            synchronized(syncLifecycleLock) {
-                if (!hasPendingQuarantineOrJournal() &&
-                    activeUserId == user.uid &&
-                    auth.currentUser?.uid == user.uid &&
-                    !isSigningOut.get()
-                ) {
-                    launchWatchersLocked(user)
-                }
-            }
+            maybeLaunchWatchers(user)
         }
         watcherJobs.add(mainJob)
+    }
+
+    private suspend fun maybeLaunchWatchers(user: FirebaseUser) {
+        val readyToWatch = auth.currentUser?.uid == user.uid &&
+            !isSigningOut.get() &&
+            !failedCollections.containsKey("startup_init") &&
+            !hasPendingQuarantineOrJournal() &&
+            !repository.hasUncommittedRestoreJournal() &&
+            prefsRepo.getLocalDataProvenance() != null &&
+            prefsRepo.getActiveCloudUid() == user.uid
+        if (!readyToWatch) return
+        synchronized(syncLifecycleLock) {
+            if (activeUserId == user.uid &&
+                auth.currentUser?.uid == user.uid &&
+                !isSigningOut.get() &&
+                watcherJobs.isEmpty() &&
+                !failedCollections.containsKey("startup_init") &&
+                !hasPendingQuarantineOrJournal()
+            ) {
+                launchWatchersLocked(user)
+            }
+        }
     }
 
     internal suspend fun countUnsyncedChangesFor(userId: String): Int {
@@ -997,17 +1119,31 @@ class CloudSyncCoordinator(
         return runCatching { json.decodeFromString<UnownedQuarantineResolutionJournal>(file.readText(Charsets.UTF_8)) }.getOrNull()
     }
 
+    private fun retainedFilePresentAndCorrupt(journal: UnownedQuarantineResolutionJournal): Boolean {
+        val retained = retainedPayloadFile(journal) ?: return false
+        return retained.exists() && readQuarantineFromFile(retained) == null
+    }
+
     private fun resolveReadableRecoveryPayload(journal: UnownedQuarantineResolutionJournal): UnownedAccountDataQuarantine? {
+        if (retainedFilePresentAndCorrupt(journal)) return null
         return retainedPayloadFile(journal)?.let(::readQuarantineFromFile) ?: readQuarantineFile()
+    }
+
+    private suspend fun isJournalCommittedGloballyLocked(journal: UnownedQuarantineResolutionJournal): Boolean {
+        if (journal.state == QuarantineResolutionState.CLOUD_SYNC_COMMITTED) return true
+        if (journal.state != QuarantineResolutionState.COMPLETED) return false
+        if (journal.action == QuarantineResolutionAction.DISCARD) return true
+        val activeUid = prefsRepo.getActiveCloudUid()
+        if (activeUid != journal.targetUid) return false
+        val lastSuccess = prefsRepo.getLastSuccessfulSyncAtMs(journal.targetUid)
+        val hasBaselines = dao.getAllSyncBaselinesForUser(journal.targetUid).isNotEmpty()
+        return lastSuccess >= journal.startedAtMs || hasBaselines
     }
 
     private fun hasPendingQuarantineOrJournal(): Boolean {
         if (_authState.value.hasUnownedDataConflict) return true
         if (quarantineFile().exists()) return true
-        val journal = quarantineResolutionJournalFile()
-        if (!journal.exists()) return false
-        val parsed = readQuarantineResolutionJournal()
-        return parsed == null || parsed.state != QuarantineResolutionState.COMPLETED
+        return quarantineResolutionJournalFile().exists()
     }
 
     private fun writeQuarantineAtomically(quarantine: UnownedAccountDataQuarantine) {
@@ -1087,7 +1223,14 @@ class CloudSyncCoordinator(
         staleJournal: UnownedQuarantineResolutionJournal
     ): Boolean {
         return withContext(NonCancellable) {
+            val qFile = quarantineFile()
             val preservedQuarantine = readQuarantineFile()
+            if (qFile.exists() && preservedQuarantine == null) {
+                return@withContext false
+            }
+            if (retainedFilePresentAndCorrupt(staleJournal)) {
+                return@withContext false
+            }
             val retainedQuarantine = retainedPayloadFile(staleJournal)?.let(::readQuarantineFromFile)
             val recoveryPayload = retainedQuarantine ?: preservedQuarantine
 
@@ -1115,15 +1258,32 @@ class CloudSyncCoordinator(
         }
     }
 
+    private suspend fun finalizeCommittedQuarantineCleanupLocked(
+        userUid: String,
+        journal: UnownedQuarantineResolutionJournal
+    ) {
+        var cur = journal
+        if (cur.state == QuarantineResolutionState.CLOUD_SYNC_COMMITTED) {
+            cur = cur.copy(state = QuarantineResolutionState.COMPLETED)
+            writeQuarantineResolutionJournalAtomically(cur)
+            onAfterQuarantineJournalCompletedBeforeCleanup?.invoke(cur.action, userUid)
+        }
+        if (cur.state == QuarantineResolutionState.COMPLETED) {
+            deleteRetainedPayloadIfExists(cur)
+            onAfterQuarantinePayloadCleanupBeforeJournalDelete?.invoke(cur.action, userUid)
+            deleteQuarantineResolutionJournalStrict()
+        }
+    }
+
     private suspend fun executeQuarantineResolutionWithJournalLocked(
         userUid: String,
         initialJournal: UnownedQuarantineResolutionJournal
     ) {
         var cur = initialJournal
-        if (cur.state == QuarantineResolutionState.COMPLETED) {
-            deleteRetainedPayloadIfExists(cur)
-            onAfterQuarantinePayloadCleanupBeforeJournalDelete?.invoke(cur.action, userUid)
-            deleteQuarantineResolutionJournalStrict()
+        if (cur.state == QuarantineResolutionState.CLOUD_SYNC_COMMITTED ||
+            cur.state == QuarantineResolutionState.COMPLETED
+        ) {
+            finalizeCommittedQuarantineCleanupLocked(userUid, cur)
             return
         }
 
@@ -1133,7 +1293,10 @@ class CloudSyncCoordinator(
             val retainedName = cur.retainedPayloadFilename.takeIf { sanitizeSafeChildFilename(it) != null }
                 ?: "${UNOWNED_RETAINED_PREFIX}${cur.operationId}.json"
             val existingRetained = File(stateRootDir(), retainedName)
-            if (readQuarantineFromFile(existingRetained) == null) {
+            if (existingRetained.exists() && readQuarantineFromFile(existingRetained) == null) {
+                throw IllegalStateException("Existing retained quarantine archive is corrupt.")
+            }
+            if (!existingRetained.exists()) {
                 writeRetainedPayloadAtomically(retainedName, payload)
             }
             cur = cur.copy(
@@ -1208,11 +1371,24 @@ class CloudSyncCoordinator(
 
             if (cur.state == QuarantineResolutionState.ROOM_APPLIED && quarantine != null) {
                 onAfterQuarantineRoomApplyBeforePrefs?.invoke(QuarantineResolutionAction.MERGE, userUid)
+                val qProfile = quarantine.profilePrefs
                 prefsRepo.commitQuarantineMergePrefs(
                     uid = userUid,
                     tasteProfile = quarantine.tasteProfile,
                     displayName = quarantine.displayName,
-                    prefsUpdatedAtMs = quarantine.prefsUpdatedAtMs
+                    prefsUpdatedAtMs = quarantine.prefsUpdatedAtMs,
+                    themePreset = qProfile?.let { idWrap ->
+                        VelunaThemePreset.entries.find { it.id == idWrap.themePresetId }
+                    },
+                    themeMode = qProfile?.let { p -> runCatching { ThemeMode.valueOf(p.themeModeName) }.getOrNull() },
+                    customAccentHex = qProfile?.customAccentHex,
+                    adaptToArtwork = qProfile?.adaptToArtwork,
+                    cornerRadiusDp = qProfile?.cornerRadiusDp,
+                    audioQuality = qProfile?.let { p -> runCatching { AudioQuality.valueOf(p.audioQualityName) }.getOrNull() },
+                    autoplay = qProfile?.autoplay,
+                    loudnessNormalization = qProfile?.loudnessNormalization,
+                    hideMusicVideos = qProfile?.hideMusicVideos,
+                    applyQuarantinedThemeAndAudio = qProfile != null
                 )
                 cur = cur.copy(state = QuarantineResolutionState.PREFS_APPLIED)
                 writeQuarantineResolutionJournalAtomically(cur)
@@ -1229,12 +1405,23 @@ class CloudSyncCoordinator(
 
             if (cur.state == QuarantineResolutionState.QUARANTINE_CLEARED) {
                 onAfterQuarantineDeleteBeforeJournalComplete?.invoke(QuarantineResolutionAction.MERGE, userUid)
-                cur = cur.copy(state = QuarantineResolutionState.COMPLETED)
+                val retained = retainedPayloadFile(cur)?.let(::readQuarantineFromFile)
+                    ?: throw IllegalStateException("Retained quarantine archive missing or corrupt before pending cloud sync.")
+                if (retained.createdAtMs < 0L) throw IllegalStateException("Invalid retained quarantine payload.")
+                cur = cur.copy(state = QuarantineResolutionState.CLOUD_SYNC_PENDING)
                 writeQuarantineResolutionJournalAtomically(cur)
-                onAfterQuarantineJournalCompletedBeforeCleanup?.invoke(QuarantineResolutionAction.MERGE, userUid)
-                deleteRetainedPayloadIfExists(cur)
-                onAfterQuarantinePayloadCleanupBeforeJournalDelete?.invoke(QuarantineResolutionAction.MERGE, userUid)
-                deleteQuarantineResolutionJournalStrict()
+                onAfterQuarantineCloudSyncPendingBeforeSync?.invoke(QuarantineResolutionAction.MERGE, userUid)
+            }
+
+            if (cur.state == QuarantineResolutionState.CLOUD_SYNC_PENDING) {
+                // Verify retained archive remains intact and readable until remote cloud sync succeeds & commits.
+                val retained = retainedPayloadFile(cur)
+                    ?.takeIf { !retainedFilePresentAndCorrupt(cur) }
+                    ?.let(::readQuarantineFromFile)
+                    ?: throw IllegalStateException("Retained quarantine payload is missing or corrupt before remote sync commit.")
+                if (retained.createdAtMs < 0L) {
+                    throw IllegalStateException("Retained quarantine payload is invalid.")
+                }
             }
         } else {
             if (cur.state == QuarantineResolutionState.PAYLOAD_ARCHIVED) {
@@ -1278,8 +1465,10 @@ class CloudSyncCoordinator(
         journal: UnownedQuarantineResolutionJournal
     ): UnownedQuarantineResolutionJournal {
         val existingRetained = retainedPayloadFile(journal)
-        if (existingRetained != null && readQuarantineFromFile(existingRetained) != null) {
-            return journal
+        if (existingRetained != null && existingRetained.exists()) {
+            val parsed = readQuarantineFromFile(existingRetained)
+                ?: throw IllegalStateException("Existing retained quarantine archive is corrupt before quarantine file removal.")
+            if (parsed.createdAtMs >= 0L) return journal
         }
         val payload = readQuarantineFile()
             ?: throw IllegalStateException("Quarantine payload missing or unreadable before quarantine file removal.")
@@ -1313,9 +1502,29 @@ class CloudSyncCoordinator(
                 }
                 return false
             }
-            if (journal.state == QuarantineResolutionState.COMPLETED) {
-                deleteRetainedPayloadIfExists(journal)
-                deleteQuarantineResolutionJournalStrict()
+            if (isJournalCommittedGloballyLocked(journal)) {
+                if (journal.targetUid == uid) {
+                    try {
+                        finalizeCommittedQuarantineCleanupLocked(uid, journal)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        val safeMsg = SecurityValidators.safeUserErrorMessage(e, "Failed to finalize quarantine cleanup.")
+                        _authState.update {
+                            it.copy(
+                                isSyncing = false,
+                                syncStatus = "Sync failed: $safeMsg",
+                                errorMessage = safeMsg
+                            )
+                        }
+                        return false
+                    }
+                } else {
+                    // Remote sync for foreign targetUid already committed; remove leftover journal & retained copy
+                    // so normal account-switch wipe handles A -> B cleanly.
+                    deleteRetainedPayloadIfExists(journal)
+                    deleteQuarantineResolutionJournalStrict()
+                }
             } else if (journal.targetUid != uid) {
                 if (!rollbackStaleQuarantineResolutionForForeignUidLocked(journal)) {
                     val conflictCount = readQuarantineFile()?.itemCount ?: 0
@@ -1332,6 +1541,9 @@ class CloudSyncCoordinator(
                 }
             } else {
                 try {
+                    if (retainedFilePresentAndCorrupt(journal)) {
+                        throw IllegalStateException("Retained quarantine payload file is corrupted.")
+                    }
                     executeQuarantineResolutionWithJournalLocked(uid, journal)
                 } catch (e: CancellationException) {
                     throw e
@@ -1344,7 +1556,7 @@ class CloudSyncCoordinator(
                             isSyncing = false,
                             hasUnownedDataConflict = hasQ,
                             unownedDataItemCount = if (hasQ) conflictCount else 0,
-                            syncStatus = "Sync failed: $safeMsg",
+                            syncStatus = "Quarantine recovery error",
                             errorMessage = safeMsg
                         )
                     }
@@ -1365,7 +1577,7 @@ class CloudSyncCoordinator(
                     isSyncing = false,
                     hasUnownedDataConflict = true,
                     unownedDataItemCount = parsed?.itemCount ?: 0,
-                    syncStatus = "Resolve local library conflict",
+                    syncStatus = if (parsed == null) "Quarantine recovery error" else "Resolve local library conflict",
                     errorMessage = if (parsed == null) "Unreadable quarantined local library file." else null
                 )
             }
@@ -1375,7 +1587,29 @@ class CloudSyncCoordinator(
     }
 
     private suspend fun ensureAccountOwnershipIsolatedLocked(uid: String): Boolean {
-        awaitStartupProvenance()
+        if (repository.hasUncommittedRestoreJournal()) {
+            failedCollections["startup_init"] = "Pending backup restore must recover before cloud sync."
+            _authState.update {
+                it.copy(
+                    isSyncing = false,
+                    syncStatus = "Sync failed: Pending backup restore incomplete.",
+                    errorMessage = "Pending backup restore incomplete."
+                )
+            }
+            return false
+        }
+        val provenance = prefsRepo.getLocalDataProvenance()
+        if (provenance == null) {
+            failedCollections["startup_init"] = "Local data provenance could not be verified."
+            _authState.update {
+                it.copy(
+                    isSyncing = false,
+                    syncStatus = "Sync failed: Local provenance missing.",
+                    errorMessage = "Local data provenance could not be verified."
+                )
+            }
+            return false
+        }
         if (!recoverIncompleteQuarantineResolutionLocked(uid)) {
             return false
         }
@@ -1410,15 +1644,15 @@ class CloudSyncCoordinator(
         }
 
         if (persistedUid == null) {
-            val existingQuarantine = readQuarantineFile()
-            if (existingQuarantine != null) {
+            if (quarantineFile().exists()) {
+                val existingQuarantine = readQuarantineFile()
                 _authState.update {
                     it.copy(
                         isSyncing = false,
                         hasUnownedDataConflict = true,
-                        unownedDataItemCount = existingQuarantine.itemCount,
-                        syncStatus = "Resolve local library conflict",
-                        errorMessage = null
+                        unownedDataItemCount = existingQuarantine?.itemCount ?: 0,
+                        syncStatus = if (existingQuarantine == null) "Quarantine recovery error" else "Resolve local library conflict",
+                        errorMessage = if (existingQuarantine == null) "Unreadable quarantined local library file." else null
                     )
                 }
                 return false
@@ -1436,14 +1670,16 @@ class CloudSyncCoordinator(
             val localBlocked = dao.getBlockedArtistsOnce()
             val localTaste = prefsRepo.tasteProfileFlow.first()
             val localPrefs = prefsRepo.prefsFlow.first()
+            val prefsUpdatedAtMs = prefsRepo.getPrefsUpdatedAt()
+            val hasProfileState = prefsRepo.hasSyncableProfileState()
             val hasSyncedContent = playlists.isNotEmpty() ||
                 localLiked.isNotEmpty() ||
                 localBlocked.isNotEmpty() ||
                 tombstones.isNotEmpty() ||
                 localTaste.seedArtists.isNotEmpty() ||
-                localTaste.seedSongs.isNotEmpty()
+                localTaste.seedSongs.isNotEmpty() ||
+                hasProfileState
 
-            val provenance = prefsRepo.getLocalDataProvenance()
             val requiresFailClosedQuarantine = hasForeignBaselines ||
                 (hasSyncedContent &&
                     !hasOwnBaselines &&
@@ -1485,7 +1721,18 @@ class CloudSyncCoordinator(
                     },
                     tasteProfile = localTaste,
                     displayName = localPrefs.userDisplayName,
-                    prefsUpdatedAtMs = prefsRepo.getPrefsUpdatedAt()
+                    prefsUpdatedAtMs = prefsUpdatedAtMs,
+                    profilePrefs = QuarantinedSyncableProfilePrefs(
+                        themePresetId = localPrefs.themePreset.id,
+                        themeModeName = localPrefs.themeMode.name,
+                        customAccentHex = localPrefs.customAccentHex,
+                        adaptToArtwork = localPrefs.adaptToArtwork,
+                        cornerRadiusDp = localPrefs.cornerRadiusDp,
+                        audioQualityName = localPrefs.audioQuality.name,
+                        autoplay = localPrefs.autoplay,
+                        loudnessNormalization = localPrefs.loudnessNormalization,
+                        hideMusicVideos = localPrefs.hideMusicVideos
+                    )
                 )
                 writeQuarantineAtomically(quarantine)
                 withContext(NonCancellable) {
@@ -1511,6 +1758,14 @@ class CloudSyncCoordinator(
         return true
     }
 
+    private suspend fun verifyAllSyncedCollectionsBaselinedForUidLocked(uid: String): Boolean {
+        if (failedCollections.isNotEmpty()) return false
+        if (auth.currentUser?.uid != uid) return false
+        if (prefsRepo.getActiveCloudUid() != uid) return false
+        if (dao.getSyncBaselinesByType(uid, SyncEntityTypes.PROFILE_PREFS).isEmpty()) return false
+        return countUnsyncedChangesFor(uid) == 0
+    }
+
     private suspend fun runBidirectionalMerge(
         user: FirebaseUser,
         allowDuringSignOut: Boolean = false
@@ -1518,14 +1773,17 @@ class CloudSyncCoordinator(
         if (auth.currentUser?.uid != user.uid) return false
         if (!allowDuringSignOut && isSigningOut.get()) return false
 
-        // Always recover any interrupted backup restore journal BEFORE locking syncMutex or talking to Firestore
+        // Execute the single authoritative startup pipeline BEFORE acquiring syncMutex or talking to Firestore:
+        // (1) recover incomplete restore -> (2) verify Room & DataStore stable -> (3) init provenance -> (4) verify provenance.
         try {
-            repository.recoverIncompleteRestoreIfNeeded()
+            awaitAuthoritativeStartupPipeline()
+            failedCollections.remove("startup_init")
         } catch (e: CancellationException) {
+            _authState.update { it.copy(isSyncing = false) }
             throw e
         } catch (e: Exception) {
-            val safeMsg = SecurityValidators.safeUserErrorMessage(e, "Pending backup recovery failed.")
-            failedCollections["restore_recovery"] = safeMsg
+            val safeMsg = SecurityValidators.safeUserErrorMessage(e, "Pending startup recovery failed.")
+            failedCollections["startup_init"] = safeMsg
             _authState.update {
                 it.copy(isSyncing = false, syncStatus = "Sync failed: $safeMsg", errorMessage = safeMsg)
             }
@@ -1595,6 +1853,9 @@ class CloudSyncCoordinator(
 
                 var resolvedDisplayName = prefsRepo.prefsFlow.first().userDisplayName
                 failedCollections.remove("restore_recovery")
+                failedCollections.remove("startup_init")
+                failedCollections.remove("merge")
+                failedCollections.remove("verify")
 
                 try {
                     resolvedDisplayName = mergeProfileAndSeedsLocked(user, snapshot, now, compactionCutoffForLocal)
@@ -1657,9 +1918,52 @@ class CloudSyncCoordinator(
                     }
                     false
                 } else {
+                    val pendingJournal = readQuarantineResolutionJournal()
+                    if (pendingJournal != null) {
+                        if (pendingJournal.targetUid != user.uid ||
+                            pendingJournal.action != QuarantineResolutionAction.MERGE ||
+                            pendingJournal.state != QuarantineResolutionState.CLOUD_SYNC_PENDING
+                        ) {
+                            throw IllegalStateException("Quarantine journal state mismatch during remote commit verification.")
+                        }
+                        if (retainedFilePresentAndCorrupt(pendingJournal) ||
+                            retainedPayloadFile(pendingJournal)?.let(::readQuarantineFromFile) == null
+                        ) {
+                            throw IllegalStateException("Retained quarantine payload missing or corrupted during remote commit.")
+                        }
+                        if (!verifyAllSyncedCollectionsBaselinedForUidLocked(user.uid)) {
+                            val errMsg = "Cloud sync verification incomplete across collections."
+                            failedCollections["verify"] = errMsg
+                            val pendingCount = suspendRunCatching { countUnsyncedChangesFor(user.uid) }
+                                .getOrDefault(1)
+                                .coerceAtLeast(1)
+                            _authState.update {
+                                it.copy(
+                                    displayName = resolvedDisplayName,
+                                    isSyncing = false,
+                                    syncStatus = "Sync failed: $errMsg",
+                                    errorMessage = errMsg,
+                                    pendingUnsyncedCount = pendingCount
+                                )
+                            }
+                            if (!isSigningOut.get()) {
+                                scheduleRetry(user)
+                            }
+                            return@withLock false
+                        }
+                    }
+
                     retryAttempt = 0
                     val doneAt = System.currentTimeMillis()
                     prefsRepo.setLastSuccessfulSyncAtMs(user.uid, doneAt)
+
+                    if (pendingJournal != null) {
+                        val committed = pendingJournal.copy(state = QuarantineResolutionState.CLOUD_SYNC_COMMITTED)
+                        writeQuarantineResolutionJournalAtomically(committed)
+                        onAfterQuarantineCloudSyncCommitted?.invoke(QuarantineResolutionAction.MERGE, user.uid)
+                        finalizeCommittedQuarantineCleanupLocked(user.uid, committed)
+                    }
+
                     _authState.update {
                         it.copy(
                             displayName = resolvedDisplayName,
@@ -1675,6 +1979,7 @@ class CloudSyncCoordinator(
                     true
                 }
             } catch (e: CancellationException) {
+                _authState.update { it.copy(isSyncing = false) }
                 throw e
             } catch (e: Exception) {
                 if (BuildConfig.DEBUG) Log.e(TAG, "Cloud sync failed", e)
@@ -1769,9 +2074,14 @@ class CloudSyncCoordinator(
             (profBaseline == null || cloudPrefSig != profBaseline.signature || cloudPrefsTs > profBaseline.clientUpdatedAt)
 
         var mergedTaste = localTaste
+        val hasNonDefaultLocalProfile = prefsRepo.hasSyncableProfileState()
         val adoptCloudProfile: Boolean = when {
             cloudProfile == null -> false
-            profBaseline == null && !localTaste.onboardingCompleted && cloudProfile.onboardingCompleted && localPrefsTs == 0L -> true
+            profBaseline == null &&
+                !localTaste.onboardingCompleted &&
+                !hasNonDefaultLocalProfile &&
+                cloudProfile.onboardingCompleted &&
+                localPrefsTs == 0L -> true
             cloudProfChanged && !localProfChanged -> true
             cloudProfChanged && localProfChanged -> cloudPrefsTs > localPrefsTs
             else -> false
@@ -3340,7 +3650,9 @@ class CloudSyncCoordinator(
             retryJob = scope.launch {
                 delay(backoffMs)
                 if (!isSigningOut.get() && auth.currentUser?.uid == user.uid && failedCollections.isNotEmpty()) {
-                    runBidirectionalMerge(user)
+                    if (runBidirectionalMerge(user)) {
+                        maybeLaunchWatchers(user)
+                    }
                 }
             }
         }

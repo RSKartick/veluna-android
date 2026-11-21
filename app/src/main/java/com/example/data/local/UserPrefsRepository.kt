@@ -533,10 +533,45 @@ class UserPrefsRepository(
         dataStore.edit { it[Keys.LOCAL_DATA_PROVENANCE] = provenance.name }
     }
 
+    fun hasSyncableProfileState(p: Preferences): Boolean {
+        if ((p[Keys.PREFS_UPDATED_AT] ?: 0L) > 0L) return true
+        if (p[Keys.ONBOARDING_COMPLETED] == true) return true
+        val customDisplayName = p[Keys.DISPLAY_NAME]?.trim()
+        if (!customDisplayName.isNullOrBlank() && customDisplayName != "Listener") return true
+
+        val tasteRaw = p[Keys.TASTE_PROFILE_JSON]
+        val parsedTaste = if (!tasteRaw.isNullOrBlank()) {
+            runCatching { json.decodeFromString<TasteProfile>(tasteRaw) }.getOrNull()
+        } else null
+        if (parsedTaste != null && (
+                parsedTaste.onboardingCompleted ||
+                    parsedTaste.selectedGenres.isNotEmpty() ||
+                    parsedTaste.seedArtists.isNotEmpty() ||
+                    parsedTaste.seedSongs.isNotEmpty()
+                )
+        ) {
+            return true
+        }
+
+        if (p[Keys.THEME_PRESET]?.let { it != VelunaThemePreset.DEFAULT.id } == true) return true
+        if (p[Keys.THEME_MODE]?.let { it != ThemeMode.DARK.name } == true) return true
+        if (!p[Keys.CUSTOM_ACCENT].isNullOrBlank()) return true
+        if (p[Keys.ADAPT_TO_ARTWORK] == false) return true
+        if (p[Keys.CORNER_RADIUS]?.let { it != 12 } == true) return true
+        if (p[Keys.AUDIO_QUALITY]?.let { it != AudioQuality.HIGH.name } == true) return true
+        if (p[Keys.AUTOPLAY] == false) return true
+        if (p[Keys.LOUDNESS_NORM] == false) return true
+        if (p[Keys.HIDE_VIDEOS] == true) return true
+
+        return false
+    }
+
+    suspend fun hasSyncableProfileState(): Boolean = hasSyncableProfileState(dataStore.data.first())
+
     /**
      * Records explicit local-data provenance on startup if not yet initialized:
      * - If an active or pending cloud UID exists -> ACCOUNT_OWNED
-     * - If all synced Room tables, taste seeds, and legacy cloud sync markers are empty -> FRESH_LOCAL
+     * - If all synced Room tables, cloud-syncable profile/taste state, and legacy cloud sync markers are empty -> FRESH_LOCAL
      * - Otherwise (pre-provenance upgraded data or partial/untracked state) -> UNKNOWN_OR_LEGACY
      */
     suspend fun initializeInstallProvenanceIfClean(dao: VelunaDao) {
@@ -560,16 +595,10 @@ class UserPrefsRepository(
             dao.getAllTombstones().isNotEmpty() ||
             dao.hasAnySyncBaselines()
 
-        val tasteRaw = current[Keys.TASTE_PROFILE_JSON]
-        val parsedTaste = if (!tasteRaw.isNullOrBlank()) {
-            runCatching { json.decodeFromString<TasteProfile>(tasteRaw) }.getOrNull()
-        } else null
-        val hasTasteSeeds = parsedTaste != null &&
-            (parsedTaste.seedArtists.isNotEmpty() || parsedTaste.seedSongs.isNotEmpty())
-
+        val hasProfileData = hasSyncableProfileState(current)
         val hasLegacyMarkers = hasLegacyCloudSyncMarkers(targetUid = "")
 
-        val resolved = if (!hasSyncedTablesData && !hasTasteSeeds && !hasLegacyMarkers) {
+        val resolved = if (!hasSyncedTablesData && !hasProfileData && !hasLegacyMarkers) {
             LocalDataProvenance.FRESH_LOCAL
         } else {
             LocalDataProvenance.UNKNOWN_OR_LEGACY
@@ -654,6 +683,15 @@ class UserPrefsRepository(
             p.remove(Keys.DISPLAY_NAME)
             p.remove(Keys.ONBOARDING_COMPLETED)
             p.remove(Keys.TASTE_PROFILE_JSON)
+            p.remove(Keys.THEME_PRESET)
+            p.remove(Keys.THEME_MODE)
+            p.remove(Keys.CUSTOM_ACCENT)
+            p.remove(Keys.ADAPT_TO_ARTWORK)
+            p.remove(Keys.CORNER_RADIUS)
+            p.remove(Keys.AUDIO_QUALITY)
+            p.remove(Keys.AUTOPLAY)
+            p.remove(Keys.LOUDNESS_NORM)
+            p.remove(Keys.HIDE_VIDEOS)
             p.remove(Keys.LAST_PROFILE_PUSH_HASH)
             p.remove(Keys.LAST_SEEDS_PUSH_HASH)
             p.remove(Keys.LOCAL_LIKES_SCRUBBED)
@@ -674,8 +712,19 @@ class UserPrefsRepository(
         uid: String,
         tasteProfile: TasteProfile?,
         displayName: String,
-        prefsUpdatedAtMs: Long
+        prefsUpdatedAtMs: Long,
+        themePreset: VelunaThemePreset? = null,
+        themeMode: ThemeMode? = null,
+        customAccentHex: String? = null,
+        adaptToArtwork: Boolean? = null,
+        cornerRadiusDp: Int? = null,
+        audioQuality: AudioQuality? = null,
+        autoplay: Boolean? = null,
+        loudnessNormalization: Boolean? = null,
+        hideMusicVideos: Boolean? = null,
+        applyQuarantinedThemeAndAudio: Boolean = false
     ) {
+        val validHex = customAccentHex?.trim()?.takeIf { SecurityValidators.isValidHexColor(it) }
         dataStore.edit { p ->
             if (tasteProfile != null) {
                 p[Keys.ONBOARDING_COMPLETED] = tasteProfile.onboardingCompleted
@@ -686,6 +735,17 @@ class UserPrefsRepository(
                 p[Keys.PREFS_UPDATED_AT] = prefsUpdatedAtMs.coerceAtLeast(0L)
             } else if (prefsUpdatedAtMs > 0L) {
                 p[Keys.PREFS_UPDATED_AT] = prefsUpdatedAtMs.coerceAtLeast(0L)
+            }
+            if (applyQuarantinedThemeAndAudio) {
+                themePreset?.let { p[Keys.THEME_PRESET] = it.id }
+                themeMode?.let { p[Keys.THEME_MODE] = it.name }
+                if (validHex == null) p.remove(Keys.CUSTOM_ACCENT) else p[Keys.CUSTOM_ACCENT] = validHex
+                adaptToArtwork?.let { p[Keys.ADAPT_TO_ARTWORK] = it }
+                cornerRadiusDp?.let { p[Keys.CORNER_RADIUS] = it.coerceIn(4, 24) }
+                audioQuality?.let { p[Keys.AUDIO_QUALITY] = it.name }
+                autoplay?.let { p[Keys.AUTOPLAY] = it }
+                loudnessNormalization?.let { p[Keys.LOUDNESS_NORM] = it }
+                hideMusicVideos?.let { p[Keys.HIDE_VIDEOS] = it }
             }
             p.remove(Keys.PENDING_ACCOUNT_TRANSITION_UID)
             p[Keys.ACTIVE_CLOUD_UID] = uid
@@ -698,6 +758,15 @@ class UserPrefsRepository(
             p.remove(Keys.DISPLAY_NAME)
             p.remove(Keys.ONBOARDING_COMPLETED)
             p.remove(Keys.TASTE_PROFILE_JSON)
+            p.remove(Keys.THEME_PRESET)
+            p.remove(Keys.THEME_MODE)
+            p.remove(Keys.CUSTOM_ACCENT)
+            p.remove(Keys.ADAPT_TO_ARTWORK)
+            p.remove(Keys.CORNER_RADIUS)
+            p.remove(Keys.AUDIO_QUALITY)
+            p.remove(Keys.AUTOPLAY)
+            p.remove(Keys.LOUDNESS_NORM)
+            p.remove(Keys.HIDE_VIDEOS)
             p.remove(Keys.LAST_PROFILE_PUSH_HASH)
             p.remove(Keys.LAST_SEEDS_PUSH_HASH)
             p.remove(Keys.LOCAL_LIKES_SCRUBBED)
@@ -717,7 +786,7 @@ class UserPrefsRepository(
 
     /**
      * Explicit user/account DataStore key + SecretVault reset for permanent account deletion.
-     * Leaves device-level theme, EQ, and playback settings intact.
+     * Leaves device-level EQ, playback speed, layout, lyrics, and mirror settings intact.
      */
     suspend fun resetUserKeys() {
         secretVault.wipeAll()
@@ -727,6 +796,15 @@ class UserPrefsRepository(
             p.remove(Keys.DISPLAY_NAME)
             p.remove(Keys.ONBOARDING_COMPLETED)
             p.remove(Keys.TASTE_PROFILE_JSON)
+            p.remove(Keys.THEME_PRESET)
+            p.remove(Keys.THEME_MODE)
+            p.remove(Keys.CUSTOM_ACCENT)
+            p.remove(Keys.ADAPT_TO_ARTWORK)
+            p.remove(Keys.CORNER_RADIUS)
+            p.remove(Keys.AUDIO_QUALITY)
+            p.remove(Keys.AUTOPLAY)
+            p.remove(Keys.LOUDNESS_NORM)
+            p.remove(Keys.HIDE_VIDEOS)
             p.remove(Keys.SCROBBLING_ENABLED)
             p.remove(Keys.LASTFM_USER)
             p.remove(Keys.LAST_PROFILE_PUSH_HASH)

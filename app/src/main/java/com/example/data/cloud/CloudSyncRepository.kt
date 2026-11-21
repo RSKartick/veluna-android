@@ -73,6 +73,7 @@ class CloudSyncRepository(
     internal var onAfterGcClaimBeforeTrackDelete: (suspend (playlistKey: String, snapshotId: String) -> Unit)? = null
     internal var onBeforeGcDeleteSnapshot: (suspend (playlistKey: String, snapshotId: String) -> Unit)? = null
     internal var onBeforeGcDeleteTrackBatch: (suspend (playlistKey: String, snapshotId: String, batchIndex: Int) -> Unit)? = null
+    internal var onBeforeFetchAccountSnapshot: (suspend () -> Unit)? = null
     internal var collectionQueryPageSize: Long = DEFAULT_COLLECTION_QUERY_PAGE_SIZE
 
     constructor(context: Context) : this(
@@ -193,6 +194,7 @@ class CloudSyncRepository(
         val uid = requireUserId()
         val userDoc = db.collection("users").document(uid)
         return try {
+            onBeforeFetchAccountSnapshot?.invoke()
             val profileSnap = userDoc.get().await()
             if (profileSnap.exists()) knownExistingPaths.add(userDoc.path)
             val profile = profileSnap.toObject(CloudUserProfile::class.java)
