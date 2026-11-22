@@ -255,4 +255,4 @@ fun SettingsScreen(
     }
 }
 
-private const val MAX_BACKUP_BYTES = 16 * 1024 * 1024
+private const val MAX_BACKUP_BYTES = 20 * 1024 * 1024

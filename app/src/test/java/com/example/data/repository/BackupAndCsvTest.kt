@@ -23,6 +23,9 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
 import org.junit.After
 import org.junit.Before
@@ -73,6 +76,30 @@ class BackupAndCsvTest {
     fun tearDown() {
         db.close()
         tempDir.deleteRecursively()
+    }
+
+    @Test
+    fun backupCoverUrlsAreRestrictedToDocumentedImageHosts() {
+        assertThat(isAllowedBackupCoverHost("https://i.ytimg.com/vi/abc/hqdefault.jpg")).isTrue()
+        assertThat(isAllowedBackupCoverHost("https://yt3.ggpht.com/a.jpg")).isTrue()
+        assertThat(isAllowedBackupCoverHost("https://lh3.googleusercontent.com/a.jpg")).isTrue()
+        assertThat(isAllowedBackupCoverHost("https://example.com/x.jpg")).isFalse()
+        assertThat(isAllowedBackupCoverHost("http://i.ytimg.com/x.jpg")).isFalse()
+    }
+
+    @Test
+    fun legacyMirrorOptInBackupFieldIsIgnoredAndNotExported() = runBlocking {
+        val configuredJson = Json { ignoreUnknownKeys = true }
+        val imported = configuredJson.decodeFromString<VelunaBackupPayload>(
+            """{"prefs":{"allowMirrorFallbacks":true}}"""
+        )
+
+        assertThat(imported.prefs.allowMirrorFallbacks).isFalse()
+        prefsRepo.applyBackupWithTaste(imported.prefs, null)
+        assertThat(prefsRepo.prefsFlow.first().allowMirrorFallbacks).isFalse()
+
+        val encoded = configuredJson.encodeToString(VelunaBackupPayload(prefs = VelunaUserPrefs()))
+        assertThat(encoded).doesNotContain("allowMirrorFallbacks")
     }
 
     @Test

@@ -68,6 +68,7 @@ import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.time.Instant
@@ -151,6 +152,15 @@ data class BackupRestoreResult(
     val restoredPlaylists: Int,
     val sourceVersion: Int
 )
+
+internal fun isAllowedBackupCoverHost(url: String): Boolean {
+    val parsed = url.toHttpUrlOrNull() ?: return false
+    return parsed.isHttps && parsed.host in setOf(
+        "i.ytimg.com",
+        "yt3.ggpht.com",
+        "lh3.googleusercontent.com"
+    )
+}
 
 @Serializable
 data class SerializableLikedSong(
@@ -1381,7 +1391,9 @@ class VelunaRepository(
                                 val now = System.currentTimeMillis()
                                 val resolvedKey = requestedKey ?: newCloudPlaylistKey()
                                 existingCloudKeys.add(resolvedKey)
-                                val safeRemoteCover = SecurityValidators.sanitizeHttpsUrl(pl.coverUri, 500)
+                                val safeRemoteCover = pl.coverUri
+                                    ?.takeIf(::isAllowedBackupCoverHost)
+                                    ?.let { SecurityValidators.sanitizeHttpsUrl(it, 500) }
                                 val materializedFile = materializedByPlIdx[plIdx]
                                 val resolvedCover = materializedFile?.let { Uri.fromFile(it).toString() } ?: safeRemoteCover
                                 val trackEntities = cleanTracks.mapIndexed { idx, song ->
@@ -1858,7 +1870,7 @@ class VelunaRepository(
         private const val MAX_COVER_DIMENSION = 4096
         private const val MAX_BACKUP_COVER_BYTES = 512 * 1024
         private const val MAX_BACKUP_COVER_BASE64_CHARS = 700_000
-        private const val MAX_BACKUP_JSON_CHARS = 16 * 1024 * 1024
+        private const val MAX_BACKUP_JSON_CHARS = 20 * 1024 * 1024
         private val VALID_CLOUD_KEY_REGEX = Regex("^[a-zA-Z0-9_\\-]+$")
 
         private fun m3uSingleLine(value: String): String = value.replace(Regex("[\\r\\n\\u0000]+"), " ")
