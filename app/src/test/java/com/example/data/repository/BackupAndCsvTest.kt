@@ -103,6 +103,19 @@ class BackupAndCsvTest {
     }
 
     @Test
+    fun backupRestore_keepsDevicePlaybackSpeed() = runBlocking {
+        prefsRepo.setPlaybackSpeed(1.0f)
+
+        val backupJson = """
+            {"version":3,"prefs":{"playbackSpeed":1.5}}
+        """.trimIndent()
+
+        repo.importBackupJson(backupJson).getOrThrow()
+
+        assertThat(prefsRepo.prefsFlow.first().playbackSpeed).isEqualTo(1.0f)
+    }
+
+    @Test
     fun csvEscapeAndRoundTrip_handlesQuotesCommasAndCommasInArtists() {
         val tracks = listOf(
             SongItem(
@@ -270,7 +283,7 @@ class BackupAndCsvTest {
         assertThat(v1Result.restoredPlaylists).isEqualTo(1)
         val restoredPrefs = prefsRepo.prefsFlow.first()
         assertThat(restoredPrefs.cornerRadiusDp).isEqualTo(4)
-        assertThat(restoredPrefs.playbackSpeed).isEqualTo(0.5f)
+        assertThat(restoredPrefs.playbackSpeed).isEqualTo(1.0f)
         val likedAfterRestore = repo.likedSongsFlow.first()
         assertThat(likedAfterRestore.find { it.videoId == "v1_like" }?.thumbnail).isNull()
     }
