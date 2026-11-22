@@ -909,6 +909,7 @@ class UserPrefsRepository(
             it[Keys.CORNER_RADIUS] = backup.cornerRadiusDp.coerceIn(4, 24)
             it[Keys.AUDIO_QUALITY] = backup.audioQuality.name
             it[Keys.AUTOPLAY] = backup.autoplay
+            it[Keys.PLAYBACK_SPEED] = backup.playbackSpeed.coerceIn(0.5f, 2.0f)
             it[Keys.LOUDNESS_NORM] = backup.loudnessNormalization
             it[Keys.HIDE_VIDEOS] = backup.hideMusicVideos
             it[Keys.DISPLAY_NAME] = backup.userDisplayName.trim().ifBlank { "Listener" }.take(80)
