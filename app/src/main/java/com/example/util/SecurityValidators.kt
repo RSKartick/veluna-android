@@ -68,6 +68,19 @@ object SecurityValidators {
         return isHostOrSubdomain(host, "googlevideo.com") || isHostOrSubdomain(host, "youtube.com")
     }
 
+    fun isKnownPlaybackStreamHost(host: String): Boolean {
+        val normalized = host.trim().lowercase().trimEnd('.')
+        return isYouTubeStreamHost(normalized) || normalized in KNOWN_MIRROR_STREAM_HOSTS
+    }
+
+    private val KNOWN_MIRROR_STREAM_HOSTS = setOf(
+        "pipedapi.kavin.rocks",
+        "pipedapi.adminforge.de",
+        "api.piped.private.coffee",
+        "inv.nadeko.net",
+        "yewtu.be"
+    )
+
     fun sha256Hex(raw: String): String {
         val digest = MessageDigest.getInstance("SHA-256").digest(raw.toByteArray(Charsets.UTF_8))
         return digest.joinToString("") { "%02x".format(it) }
