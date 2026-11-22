@@ -153,7 +153,7 @@ class VelunaPlaybackService : MediaSessionService() {
     }
 
     @OptIn(UnstableApi::class)
-    private inner class VelunaMediaSessionCallback : MediaSession.Callback {
+    internal inner class VelunaMediaSessionCallback : MediaSession.Callback {
         override fun onConnect(
             session: MediaSession,
             controller: MediaSession.ControllerInfo
@@ -181,17 +181,43 @@ class VelunaPlaybackService : MediaSessionService() {
             controller: MediaSession.ControllerInfo,
             mediaItems: MutableList<MediaItem>
         ): ListenableFuture<MutableList<MediaItem>> {
-            if (!isControllerAuthorized(mediaSession, controller)) {
-                return Futures.immediateFailedFuture(SecurityException("Unauthorized media controller"))
-            }
-            if (mediaItems.any { item ->
-                    val uri = item.localConfiguration?.uri ?: return@any true
-                    !isAllowedMediaItemUri(uri)
-                }) {
-                return Futures.immediateFailedFuture(IllegalArgumentException("Media item URI is not allowed"))
+            validateMediaItems(mediaSession, controller, mediaItems)?.let {
+                return Futures.immediateFailedFuture(it)
             }
             return Futures.immediateFuture(mediaItems)
         }
+
+        override fun onSetMediaItems(
+            mediaSession: MediaSession,
+            controller: MediaSession.ControllerInfo,
+            mediaItems: List<MediaItem>,
+            startIndex: Int,
+            startPositionMs: Long
+        ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> {
+            validateMediaItems(mediaSession, controller, mediaItems)?.let {
+                return Futures.immediateFailedFuture(it)
+            }
+            return Futures.immediateFuture(
+                MediaSession.MediaItemsWithStartPosition(mediaItems, startIndex, startPositionMs)
+            )
+        }
+    }
+
+    private fun validateMediaItems(
+        mediaSession: MediaSession,
+        controller: MediaSession.ControllerInfo,
+        mediaItems: List<MediaItem>
+    ): Exception? {
+        if (!isControllerAuthorized(mediaSession, controller)) {
+            return SecurityException("Unauthorized media controller")
+        }
+        if (mediaItems.any { item ->
+                val uri = item.localConfiguration?.uri ?: return@any true
+                !isAllowedMediaItemUri(uri)
+            }) {
+            return IllegalArgumentException("Media item URI is not allowed")
+        }
+        return null
     }
 
     private fun isAllowedMediaItemUri(uri: Uri): Boolean {
