@@ -229,6 +229,79 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  publish-latest-apk:
+    name: Build & Publish Latest APK
+    needs: [test, instrumentation-test]
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@0f481fcb613427c0f801b606911222b5b6f3083a # v5.5.0
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Validate Gradle Wrapper & Setup Gradle
+        uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
+
+      - name: Materialize CI Firebase config
+        run: |
+          cat << 'EOF' > app/google-services.json
+          {
+            "project_info": {
+              "project_number": "100000000000",
+              "project_id": "veluna-ci-test",
+              "storage_bucket": "veluna-ci-test.appspot.com"
+            },
+            "client": [{
+              "client_info": {
+                "mobilesdk_app_id": "1:100000000000:android:0000000000000000",
+                "android_client_info": {"package_name": "com.veluna.music"}
+              },
+              "oauth_client": [{
+                "client_id": "100000000000-ci000000000000000000000000000000.apps.googleusercontent.com",
+                "client_type": 3
+              }],
+              "api_key": [{"current_key": "veluna-ci-emulator-only-key"}],
+              "services": {"appinvite_service": {"other_platform_oauth_client": []}}
+            }],
+            "configuration_version": "1"
+          }
+          EOF
+
+      - name: Assemble installable debug APK
+        run: |
+          chmod +x ./gradlew
+          ./gradlew :app:assembleDebug --no-daemon --stacktrace
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk dist/veluna-android.apk
+
+      - name: Publish or update the latest successful build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view ci-latest >/dev/null 2>&1; then
+            gh release upload ci-latest dist/veluna-android.apk --clobber
+            gh release edit ci-latest \
+              --title "Latest successful build" \
+              --notes "Installable debug APK from commit ${GITHUB_SHA}. Built after CI and Android instrumentation tests passed." \
+              --prerelease
+          else
+            gh release create ci-latest dist/veluna-android.apk \
+              --title "Latest successful build" \
+              --notes "Installable debug APK from commit ${GITHUB_SHA}. Built after CI and Android instrumentation tests passed." \
+              --prerelease \
+              --target "${GITHUB_SHA}"
+          fi
+
   build-release:
     name: Build & Publish Signed Release APK
     needs: [test, instrumentation-test]
