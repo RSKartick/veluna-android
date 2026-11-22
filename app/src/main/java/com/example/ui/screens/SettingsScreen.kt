@@ -137,10 +137,13 @@ fun SettingsScreen(
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
+                    val errorMessage = e.message
+                        ?.takeIf { it.startsWith("File exceeds the ") }
+                        ?: SecurityValidators.safeUserErrorMessage(e, "Failed to restore backup")
                     onStatusMessage(
                         context.getString(
                             R.string.settings_backup_restore_failed,
-                            SecurityValidators.safeUserErrorMessage(e, "Failed to restore backup")
+                            errorMessage
                         )
                     )
                 }
