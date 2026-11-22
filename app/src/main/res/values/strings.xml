@@ -216,7 +216,7 @@
     <string name="settings_loudness_norm">Loudness normalization</string>
     <string name="settings_hide_videos">Prefer audio-only over music videos</string>
     <string name="settings_allow_mirrors">Enable third-party Piped/Invidious fallback mirrors</string>
-    <string name="settings_allow_mirrors_note">Privacy notice: when enabled, failed YouTube streams fall back to public Piped and Invidious servers, which receive the track video ID and your IP address.</string>
+    <string name="settings_allow_mirrors_note">Privacy notice: when enabled, public Piped and Invidious servers are contacted only after every primary YouTube request has failed. They may receive the track video ID and your IP address.</string>
     <string name="settings_equalizer_btn">Equalizer (%1$s)</string>
     <string name="settings_equalizer_off">Off</string>
 

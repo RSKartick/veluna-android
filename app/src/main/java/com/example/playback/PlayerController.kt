@@ -834,7 +834,7 @@ class PlayerController(
                 innerTube.resolveStreamCandidates(
                     nextSong.videoId,
                     currentPrefs.audioQuality,
-                    allowMirrorFallbacks = currentPrefs.allowMirrorFallbacks
+                    allowMirrorFallbacks = false, // prefetch uses primary sources only
                 )
             }
         }

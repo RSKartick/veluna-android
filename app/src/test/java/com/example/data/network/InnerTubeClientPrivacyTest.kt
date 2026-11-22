@@ -12,6 +12,42 @@ import org.junit.Test
 
 class InnerTubeClientPrivacyTest {
     @Test
+    fun primaryCandidatesPreventMirrorResolution() = runBlocking {
+        var mirrorCalls = 0
+        val result = resolveMirrorFallbackIfNeeded(listOf("primary"), allowMirrors = true) {
+            mirrorCalls++
+            listOf("mirror")
+        }
+
+        assertThat(result.getOrThrow()).containsExactly("primary")
+        assertThat(mirrorCalls).isEqualTo(0)
+    }
+
+    @Test
+    fun emptyPrimaryCandidatesResolveMirrorsExactlyOnceWhenEnabled() = runBlocking {
+        var mirrorCalls = 0
+        val result = resolveMirrorFallbackIfNeeded(emptyList<String>(), allowMirrors = true) {
+            mirrorCalls++
+            listOf("mirror")
+        }
+
+        assertThat(result.getOrThrow()).containsExactly("mirror")
+        assertThat(mirrorCalls).isEqualTo(1)
+    }
+
+    @Test
+    fun emptyPrimaryCandidatesFailWithoutResolvingMirrorsWhenDisabled() = runBlocking {
+        var mirrorCalls = 0
+        val result = resolveMirrorFallbackIfNeeded(emptyList<String>(), allowMirrors = false) {
+            mirrorCalls++
+            listOf("mirror")
+        }
+
+        assertThat(result.isFailure).isTrue()
+        assertThat(mirrorCalls).isEqualTo(0)
+    }
+
+    @Test
     fun mirrorHostsAreContactedOnlyWhenOptedIn() = runBlocking {
         val contactedHosts = mutableListOf<String>()
         val http = OkHttpClient.Builder()

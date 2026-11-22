@@ -6,9 +6,9 @@ Native Android music streaming and offline library app built with Kotlin, Jetpac
 
 ## Download & Install (Android 8.0+ / API 26+)
 
-**[Download the latest successful build](https://github.com/RSKartick/veluna-android/releases/download/ci-latest/veluna-android.apk)** (`veluna-android.apk`). Main-branch builds publish this signed, installable APK after CI and Android instrumentation tests pass. It uses the Firebase configuration and stable signing certificate configured for the app, so Google sign-in works in the downloaded build.
+Signed builds are published only from version tags (`v*`) on GitHub Releases. Commits on `main` do not publish an installable APK. Tagged builds use the Firebase configuration and stable signing certificate configured for the app, so Google sign-in works in the downloaded build.
 
-Signed, R8-minified release builds (`com.veluna.music`) are published on **GitHub Releases** from `v*` version tags:
+Signed, R8-minified release builds (`com.veluna.music`) will be published on **GitHub Releases** from `v*` version tags:
 
 - **[Browse Releases](../../releases)** and download **`veluna-android.apk`** from the tagged release assets.
 
@@ -20,7 +20,7 @@ For signed `v*` release APKs, verify the signing certificate SHA-256 digest usin
 apksigner verify --print-certs veluna-android.apk
 ```
 
-Compare the printed `Signer #1 certificate SHA-256 digest` against the release certificate SHA-256 published in the corresponding GitHub Release / `RELEASE_CERT_SHA256` repository variable. See [`RELEASE.md`](RELEASE.md) for full verification and signing details.
+Compare the printed `Signer #1 certificate SHA-256 digest` against the release certificate SHA-256 published in [`RELEASE.md`](RELEASE.md) and the `RELEASE_CERT_SHA256` repository variable. See [`RELEASE.md`](RELEASE.md) for full verification and signing details.
 
 ## Features
 
@@ -39,18 +39,18 @@ Compare the printed `Signer #1 certificate SHA-256 digest` against the release c
 
 When signed in with Google (via Android Credential Manager), Veluna syncs account data under `users/{uid}`:
 
-- Display profile (`userDisplayName`), syncable appearance/playback preferences (`themePreset`, `themeMode`, `customAccentHex`, `adaptToArtwork`, `cornerRadiusDp`, `audioQuality`, `autoplay`, `loudnessNormalization`, `hideMusicVideos` with bidirectional `prefsUpdatedAt` LWW), and onboarding taste profile / seeds (preserving real per-seed `updatedAtMs` timestamps)
+- Display profile (`userDisplayName`, Google profile photo URL), syncable appearance/playback preferences (`themePreset`, `themeMode`, `customAccentHex`, `adaptToArtwork`, `cornerRadiusDp`, `audioQuality`, `autoplay`, `loudnessNormalization`, `hideMusicVideos` with bidirectional `prefsUpdatedAt` LWW), and onboarding taste profile / seeds (preserving real per-seed `updatedAtMs` timestamps)
 - Liked YouTube songs (`LOCAL:` device tracks are strictly blocked from cloud sync)
 - Custom playlists keyed by persistent Room `cloudKey` UUIDs (`pl_<uuid>`) with monotonic `syncRevision` tracking and atomic versioned snapshots (`playlists/{key}/snapshots/{snapshotId}/tracks/{trackDocId}` plus backward-compatible fallback reads of legacy `tracks`)
 - Hidden / blocked artists
 
 ### Device-Only Data
 
-The following stay strictly on your device and are never uploaded to Firestore:
+The following stay on your device and are not uploaded to Firestore. Device backups may include some preferences; importing a backup does not change the third-party mirror opt-in:
 
 - Local device audio files (`local_tracks`), offline downloaded tracks/files (`downloaded_tracks`), and lyrics cache (`lyrics_cache`)
 - Listening history/stats (`listens`, `listen_songs`), search history, saved albums, followed artists, shortcuts, and pending scrobble retry queue (`pending_scrobbles`)
-- Device-specific preferences (`playbackSpeed`, `classicPlayerLayout`, `equalizer`, `lyricsProviderOrder`, `romanizeLyrics`, `allowMirrorFallbacks`, `showMoodChips`, `showHeroArtworkBackdrop`, `scrobblingEnabled`)
+- Device-specific preferences (`playbackSpeed`, `classicPlayerLayout`, `equalizer`, `lyricsProviderOrder`, `romanizeLyrics`, `allowMirrorFallbacks`, `showMoodChips`, `showHeroArtworkBackdrop`, `scrobblingEnabled`) are not synced to Firestore. Backups may include some of them, but restore leaves the current device values unchanged.
 - Scrobble credentials (API key, API secret, session key, ListenBrainz token), stored in `SecretVault` (`noBackupFilesDir/secrets.bin`) encrypted with Android Keystore AES-256-GCM and excluded from Android Auto Backup and Device Transfer
 
 ### Sync Baselines, Conflict Merge & Tombstone Retention
@@ -63,12 +63,12 @@ The following stay strictly on your device and are never uploaded to Firestore:
 ### Backup v3 (JSON Export & Recoverable Restore)
 
 - Exports playlists (`cloudKey`, sanitized `https://` `coverUri`, and portable `coverImageBase64` for local covers `<= 512 KB`), liked tracks, taste profile, saved albums, followed artists, shortcuts, recent search history (up to 100), listening history (last 90 days), and theme/playback preferences.
-- **Scrobble secrets are never exported.** All payloads, track/playlist identifiers, and `coverImageBase64` image bytes are validated upfront before modifying storage; restore snapshots all 10 Room tables and DataStore preferences and rolls back atomically (and deletes newly created cover files) on any write failure. Preferences are clamped to valid bounds and playlists deduplicate by `cloudKey` and `(normalizedTitle, trackSignature)`.
+- **Scrobble secrets are never exported.** All payloads, track/playlist identifiers, and `coverImageBase64` image bytes are validated upfront before modifying storage; restore snapshots all 12 Room tables and DataStore preferences and rolls back atomically (and deletes newly created cover files) on any write failure. Preferences are clamped to valid bounds and playlists deduplicate by `cloudKey` and `(normalizedTitle, trackSignature)`.
 - Legacy v1 and v2 backups remain importable; v1 backups trigger an in-app warning banner advising you to delete unredacted v1 files.
 
 ### Account Sign-Out & Deletion
 
-- **Ordinary Sign-Out**: Cancels background debounce watchers, flushes pending sync changes (bounded by timeout; if changes remain or flush times out, surfaces the unsynced count dialog to either keep working or discard), wipes synced account tables (`liked_songs`, `local_playlists`, `blocked_artists`, `sync_tombstones`, `sync_baselines`) and cloud sync watermarks/display name, and signs out of Firebase and Credential Manager. **Device-local history, saved albums, followed artists, shortcuts, offline downloads, local audio files, scrobbling settings, and `SecretVault` scrobble credentials remain intact on the device.**
+- **Ordinary Sign-Out**: Cancels background debounce watchers, flushes pending sync changes (bounded by timeout; if changes remain or flush times out, surfaces the unsynced count dialog to either keep working or discard), wipes synced account tables (`liked_songs`, `local_playlists`, `blocked_artists`, `sync_tombstones`, `sync_baselines`) and cloud sync watermarks/display name, and signs out of Firebase and Credential Manager. Signing out keeps listening history, search history, saved albums, followed artists and shortcuts on this device. A later sign-in on the same device can see them.
 - **In-App Deletion**: Open **Settings → Profile & Cloud Sync → Delete Account & Cloud Data** for a two-step confirmation that re-authenticates with Google (if required), removes all Firestore documents and subcollections under `users/{uid}`, deletes the Firebase Auth user, and wipes all account Room tables (including `listens`, `saved_albums`, `followed_artists`, `shortcuts`, `search_history`, `pending_scrobbles`) plus `SecretVault` while still keeping offline downloaded media, local audio files, and `lyrics_cache` intact.
 - **Web Deletion Path**: If distributing publicly on Google Play or an external store, host a static account-deletion instruction page referencing **Veluna** and the in-app path above (along with a support contact) and link it in your store listing's Data Safety / Account Deletion URL field.
 
@@ -78,19 +78,23 @@ Veluna communicates with the following external services depending on features y
 
 | Service | Host(s) | Purpose & Privacy Notes |
 |---|---|---|
-| **YouTube Music (InnerTube)** | `music.youtube.com` | Search, browse shelves, comments, track metadata, and primary audio stream resolution. |
-| **Piped / Invidious Mirrors (Opt-In, off by default)** | `pipedapi.kavin.rocks`, `pipedapi.adminforge.de`, `api.piped.private.coffee`, `inv.nadeko.net`, `yewtu.be` | Only contacted if you enable **Settings → Audio & Playback → Enable third-party Piped/Invidious fallback mirrors**. Receives the track `videoId` and your IP address when primary InnerTube playback fails. |
-| **Lyrics Providers** | `lrclib.net`, `lyricsplus.binimum.org`, `lyrics-api.boidu.dev`, `api-lyrics.simpmusic.org` | Fetches synced/plain lyrics (individually toggleable and reorderable in Settings). |
+| **YouTube Music (InnerTube)** | `music.youtube.com`, `googlevideo.com`, `i.ytimg.com`, `yt3.ggpht.com`, `lh3.googleusercontent.com` | Search, browse shelves, comments, track metadata, primary audio stream resolution, and thumbnails. |
+| **Piped / Invidious Mirrors (Opt-In, off by default)** | `pipedapi.kavin.rocks`, `pipedapi.adminforge.de`, `api.piped.private.coffee`, `inv.nadeko.net`, `yewtu.be` | When enabled, mirrors are queried only after every primary YouTube request has failed. They receive the track `videoId` and your IP address. |
+| **Lyrics Providers** | `lrclib.net`, `lyricsplus.binimum.org`, `lyrics-api.boidu.dev`, `api-lyrics.simpmusic.org` | Fetches synced/plain lyrics (individually toggleable and reorderable in Settings); requests include the title, first artist, album, and duration. |
 | **Scrobbling (Opt-In)** | `ws.audioscrobbler.com` (Last.fm), `api.listenbrainz.org` (ListenBrainz) | Submits scrobbles and "now playing" updates when configured with your credentials. |
 | **Firebase** | Google Identity / Credential Manager, Firebase Auth, Cloud Firestore | Optional Google Sign-In and cross-device library sync. |
 
 ## Build & Test Locally
 
+### Playback identity
+
+To play YouTube audio, the app identifies itself to YouTube's player API using the client identities `IOS_MUSIC`, `ANDROID_VR`, `VISIONOS` and `ANDROID_CREATOR`. Veluna is not affiliated with YouTube.
+
 ### Prerequisites
 
 - **JDK 21** and the committed **Gradle Wrapper (`./gradlew`, Gradle 9.3.1)**
 - **Android SDK** (`compileSdk 36`, `minSdk 26`, `targetSdk 36`)
-- **Node.js 20+** and **Firebase CLI** (for Firestore security rules emulator tests & deploying `firestore.rules` + `firestore.indexes.json`)
+- **Node.js 24** and **Firebase CLI** (for Firestore security rules emulator tests & deploying `firestore.rules` + `firestore.indexes.json`)
 - A Firebase project config at `app/google-services.json` (gitignored):
   1. Create a Firebase project and register Android app `com.veluna.music` with your release/debug SHA-1 & SHA-256 certificate fingerprints.
   2. Enable **Authentication → Google** and **Cloud Firestore**.

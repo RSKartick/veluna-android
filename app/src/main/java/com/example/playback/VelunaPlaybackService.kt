@@ -1,6 +1,7 @@
 package com.example.playback
 
 import android.app.PendingIntent
+import android.net.Uri
 import android.content.Intent
 import android.media.audiofx.Equalizer
 import android.media.audiofx.LoudnessEnhancer
@@ -9,6 +10,7 @@ import androidx.annotation.OptIn
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.ForwardingPlayer
+import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultDataSource
@@ -20,10 +22,14 @@ import androidx.media3.session.MediaSessionService
 import androidx.media3.session.SessionResult
 import com.example.MainActivity
 import com.example.util.SecurityValidators
+import com.google.common.util.concurrent.Futures
+import com.google.common.util.concurrent.ListenableFuture
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
+import java.io.File
+import android.system.Os
 import kotlin.math.roundToInt
 
 class VelunaPlaybackService : MediaSessionService() {
@@ -147,7 +153,7 @@ class VelunaPlaybackService : MediaSessionService() {
     }
 
     @OptIn(UnstableApi::class)
-    private inner class VelunaMediaSessionCallback : MediaSession.Callback {
+    internal inner class VelunaMediaSessionCallback : MediaSession.Callback {
         override fun onConnect(
             session: MediaSession,
             controller: MediaSession.ControllerInfo
@@ -169,6 +175,74 @@ class VelunaPlaybackService : MediaSessionService() {
                 SessionResult.RESULT_ERROR_PERMISSION_DENIED
             }
         }
+
+        override fun onAddMediaItems(
+            mediaSession: MediaSession,
+            controller: MediaSession.ControllerInfo,
+            mediaItems: MutableList<MediaItem>
+        ): ListenableFuture<MutableList<MediaItem>> {
+            validateMediaItems(mediaSession, controller, mediaItems)?.let {
+                return Futures.immediateFailedFuture(it)
+            }
+            return Futures.immediateFuture(mediaItems)
+        }
+
+        override fun onSetMediaItems(
+            mediaSession: MediaSession,
+            controller: MediaSession.ControllerInfo,
+            mediaItems: List<MediaItem>,
+            startIndex: Int,
+            startPositionMs: Long
+        ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> {
+            validateMediaItems(mediaSession, controller, mediaItems)?.let {
+                return Futures.immediateFailedFuture(it)
+            }
+            return Futures.immediateFuture(
+                MediaSession.MediaItemsWithStartPosition(mediaItems, startIndex, startPositionMs)
+            )
+        }
+    }
+
+    private fun validateMediaItems(
+        mediaSession: MediaSession,
+        controller: MediaSession.ControllerInfo,
+        mediaItems: List<MediaItem>
+    ): Exception? {
+        if (!isControllerAuthorized(mediaSession, controller)) {
+            return SecurityException("Unauthorized media controller")
+        }
+        if (mediaItems.any { item ->
+                val uri = item.localConfiguration?.uri ?: return@any true
+                !isAllowedMediaItemUri(uri)
+            }) {
+            return IllegalArgumentException("Media item URI is not allowed")
+        }
+        return null
+    }
+
+    private fun isAllowedMediaItemUri(uri: Uri): Boolean {
+        return when (uri.scheme?.lowercase()) {
+            "https" -> uri.host?.let(SecurityValidators::isKnownPlaybackStreamHost) == true
+            "file" -> uri.path?.let(::isSafeDownloadPath) == true
+            "content" -> {
+                if (uri.authority !in setOf(packageName, "$packageName.fileprovider")) {
+                    false
+                } else {
+                    runCatching {
+                        contentResolver.openFileDescriptor(uri, "r")?.use { descriptor ->
+                            isSafeDownloadPath(Os.readlink("/proc/self/fd/${descriptor.fd}"))
+                        } ?: false
+                    }.getOrDefault(false)
+                }
+            }
+            else -> false
+        }
+    }
+
+    private fun isSafeDownloadPath(path: String): Boolean {
+        val downloadRoot = runCatching { File(filesDir, "downloads").canonicalPath }.getOrNull() ?: return false
+        val canonical = runCatching { File(path).canonicalPath }.getOrNull() ?: return false
+        return canonical.startsWith("$downloadRoot${File.separator}") && File(canonical).isFile
     }
 
     @OptIn(UnstableApi::class)

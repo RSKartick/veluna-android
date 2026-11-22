@@ -261,7 +261,6 @@ class CloudSyncCoordinator(
                     isSignedIn = true,
                     uid = user.uid,
                     displayName = user.displayName ?: cur.displayName,
-                    email = user.email ?: cur.email,
                     photoUrl = SecurityValidators.sanitizeHttpsUrl(user.photoUrl?.toString(), 500) ?: cur.photoUrl,
                     isAuthBusy = false
                 )
@@ -298,7 +297,6 @@ class CloudSyncCoordinator(
                 isSignedIn = true,
                 uid = user.uid,
                 displayName = user.displayName,
-                email = user.email,
                 photoUrl = SecurityValidators.sanitizeHttpsUrl(user.photoUrl?.toString(), 500)
             )
         }
@@ -345,7 +343,6 @@ class CloudSyncCoordinator(
                                 isSignedIn = true,
                                 uid = outcome.user.uid,
                                 displayName = outcome.user.displayName,
-                                email = outcome.user.email,
                                 photoUrl = SecurityValidators.sanitizeHttpsUrl(outcome.user.photoUrl?.toString(), 500),
                                 isAuthBusy = false,
                                 errorMessage = null
@@ -2133,14 +2130,11 @@ class CloudSyncCoordinator(
             )
         } else {
             val pushTs = localPrefsTs.takeIf { it > 0L } ?: now
-            val metaChanged = cloudProfile == null ||
-                cloudProfile.email != user.email ||
-                cloudProfile.photoUrl != safePhotoUrl
+            val metaChanged = cloudProfile == null || cloudProfile.email != null || cloudProfile.photoUrl != safePhotoUrl
             if (cloudProfile == null || localProfChanged || metaChanged || pushTs > cloudPrefsTs) {
                 cloudRepo.upsertUserProfile(
                     prefs = localPrefs,
                     tasteProfile = mergedTaste,
-                    email = user.email,
                     photoUrl = safePhotoUrl,
                     overrideDisplayName = effectiveDisplayName,
                     prefsUpdatedAtMs = pushTs
@@ -3353,7 +3347,6 @@ class CloudSyncCoordinator(
                                 cloudRepo.upsertUserProfile(
                                     prefs = prefs,
                                     tasteProfile = taste,
-                                    email = user.email,
                                     photoUrl = safePhotoUrl,
                                     prefsUpdatedAtMs = prefsTs
                                 )

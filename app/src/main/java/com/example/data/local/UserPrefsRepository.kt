@@ -32,6 +32,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.Transient
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.util.concurrent.atomic.AtomicBoolean
@@ -52,6 +53,7 @@ data class VelunaUserPrefs(
     val playbackSpeed: Float = 1.0f,
     val loudnessNormalization: Boolean = true,
     val hideMusicVideos: Boolean = false,
+    @Transient
     val allowMirrorFallbacks: Boolean = false,
     val eqEnabled: Boolean = false,
     val eqPresetName: String = "Flat",
@@ -897,8 +899,6 @@ class UserPrefsRepository(
         tasteProfile: TasteProfile?
     ) {
         val validHex = backup.customAccentHex?.trim()?.takeIf { SecurityValidators.isValidHexColor(it) }
-        val safeSpeed = if (backup.playbackSpeed.isFinite()) backup.playbackSpeed.coerceIn(0.5f, 2.0f) else 1.0f
-        val safeBands = sanitizeEqBands(backup.eqBandsDb) ?: EqualizerPresets.presets.getValue("Flat")
         val now = System.currentTimeMillis()
         dataStore.edit {
             it[Keys.THEME_PRESET] = backup.themePreset.id
@@ -907,20 +907,10 @@ class UserPrefsRepository(
             else it[Keys.CUSTOM_ACCENT] = validHex
             it[Keys.ADAPT_TO_ARTWORK] = backup.adaptToArtwork
             it[Keys.CORNER_RADIUS] = backup.cornerRadiusDp.coerceIn(4, 24)
-            it[Keys.CLASSIC_PLAYER] = backup.classicPlayerLayout
             it[Keys.AUDIO_QUALITY] = backup.audioQuality.name
             it[Keys.AUTOPLAY] = backup.autoplay
-            it[Keys.PLAYBACK_SPEED] = safeSpeed
             it[Keys.LOUDNESS_NORM] = backup.loudnessNormalization
             it[Keys.HIDE_VIDEOS] = backup.hideMusicVideos
-            it[Keys.ALLOW_MIRROR_FALLBACKS] = backup.allowMirrorFallbacks
-            it[Keys.EQ_ENABLED] = backup.eqEnabled
-            it[Keys.EQ_PRESET] = backup.eqPresetName.trim().take(40).ifBlank { "Flat" }
-            it[Keys.EQ_BANDS] = json.encodeToString(safeBands)
-            it[Keys.LYRICS_PROVIDERS] = normalizeProviderOrder(backup.lyricsProviderOrder)
-            it[Keys.ROMANIZE_LYRICS] = backup.romanizeLyrics
-            it[Keys.SHOW_MOOD_CHIPS] = backup.showMoodChips
-            it[Keys.SHOW_HERO_BACKDROP] = backup.showHeroArtworkBackdrop
             it[Keys.DISPLAY_NAME] = backup.userDisplayName.trim().ifBlank { "Listener" }.take(80)
             if (tasteProfile != null) {
                 it[Keys.ONBOARDING_COMPLETED] = tasteProfile.onboardingCompleted

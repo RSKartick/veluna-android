@@ -23,6 +23,9 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
 import org.junit.After
 import org.junit.Before
@@ -73,6 +76,43 @@ class BackupAndCsvTest {
     fun tearDown() {
         db.close()
         tempDir.deleteRecursively()
+    }
+
+    @Test
+    fun backupCoverUrlsAreRestrictedToDocumentedImageHosts() {
+        assertThat(isAllowedBackupCoverHost("https://i.ytimg.com/vi/abc/hqdefault.jpg")).isTrue()
+        assertThat(isAllowedBackupCoverHost("https://yt3.ggpht.com/a.jpg")).isTrue()
+        assertThat(isAllowedBackupCoverHost("https://lh3.googleusercontent.com/a.jpg")).isTrue()
+        assertThat(isAllowedBackupCoverHost("https://example.com/x.jpg")).isFalse()
+        assertThat(isAllowedBackupCoverHost("http://i.ytimg.com/x.jpg")).isFalse()
+    }
+
+    @Test
+    fun legacyMirrorOptInBackupFieldIsIgnoredAndNotExported() = runBlocking {
+        val configuredJson = Json { ignoreUnknownKeys = true }
+        val imported = configuredJson.decodeFromString<VelunaBackupPayload>(
+            """{"prefs":{"allowMirrorFallbacks":true}}"""
+        )
+
+        assertThat(imported.prefs.allowMirrorFallbacks).isFalse()
+        prefsRepo.applyBackupWithTaste(imported.prefs, null)
+        assertThat(prefsRepo.prefsFlow.first().allowMirrorFallbacks).isFalse()
+
+        val encoded = configuredJson.encodeToString(VelunaBackupPayload(prefs = VelunaUserPrefs()))
+        assertThat(encoded).doesNotContain("allowMirrorFallbacks")
+    }
+
+    @Test
+    fun backupRestore_keepsDevicePlaybackSpeed() = runBlocking {
+        prefsRepo.setPlaybackSpeed(1.0f)
+
+        val backupJson = """
+            {"version":3,"prefs":{"playbackSpeed":1.5}}
+        """.trimIndent()
+
+        repo.importBackupJson(backupJson).getOrThrow()
+
+        assertThat(prefsRepo.prefsFlow.first().playbackSpeed).isEqualTo(1.0f)
     }
 
     @Test
@@ -243,7 +283,7 @@ class BackupAndCsvTest {
         assertThat(v1Result.restoredPlaylists).isEqualTo(1)
         val restoredPrefs = prefsRepo.prefsFlow.first()
         assertThat(restoredPrefs.cornerRadiusDp).isEqualTo(4)
-        assertThat(restoredPrefs.playbackSpeed).isEqualTo(0.5f)
+        assertThat(restoredPrefs.playbackSpeed).isEqualTo(1.0f)
         val likedAfterRestore = repo.likedSongsFlow.first()
         assertThat(likedAfterRestore.find { it.videoId == "v1_like" }?.thumbnail).isNull()
     }
@@ -340,7 +380,7 @@ class BackupAndCsvTest {
                 {
                   "title": "V2 Safe Cover",
                   "description": "Keeps https cover",
-                  "coverUri": "https://images.example.com/v2-art.png",
+                  "coverUri": "https://i.ytimg.com/vi/v2_art/hqdefault.jpg",
                   "tracks": [
                     { "videoId": "v2_trk1", "title": "Song 1", "artists": "Artist 1" }
                   ]
@@ -369,7 +409,7 @@ class BackupAndCsvTest {
         assertThat(safe.cloudKey).startsWith("pl_")
         assertThat(unsafe.cloudKey).startsWith("pl_")
         assertThat(safe.cloudKey).isNotEqualTo(unsafe.cloudKey)
-        assertThat(safe.coverUri).isEqualTo("https://images.example.com/v2-art.png")
+        assertThat(safe.coverUri).isEqualTo("https://i.ytimg.com/vi/v2_art/hqdefault.jpg")
         assertThat(unsafe.coverUri).isNull()
 
         // Re-importing same v2 backup deduplicates by (normalizedTitle, trackSignature)

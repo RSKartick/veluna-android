@@ -15,10 +15,8 @@ import com.example.util.SecurityValidators
 import com.example.util.readUtf8AtMost
 import com.example.util.suspendRunCatching
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Mutex
@@ -63,6 +61,24 @@ private data class CachedStreams(
     val streams: List<ResolvedStream>,
     val cachedAtMs: Long
 )
+
+internal suspend fun <T> resolveMirrorFallbackIfNeeded(
+    primary: List<T>,
+    allowMirrors: Boolean,
+    resolveMirrors: suspend () -> List<T>
+): Result<List<T>> {
+    if (primary.isNotEmpty()) return Result.success(primary)
+    if (!allowMirrors) return Result.failure(IllegalStateException("Unable to resolve audio stream"))
+    return try {
+        resolveMirrors().takeIf { it.isNotEmpty() }
+            ?.let { Result.success(it) }
+            ?: Result.failure(IllegalStateException("Unable to resolve audio stream"))
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (error: Throwable) {
+        Result.failure(error)
+    }
+}
 
 class InnerTubeClient(
     val httpClient: OkHttpClient = OkHttpClient.Builder()
@@ -131,17 +147,6 @@ class InnerTubeClient(
         osVersion = "1.3.21O771",
         deviceMake = "Apple",
         deviceModel = "RealityDevice14,1"
-    )
-
-    private val androidTestsuite = ClientIdentity(
-        key = "ANDROID_TESTSUITE",
-        clientName = "ANDROID_TESTSUITE",
-        clientVersion = "1.9",
-        clientId = "30",
-        userAgent = "com.google.android.youtube/1.9 (Linux; U; Android 11) gzip",
-        osName = "Android",
-        osVersion = "11",
-        androidSdkVersion = "30"
     )
 
     private val androidCreator = ClientIdentity(
@@ -427,41 +432,24 @@ class InnerTubeClient(
             }
 
             suspendRunCatching {
-                val clients = listOf(androidVr, iosMusic, androidTestsuite, androidCreator, visionOs)
+                val clients = listOf(androidVr, iosMusic, androidCreator, visionOs)
                 val out = mutableListOf<ResolvedStream>()
                 val seenUrls = hashSetOf<String>()
                 var lastError: Throwable? = null
 
                 coroutineScope {
                     val channel = Channel<Pair<Boolean, Result<List<ResolvedStream>>>>(Channel.UNLIMITED)
-                    val innerExhausted = CompletableDeferred<Unit>()
-                    val activeInner = java.util.concurrent.atomic.AtomicInteger(clients.size)
-
                     val jobs = clients.map { client ->
                         async {
                             val res = suspendRunCatching { fetchClientStreams(videoId, quality, client) }
                             channel.trySend(false to res)
-                            if (activeInner.decrementAndGet() <= 0) {
-                                innerExhausted.complete(Unit)
-                            }
                         }
                     }
-
-                    // Hedged mirror fallback: triggers immediately if all InnerTube clients fail fast,
-                    // or after 650ms if InnerTube is stalling on the user's network.
-                    val mirrorJob = if (allowMirrorFallbacks) async {
-                        withTimeoutOrNull(650L) { innerExhausted.await() }
-                        val mirrors = suspendRunCatching { resolveMirrorStreamCandidates(videoId, quality) }
-                        channel.trySend(true to mirrors)
-                    } else {
-                        null
-                    }
-
-                    var remaining = jobs.size + (if (mirrorJob != null) 1 else 0)
+                    var remaining = jobs.size
                     var gotFirstSuccess = false
                     while (remaining > 0) {
                         val next = if (!gotFirstSuccess) {
-                            withTimeoutOrNull(6500L) { channel.receiveCatching().getOrNull() }
+                            channel.receiveCatching().getOrNull()
                         } else {
                             // Briefly allow sibling in-flight responses for backup candidates, max 160ms
                             withTimeoutOrNull(160L) { channel.receiveCatching().getOrNull() }
@@ -479,10 +467,16 @@ class InnerTubeClient(
                         }
                         if (gotFirstSuccess && out.size >= 4) break
                     }
-                    mirrorJob?.cancel()
                     jobs.forEach { it.cancel() }
                     channel.close()
                 }
+
+                // Mirrors are a last resort. Only query them when every primary client returned nothing.
+                resolveMirrorFallbackIfNeeded(out.toList(), allowMirrorFallbacks) {
+                    resolveMirrorStreamCandidates(videoId, quality)
+                }.onSuccess { list ->
+                    list.forEach { if (seenUrls.add(it.url)) out.add(it) }
+                }.onFailure { error -> lastError = error }
 
                 if (out.isEmpty()) {
                     throw (lastError ?: IllegalStateException("Unable to resolve audio stream"))
@@ -661,6 +655,12 @@ class InnerTubeClient(
             collected
         }
 
+    private fun isAllowedMirrorStreamUrl(raw: String): Boolean {
+        val url = raw.toHttpUrlOrNull() ?: return false
+        return raw.length <= MAX_STREAM_URL_LENGTH &&
+            url.isHttps && SecurityValidators.isKnownPlaybackStreamHost(url.host)
+    }
+
     private fun fetchPipedMirror(
         host: String,
         videoId: String,
@@ -689,7 +689,7 @@ class InnerTubeClient(
                 val parsed = streams.mapNotNull { el ->
                     val o = el.jsonObject
                     val u = o["url"]?.jsonPrimitive?.contentOrNull
-                        ?.takeIf { SecurityValidators.isSafeHttpsUrl(it, MAX_STREAM_URL_LENGTH) }
+                        ?.takeIf(::isAllowedMirrorStreamUrl)
                         ?: return@mapNotNull null
                     val mime = o["mimeType"]?.jsonPrimitive?.contentOrNull ?: "audio/mp4"
                     val bps = o["bitrate"]?.jsonPrimitive?.intOrNull ?: 128000
@@ -710,7 +710,7 @@ class InnerTubeClient(
                     )
                 }
                 val hls = root["hls"]?.jsonPrimitive?.contentOrNull
-                    ?.takeIf { SecurityValidators.isSafeHttpsUrl(it, MAX_STREAM_URL_LENGTH) }
+                    ?.takeIf(::isAllowedMirrorStreamUrl)
                 if (!hls.isNullOrBlank()) {
                     mirrors.add(
                         ResolvedStream(
@@ -757,7 +757,7 @@ class InnerTubeClient(
                 val parsed = adaptive.mapNotNull { el ->
                     val o = el.jsonObject
                     val u = o["url"]?.jsonPrimitive?.contentOrNull
-                        ?.takeIf { SecurityValidators.isSafeHttpsUrl(it, MAX_STREAM_URL_LENGTH) }
+                        ?.takeIf(::isAllowedMirrorStreamUrl)
                         ?: return@mapNotNull null
                     val type = o["type"]?.jsonPrimitive?.contentOrNull.orEmpty()
                     if (!type.startsWith("audio/")) return@mapNotNull null
