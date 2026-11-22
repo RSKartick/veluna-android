@@ -193,15 +193,7 @@ jobs:
           profile: pixel_6
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
           disable-animations: true
-          script: |
-            bash <<'BASH'
-            set +e
-            chmod +x ./gradlew
-            ./gradlew :app:connectedDebugAndroidTest --no-daemon --info --stacktrace 2>&1 | tee android-test-run.log
-            STATUS=${PIPESTATUS[0]}
-            adb logcat -d -s SecretVaultAndroidTest:I > keystore-logcat.txt 2>/dev/null || true
-            exit "$STATUS"
-            BASH
+          script: bash .github/scripts/run-android-instrumentation-tests.sh
 
       - name: Surface Keystore security inspection results
         if: always()
