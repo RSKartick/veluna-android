@@ -149,17 +149,6 @@ class InnerTubeClient(
         deviceModel = "RealityDevice14,1"
     )
 
-    private val androidTestsuite = ClientIdentity(
-        key = "ANDROID_TESTSUITE",
-        clientName = "ANDROID_TESTSUITE",
-        clientVersion = "1.9",
-        clientId = "30",
-        userAgent = "com.google.android.youtube/1.9 (Linux; U; Android 11) gzip",
-        osName = "Android",
-        osVersion = "11",
-        androidSdkVersion = "30"
-    )
-
     private val androidCreator = ClientIdentity(
         key = "ANDROID_CREATOR",
         clientName = "ANDROID_CREATOR",
@@ -443,7 +432,7 @@ class InnerTubeClient(
             }
 
             suspendRunCatching {
-                val clients = listOf(androidVr, iosMusic, androidTestsuite, androidCreator, visionOs)
+                val clients = listOf(androidVr, iosMusic, androidCreator, visionOs)
                 val out = mutableListOf<ResolvedStream>()
                 val seenUrls = hashSetOf<String>()
                 var lastError: Throwable? = null
