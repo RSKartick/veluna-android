@@ -6,7 +6,7 @@ Native Android music streaming and offline library app built with Kotlin, Jetpac
 
 ## Download & Install (Android 8.0+ / API 26+)
 
-**[Download the latest successful build](https://github.com/RSKartick/veluna-android/releases/download/ci-latest/veluna-android.apk)** (`veluna-android.apk`). Main-branch builds publish this installable debug APK after CI and Android instrumentation tests pass. It is signed with Android's debug key and is intended for preview/testing.
+**[Download the latest successful build](https://github.com/RSKartick/veluna-android/releases/download/ci-latest/veluna-android.apk)** (`veluna-android.apk`). Main-branch builds publish this signed, installable APK after CI and Android instrumentation tests pass. It uses the Firebase configuration and stable signing certificate configured for the app, so Google sign-in works in the downloaded build.
 
 Signed, R8-minified release builds (`com.veluna.music`) are published on **GitHub Releases** from `v*` version tags:
 

@@ -246,37 +246,53 @@ jobs:
       - name: Validate Gradle Wrapper & Setup Gradle
         uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
 
-      - name: Materialize CI Firebase config
+      - name: Require latest APK signing and Firebase secrets
+        env:
+          KS_B64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.RELEASE_KEY_PASSWORD }}
+          GS_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
+          EXPECTED_SHA256: ${{ vars.RELEASE_CERT_SHA256 }}
         run: |
-          cat << 'EOF' > app/google-services.json
-          {
-            "project_info": {
-              "project_number": "100000000000",
-              "project_id": "veluna-ci-test",
-              "storage_bucket": "veluna-ci-test.appspot.com"
-            },
-            "client": [{
-              "client_info": {
-                "mobilesdk_app_id": "1:100000000000:android:0000000000000000",
-                "android_client_info": {"package_name": "com.veluna.music"}
-              },
-              "oauth_client": [{
-                "client_id": "100000000000-ci000000000000000000000000000000.apps.googleusercontent.com",
-                "client_type": 3
-              }],
-              "api_key": [{"current_key": "veluna-ci-emulator-only-key"}],
-              "services": {"appinvite_service": {"other_platform_oauth_client": []}}
-            }],
-            "configuration_version": "1"
-          }
-          EOF
+          [ -n "$KS_B64" ] || { echo "Missing ANDROID_RELEASE_KEYSTORE_BASE64 secret"; exit 1; }
+          [ -n "$KS_PASS" ] || { echo "Missing RELEASE_KEYSTORE_PASSWORD secret"; exit 1; }
+          [ -n "$KEY_ALIAS" ] || { echo "Missing RELEASE_KEY_ALIAS secret"; exit 1; }
+          [ -n "$KEY_PASS" ] || { echo "Missing RELEASE_KEY_PASSWORD secret"; exit 1; }
+          [ -n "$GS_JSON" ] || { echo "Missing GOOGLE_SERVICES_JSON secret"; exit 1; }
+          [ -n "$EXPECTED_SHA256" ] || { echo "Missing RELEASE_CERT_SHA256 repository variable"; exit 1; }
+          printf '%s' "$KS_B64" | tr -d '[:space:]' | base64 -d > "$RUNNER_TEMP/release.jks"
+          printf '%s\n' "$GS_JSON" > app/google-services.json
+          [ -s "$RUNNER_TEMP/release.jks" ] || { echo "Failed to decode release keystore"; exit 1; }
+          [ -s app/google-services.json ] || { echo "Failed to write google-services.json"; exit 1; }
 
-      - name: Assemble installable debug APK
+      - name: Assemble installable signed APK
+        env:
+          RELEASE_KEYSTORE_PATH: ${{ runner.temp }}/release.jks
+          RELEASE_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
         run: |
+          VER_CODE=$((100 + GITHUB_RUN_NUMBER))
           chmod +x ./gradlew
-          ./gradlew :app:assembleDebug --no-daemon --stacktrace
+          ./gradlew :app:assembleRelease \
+            -PvelunaVersionCode="$VER_CODE" \
+            -PvelunaVersionName="ci-${GITHUB_RUN_NUMBER}" \
+            --no-daemon --stacktrace
           mkdir -p dist
-          cp app/build/outputs/apk/debug/app-debug.apk dist/veluna-android.apk
+          cp app/build/outputs/apk/release/app-release.apk dist/veluna-android.apk
+
+      - name: Verify latest APK uses the configured release certificate
+        env:
+          EXPECTED_SHA256: ${{ vars.RELEASE_CERT_SHA256 }}
+        run: |
+          APKSIGNER=$(find "${ANDROID_SDK_ROOT:-$ANDROID_HOME}/build-tools" -name apksigner | sort -V | tail -n 1)
+          [ -n "$APKSIGNER" ] || { echo "apksigner not found"; exit 1; }
+          EXPECTED_NORM=$(printf '%s' "$EXPECTED_SHA256" | tr -d ':' | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+          ACTUAL_CERT_INFO=$("$APKSIGNER" verify --print-certs dist/veluna-android.apk)
+          ACTUAL_NORM=$(printf '%s\n' "$ACTUAL_CERT_INFO" | tr -d ':' | tr '[:upper:]' '[:lower:]')
+          printf '%s\n' "$ACTUAL_NORM" | grep -q "$EXPECTED_NORM" \
+            || { echo "APK certificate SHA-256 mismatch"; exit 1; }
 
       - name: Publish or update the latest successful build
         env:
@@ -286,12 +302,12 @@ jobs:
             gh release upload ci-latest dist/veluna-android.apk --clobber
             gh release edit ci-latest \
               --title "Latest successful build" \
-              --notes "Installable debug APK from commit ${GITHUB_SHA}. Built after CI and Android instrumentation tests passed." \
+              --notes "Signed installable APK from commit ${GITHUB_SHA}. Built after CI and Android instrumentation tests passed." \
               --prerelease
           else
             gh release create ci-latest dist/veluna-android.apk \
               --title "Latest successful build" \
-              --notes "Installable debug APK from commit ${GITHUB_SHA}. Built after CI and Android instrumentation tests passed." \
+              --notes "Signed installable APK from commit ${GITHUB_SHA}. Built after CI and Android instrumentation tests passed." \
               --prerelease \
               --target "${GITHUB_SHA}"
           fi
