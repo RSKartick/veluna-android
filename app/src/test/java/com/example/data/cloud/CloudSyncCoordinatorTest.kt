@@ -2182,12 +2182,17 @@ class CloudSyncCoordinatorTest : FirestoreEmulatorTestBase() {
         assertThat(dev.prefsRepo.getLocalDataProvenance()).isNull()
 
         // Inject process crash mid-restore right after Room applied transient backup playlist
+        // and prevent the import catch block from completing its normal rollback.
         dev.repo.onBeforeDataStoreRestore = {
             throw IllegalStateException("Crash mid backup import after Room apply")
+        }
+        dev.repo.onBeforeRollbackAttempt = {
+            throw IllegalStateException("Simulated process interruption before rollback completes")
         }
         val importResult = kotlin.runCatching { dev.repo.importBackupJson(backupJson) }
         assertThat(importResult.isFailure).isTrue()
         dev.repo.onBeforeDataStoreRestore = null
+        dev.repo.onBeforeRollbackAttempt = null
         // Transient playlist is currently sitting in Room with an uncommitted restore journal!
         assertThat(dev.repo.hasUncommittedRestoreJournal()).isTrue()
         assertThat(dev.dao.getPlaylistsOnce().map { it.title }).containsExactly("Transient Restored Mix")
