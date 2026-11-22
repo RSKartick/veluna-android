@@ -2189,7 +2189,7 @@ class CloudSyncCoordinatorTest : FirestoreEmulatorTestBase() {
         dev.repo.onBeforeRollbackAttempt = {
             throw IllegalStateException("Simulated process interruption before rollback completes")
         }
-        val importResult = kotlin.runCatching { dev.repo.importBackupJson(backupJson) }
+        val importResult = dev.repo.importBackupJson(backupJson)
         assertThat(importResult.isFailure).isTrue()
         dev.repo.onBeforeDataStoreRestore = null
         dev.repo.onBeforeRollbackAttempt = null
