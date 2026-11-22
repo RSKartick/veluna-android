@@ -194,18 +194,23 @@ class VelunaPlaybackService : MediaSessionService() {
         }
     }
 
-    private fun isAllowedMediaItemUri(uri: Uri): Boolean = when (uri.scheme?.lowercase()) {
-        "https" -> uri.host?.let(SecurityValidators::isKnownPlaybackStreamHost) == true
-        "file" -> uri.path?.let(::isSafeDownloadPath) == true
-        "content" -> {
-            if (uri.authority !in setOf(packageName, "$packageName.fileprovider")) return false
-            runCatching {
-                contentResolver.openFileDescriptor(uri, "r")?.use { descriptor ->
-                    isSafeDownloadPath(Os.readlink("/proc/self/fd/${descriptor.fd}"))
-                } ?: false
-            }.getOrDefault(false)
+    private fun isAllowedMediaItemUri(uri: Uri): Boolean {
+        return when (uri.scheme?.lowercase()) {
+            "https" -> uri.host?.let(SecurityValidators::isKnownPlaybackStreamHost) == true
+            "file" -> uri.path?.let(::isSafeDownloadPath) == true
+            "content" -> {
+                if (uri.authority !in setOf(packageName, "$packageName.fileprovider")) {
+                    false
+                } else {
+                    runCatching {
+                        contentResolver.openFileDescriptor(uri, "r")?.use { descriptor ->
+                            isSafeDownloadPath(Os.readlink("/proc/self/fd/${descriptor.fd}"))
+                        } ?: false
+                    }.getOrDefault(false)
+                }
+            }
+            else -> false
         }
-        else -> false
     }
 
     private fun isSafeDownloadPath(path: String): Boolean {
