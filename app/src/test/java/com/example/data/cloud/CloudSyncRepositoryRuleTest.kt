@@ -47,7 +47,6 @@ class CloudSyncRepositoryRuleTest : FirestoreEmulatorTestBase() {
             repo.upsertUserProfile(
                 prefs = VelunaUserPrefs(userDisplayName = "Alice"),
                 tasteProfile = tasteProfile,
-                email = ALICE_EMAIL,
                 photoUrl = "https://example.com/alice.png"
             )
             repo.upsertTasteSeeds(tasteProfile.seedArtists, tasteProfile.seedSongs)
@@ -458,7 +457,6 @@ class CloudSyncRepositoryRuleTest : FirestoreEmulatorTestBase() {
             repo.upsertUserProfile(
                 prefs = VelunaUserPrefs(userDisplayName = "Casey", cornerRadiusDp = 20),
                 tasteProfile = TasteProfile(onboardingCompleted = true, selectedGenres = listOf("Soul")),
-                email = email,
                 photoUrl = null,
                 prefsUpdatedAtMs = prefsTs
             )
