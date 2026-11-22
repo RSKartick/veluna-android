@@ -59,6 +59,7 @@ data class CloudUserProfile(
     @DocumentId val docId: String = "",
     val userId: String = "",
     val displayName: String = "Listener",
+    @Deprecated("not stored")
     val email: String? = null,
     val photoUrl: String? = null,
     val themePreset: String = "default",

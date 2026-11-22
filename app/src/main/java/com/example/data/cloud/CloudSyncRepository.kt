@@ -385,7 +385,6 @@ class CloudSyncRepository(
     suspend fun upsertUserProfile(
         prefs: VelunaUserPrefs,
         tasteProfile: TasteProfile,
-        email: String?,
         photoUrl: String?,
         overrideDisplayName: String? = null,
         prefsUpdatedAtMs: Long = System.currentTimeMillis()
@@ -396,7 +395,6 @@ class CloudSyncRepository(
             .trim()
             .ifBlank { "Listener" }
             .take(80)
-        val safeEmail = email?.trim()?.takeIf { it.isNotEmpty() }?.take(200)
         val safePhoto = SecurityValidators.sanitizeHttpsUrl(photoUrl, 500)
         val safeGenres = tasteProfile.selectedGenres
             .map { it.trim() }
@@ -407,7 +405,7 @@ class CloudSyncRepository(
 
         val mutableFields = mapOf<String, Any?>(
             "displayName" to safeName,
-            "email" to safeEmail,
+            "email" to FieldValue.delete(),
             "photoUrl" to safePhoto,
             "themePreset" to prefs.themePreset.id.take(32),
             "themeMode" to prefs.themeMode.name,
