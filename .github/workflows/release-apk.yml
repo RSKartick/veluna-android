@@ -13,6 +13,10 @@ on:
       - master
   workflow_dispatch:
 
+concurrency:
+  group: ci-latest
+  cancel-in-progress: false
+
 permissions:
   contents: read
 
