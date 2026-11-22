@@ -194,12 +194,13 @@ jobs:
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
           disable-animations: true
           script: |
-            set +e
-            chmod +x ./gradlew
-            ./gradlew :app:connectedDebugAndroidTest --no-daemon --info --stacktrace 2>&1 | tee android-test-run.log
-            STATUS=${PIPESTATUS[0]}
-            adb logcat -d -s SecretVaultAndroidTest:I > keystore-logcat.txt 2>/dev/null || true
-            exit "$STATUS"
+            bash -o pipefail -c '
+              chmod +x ./gradlew
+              ./gradlew :app:connectedDebugAndroidTest --no-daemon --info --stacktrace 2>&1 | tee android-test-run.log
+              STATUS=$?
+              adb logcat -d -s SecretVaultAndroidTest:I > keystore-logcat.txt 2>/dev/null || true
+              exit "$STATUS"
+            '
 
       - name: Surface Keystore security inspection results
         if: always()
