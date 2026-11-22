@@ -367,7 +367,7 @@ class BackupAndCsvTest {
                 {
                   "title": "V2 Safe Cover",
                   "description": "Keeps https cover",
-                  "coverUri": "https://images.example.com/v2-art.png",
+                  "coverUri": "https://i.ytimg.com/vi/v2_art/hqdefault.jpg",
                   "tracks": [
                     { "videoId": "v2_trk1", "title": "Song 1", "artists": "Artist 1" }
                   ]
@@ -396,7 +396,7 @@ class BackupAndCsvTest {
         assertThat(safe.cloudKey).startsWith("pl_")
         assertThat(unsafe.cloudKey).startsWith("pl_")
         assertThat(safe.cloudKey).isNotEqualTo(unsafe.cloudKey)
-        assertThat(safe.coverUri).isEqualTo("https://images.example.com/v2-art.png")
+        assertThat(safe.coverUri).isEqualTo("https://i.ytimg.com/vi/v2_art/hqdefault.jpg")
         assertThat(unsafe.coverUri).isNull()
 
         // Re-importing same v2 backup deduplicates by (normalizedTitle, trackSignature)
