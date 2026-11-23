@@ -1,0 +1,47 @@
+{
+  "project_info": {
+    "project_number": "744853574599",
+    "project_id": "gen-lang-client-0103728237",
+    "storage_bucket": "gen-lang-client-0103728237.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:744853574599:android:88c9dff46c07cc9cd6bfe2",
+        "android_client_info": {
+          "package_name": "com.veluna.music"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "744853574599-dpjtf9m8rrmsephqqnue8tuevp2djq8s.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.veluna.music",
+            "certificate_hash": "db6a5ceafd22595a2942feb2aa4d63d3aa01fd7f"
+          }
+        },
+        {
+          "client_id": "744853574599-5m988ufgclmr7nu7795c5ahmhfc4i1k6.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCjb7aVRlkvKcuPrLOw5zNUfxl4FqIIYik"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "744853574599-5m988ufgclmr7nu7795c5ahmhfc4i1k6.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
